@@ -1,0 +1,43 @@
+name: Release
+
+# Triggered when a version tag is pushed. Builds in Release config, packs
+# Surface.Generator + Surface.Runtime, and pushes the .nupkg files to NuGet.org.
+# Requires the NUGET_API_KEY repository secret to be set in GitHub Settings →
+# Secrets and variables → Actions.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore Surface.slnx
+
+      - name: Build (Release)
+        run: dotnet build Surface.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test tests/Surface.Tests/Surface.Tests.csproj --configuration Release --no-build --verbosity normal
+
+      - name: Pack
+        run: dotnet pack Surface.slnx --configuration Release --no-build --output ./artifacts
+
+      - name: Publish to NuGet
+        run: |
+          dotnet nuget push "./artifacts/*.nupkg" \
+            --api-key "${{ secrets.NUGET_API_KEY }}" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
