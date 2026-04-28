@@ -206,6 +206,23 @@ public sealed class ModelGenerator : IIncrementalGenerator
                 continue;
             }
 
+            // CG007 / CG008 — every [Table] needs exactly one [Id] property.
+            var idCount = 0;
+            foreach (var p in table.Properties)
+            {
+                if (p.Kinds.HasFlag(PropertyKind.Id)) idCount++;
+            }
+            if (idCount == 0)
+            {
+                spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.TableMissingId, Location.None, table.FullName));
+                continue;
+            }
+            if (idCount > 1)
+            {
+                spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.TableHasMultipleIds, Location.None, table.FullName, idCount));
+                continue;
+            }
+
             IdEmitter.Emit(spc, table, graph.IdValueTypeFullName, graph);
 
             var valid = true;
