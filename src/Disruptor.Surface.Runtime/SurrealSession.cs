@@ -345,12 +345,14 @@ public sealed class SurrealSession : IHydrationSink
     // WriterLease and choose to call CommitAsync.
 
     /// <summary>
-    /// Register an entity with this session. Idempotent — repeat calls on the same
-    /// entity do nothing. For entities loaded from the DB (in <c>loadedAtStart</c>) no
-    /// <c>Command.Create</c> is recorded since the row already exists; for fresh entities
-    /// the create is queued, the entity's <c>Bind</c> wires the session into the
-    /// instance, <c>Initialize</c> seeds mandatory references, and <c>Flush</c> drains
-    /// any object-initializer writes that were buffered while the entity was unbound.
+    /// Register a fresh entity with this session. The Create is queued, <c>Bind</c> wires
+    /// the session into the instance, <c>Initialize</c> seeds mandatory references, and
+    /// <c>Flush</c> drains object-initializer writes that were buffered while the entity
+    /// was unbound. Idempotent on the same instance; throws if a different instance with
+    /// the same id is already tracked. Hydrated entities are registered separately via
+    /// <see cref="IHydrationSink.Track"/> — they don't go through this path. Tracking an
+    /// id that was previously loaded-and-then-deleted opens a fresh lifecycle segment;
+    /// the planner will emit <c>DELETE; CREATE</c>.
     /// </summary>
     public T Track<T>(T entity) where T : class, IEntity
     {
@@ -370,11 +372,6 @@ public sealed class SurrealSession : IHydrationSink
         }
 
         entities[entity.Id] = entity;
-        if (loadedAtStart.Contains(entity.Id))
-        {
-            return entity; // hydrated row — no Create, no Initialize re-run.
-        }
-
         entity.Bind(this);
         Record(Command.Create(entity.Id));
         entity.Initialize(this);
@@ -705,12 +702,19 @@ public sealed class SurrealSession : IHydrationSink
             parents.Remove(k);
         }
 
-        // NB: deliberately NOT mutating `references` here. The commit planner needs the
-        // incoming-reference graph intact to resolve [Reject] / [Unset] / [Cascade] —
-        // erasing inbound pointers to the deleted record at session-side made those
-        // decisions unreliable. Reads via GetReferenceOrDefault still resolve to null
-        // after the entity itself is gone (the dict lookup of `entities` misses), so
-        // user-facing reads stay sensible.
+        // Clear OUTBOUND references — entries where `id` is the owner. Otherwise a
+        // recreate-after-delete (Track of a fresh instance with the same id) would see
+        // the dead entity's optional refs bleed through GetReferenceOrDefault, since
+        // entities[id] now hits the new instance.
+        //
+        // INBOUND references — entries where `id` is the target — are preserved on
+        // purpose. The commit planner reads the inbound graph to resolve
+        // [Reject] / [Unset] / [Cascade]; erasing those at session-side made the
+        // decisions unreliable.
+        foreach (var k in references.Keys.Where(k => k.Owner == id).ToList())
+        {
+            references.Remove(k);
+        }
 
         foreach (var k in edges.Keys.Where(k => k.Source == id || k.Target == id).ToList())
         {

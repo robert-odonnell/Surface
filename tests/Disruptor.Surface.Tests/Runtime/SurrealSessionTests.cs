@@ -302,6 +302,58 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
+    public void Track_AfterDelete_OfLoadedId_GetsFreshLifecycle()
+    {
+        // Repro for the zombie-track bug: previously, Track(new T { Id = deletedLoadedId })
+        // hit the loadedAtStart short-circuit and returned without Bind/Create/Initialize/Flush,
+        // leaving an unbound zombie in `entities`. Fix removes that branch — the standard
+        // Bind→Create→Initialize→Flush path runs, and PendingState's Delete→Create segment
+        // logic emits both commands.
+        var session = new SurrealSession();
+        var id = new RecordId("designs", "x");
+
+        var loaded = new StubEntity(id);
+        ((IHydrationSink)session).Track(loaded);
+        session.Delete(loaded);
+
+        var fresh = new StubEntity(id);
+        var tracked = session.Track(fresh);
+
+        Assert.Same(fresh, tracked);
+        Assert.Same(session, fresh.BoundSession);
+        Assert.Equal(new[] { "Bind", "Initialize", "Flush" }, fresh.Calls.ToArray());
+        Assert.Contains(session.Log.Entries, e => e.Op == CommandOp.Delete);
+        Assert.Contains(session.Log.Entries, e => e.Op == CommandOp.Create);
+    }
+
+    [Fact]
+    public void Track_AfterDelete_DoesNotBleed_OutboundReferences()
+    {
+        // CleanupLocalState clears outbound references on Delete so the recreated entity
+        // doesn't inherit the dead one's optional refs via GetReferenceOrDefault. Inbound
+        // refs (where this id was the target) are preserved for the planner.
+        var session = new SurrealSession();
+        var id = new RecordId("designs", "x");
+        var refTargetId = new RecordId("details", "t");
+
+        var loaded = new StubEntity(id);
+        var refTarget = new StubEntity(refTargetId);
+        ((IHydrationSink)session).Track(loaded);
+        ((IHydrationSink)session).Track(refTarget);
+        ((IHydrationSink)session).Reference(loaded.Id, "optionalRef", refTargetId);
+
+        Assert.Same(refTarget, session.GetReferenceOrDefault<StubEntity>(loaded, "optionalRef"));
+
+        session.Delete(loaded);
+
+        var fresh = new StubEntity(id);
+        session.Track(fresh);
+
+        // The recreated instance must not see the dead entity's optional ref.
+        Assert.Null(session.GetReferenceOrDefault<StubEntity>(fresh, "optionalRef"));
+    }
+
+    [Fact]
     public void UnrelateAllFrom_TypedKind_EmitsSingle_BulkCommand()
     {
         var session = new SurrealSession();
