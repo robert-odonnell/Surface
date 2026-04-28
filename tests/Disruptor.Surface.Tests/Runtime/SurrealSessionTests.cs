@@ -302,6 +302,39 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
+    public void Delete_Throws_WhenEntityIsNotTrackedInThisSession()
+    {
+        // Unbound: never seen by any session.
+        var sessionA = new SurrealSession();
+        var unbound = new StubEntity(new RecordId("designs", "u"));
+        Assert.Throws<InvalidOperationException>(() => sessionA.Delete(unbound));
+
+        // Foreign: tracked in B, passed into A.
+        var sessionB = new SurrealSession();
+        var foreign = new StubEntity(new RecordId("designs", "f"));
+        ((IHydrationSink)sessionB).Track(foreign);
+        Assert.Throws<InvalidOperationException>(() => sessionA.Delete(foreign));
+
+        // Different-instance-same-id: identity poison.
+        var id = new RecordId("designs", "d");
+        var tracked = new StubEntity(id);
+        var ghost   = new StubEntity(id);
+        ((IHydrationSink)sessionA).Track(tracked);
+        Assert.Throws<InvalidOperationException>(() => sessionA.Delete(ghost));
+
+        // Double-delete: first Delete removed it from `entities`; second must throw.
+        sessionA.Delete(tracked);
+        Assert.Throws<InvalidOperationException>(() => sessionA.Delete(tracked));
+
+        // None of the failing paths should have fired OnDeleting on the wrong entity.
+        Assert.DoesNotContain("OnDeleting", unbound.Calls);
+        Assert.DoesNotContain("OnDeleting", foreign.Calls);
+        Assert.DoesNotContain("OnDeleting", ghost.Calls);
+        // The legitimate first Delete on `tracked` did fire OnDeleting once.
+        Assert.Single(tracked.Calls, c => c == "OnDeleting");
+    }
+
+    [Fact]
     public void Track_AfterDelete_OfLoadedId_GetsFreshLifecycle()
     {
         // Repro for the zombie-track bug: previously, Track(new T { Id = deletedLoadedId })

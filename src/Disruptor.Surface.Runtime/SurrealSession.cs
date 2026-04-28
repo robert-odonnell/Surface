@@ -551,6 +551,16 @@ public sealed class SurrealSession : IHydrationSink
     public void Delete(IEntity entity)
     {
         ThrowIfClosed();
+        if (!entities.TryGetValue(entity.Id, out var tracked) || !ReferenceEquals(tracked, entity))
+        {
+            // Catches: unbound entities, entities from a different session, the same id
+            // tracked under a different instance, and double-deletes (CleanupLocalState
+            // already removed the entry from `entities`). Without this, OnDeleting fires
+            // on an entity whose `Session` may point elsewhere — split-brain at best.
+            throw new InvalidOperationException(
+                $"Cannot delete {entity.Id}: entity is not currently tracked in this session. " +
+                $"Use Delete(IRecordId) for id-only deletes.");
+        }
         entity.OnDeleting();
         Record(Command.Delete(entity.Id));
         CleanupLocalState(entity.Id);
