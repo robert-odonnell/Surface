@@ -197,26 +197,54 @@ public static class CommitPlanner
     // ──────────────────────────── per-record emission ────────────────────────
 
     /// <summary>
-    /// Walks every record's pending Sets and every relation's endpoints to assemble the
-    /// set of ids that other commands depend on. Used by <see cref="EmitRecord"/> to
-    /// decide whether a freshly-tracked record with no own writes is dead weight (skip)
-    /// or a reference target someone else still needs (emit).
+    /// Walks the Sets of records that survive AND the endpoints of relations that will
+    /// actually emit a command, assembling the set of ids that other commands depend on.
+    /// Used by <see cref="EmitRecord"/> to decide whether a freshly-tracked record with
+    /// no own writes is dead weight (skip) or a reference target someone else still
+    /// needs (emit). Filtering matters because:
+    /// <list type="bullet">
+    ///   <item>A record whose final state is "doesn't exist" has its Sets dropped at
+    ///         emit time anyway — counting its Set values would keep otherwise-dead
+    ///         targets alive (e.g. <c>Create A; Set A.Ref=B; Delete A</c> would keep B's
+    ///         Create alive even though A is going away).</item>
+    ///   <item>A relation whose net effect is no-op (e.g. <c>Relate A→B</c> followed by
+    ///         <c>Unrelate A→B</c> on a fresh edge) doesn't emit anything; counting its
+    ///         endpoints would keep both A and B alive even though neither needs to
+    ///         reach the DB.</item>
+    /// </list>
     /// </summary>
     private static HashSet<RecordId> BuildReferencedIdSet(PendingState pending)
     {
         var refs = new HashSet<RecordId>();
+
         foreach (var rec in pending.Records.Values)
         {
+            // Sets on a not-surviving record are dropped at emit; ignore them.
+            if (!rec.ExistsAtEnd) continue;
+
             foreach (var kv in rec.Current.Sets)
             {
                 if (kv.Value is RecordId rid) refs.Add(rid);
             }
         }
+
         foreach (var rel in pending.Relations.Values)
         {
+            // Mirror EmitRelation's emit-or-not decision so endpoints of net-no-op
+            // relations don't artificially keep their endpoints alive.
+            var emits = rel.State switch
+            {
+                RelationFinalState.Untouched => rel.PayloadSets.Count > 0 || rel.PayloadUnsets.Count > 0,
+                RelationFinalState.Related   => !rel.ExistedAtStart || rel.PayloadSets.Count > 0 || rel.PayloadUnsets.Count > 0,
+                RelationFinalState.Unrelated => rel.ExistedAtStart,
+                _                            => false,
+            };
+            if (!emits) continue;
+
             refs.Add(rel.Source);
             refs.Add(rel.Target);
         }
+
         return refs;
     }
 

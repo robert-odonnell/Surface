@@ -30,6 +30,46 @@ public sealed class CommitPlannerTests
     }
 
     [Fact]
+    public void DeadWeight_BIsDropped_WhenAReferencingItIsDeletedSamePacket()
+    {
+        // Create A; Set A.Ref=B; Delete A. A is fresh-Create+Delete (elides via #6).
+        // B has no own writes and is referenced ONLY by the now-doomed A. The
+        // referenced-id set must NOT count A's Sets (A doesn't survive), so B is
+        // also dead weight. Plan should be empty.
+        var pending = Empty();
+        var a = new RecordId("a", "1");
+        var b = new RecordId("b", "1");
+
+        pending.ApplyCommand(Command.Create(a));
+        pending.ApplyCommand(Command.Create(b));
+        pending.ApplyCommand(Command.Set(a, "ref", b));
+        pending.ApplyCommand(Command.Delete(a));
+
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
+        Assert.Empty(plan);
+    }
+
+    [Fact]
+    public void DeadWeight_BothEndpoints_OfNoOpRelation_AreDropped()
+    {
+        // Create A; Create B; Relate A→B; Unrelate A→B. Edge didn't exist at start, so
+        // EmitRelation emits nothing for the no-op relation. A and B have no own
+        // writes; nothing else points at them. Referenced-id set must NOT count
+        // endpoints of non-emitting relations — both Creates should drop.
+        var pending = Empty();
+        var a = new RecordId("a", "1");
+        var b = new RecordId("b", "1");
+
+        pending.ApplyCommand(Command.Create(a));
+        pending.ApplyCommand(Command.Create(b));
+        pending.ApplyCommand(Command.Relate(a, "rel", b));
+        pending.ApplyCommand(Command.Unrelate(a, "rel", b));
+
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
+        Assert.Empty(plan);
+    }
+
+    [Fact]
     public void DeadWeight_Suppression_DoesNotApply_WhenAnotherCommandReferences()
     {
         // Same fresh record but its id appears as the value of another record's Set —

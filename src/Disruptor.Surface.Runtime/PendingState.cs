@@ -34,10 +34,22 @@ public sealed class RecordPendingState
 
     public LifecycleSegment Current => Segments[Segments.Count - 1];
 
-    /// <summary>True iff the record exists after applying every recorded command.</summary>
-    public bool ExistsAtEnd => ExistedAtStart
-        ? !Current.Deleted || Current.Created || Current.Upserted
-        : Current.Created || Current.Upserted;
+    /// <summary>
+    /// True iff the record will exist in the database after the planner emits this
+    /// pending state. A final-segment delete tombstones it regardless of earlier
+    /// Created bits (so fresh <c>Create + Delete</c> in the same segment is correctly
+    /// "doesn't exist"); otherwise the record exists if it was loaded OR was created
+    /// in the final segment.
+    /// </summary>
+    public bool ExistsAtEnd
+    {
+        get
+        {
+            var final = Current;
+            if (final.Deleted) return false;
+            return ExistedAtStart || final.Created || final.Upserted;
+        }
+    }
 
     public RecordPendingState(RecordId id, bool existedAtStart)
     {

@@ -53,7 +53,7 @@ public sealed class PendingStateTests
     }
 
     [Fact]
-    public void Create_Then_Delete_StaysInOneSegment_WithBothBitsSet()
+    public void Create_Then_Delete_StaysInOneSegment_AndDoesNotExistAtEnd()
     {
         var pending = Empty();
         var id = new RecordId("designs", "x");
@@ -65,11 +65,10 @@ public sealed class PendingStateTests
         Assert.Single(rec.Segments);
         Assert.True(rec.Current.Created);
         Assert.True(rec.Current.Deleted);
-        // Both bits are set in the single segment — `ExistsAtEnd` reads the Created bit
-        // as dominant (so the planner sees "this record was minted in the packet").
-        // The planner pairs this with a final DELETE; the matching CommitPlanner test
-        // pins that behaviour.
-        Assert.True(rec.ExistsAtEnd);
+        // Final-segment Delete tombstones the record regardless of earlier Created bits;
+        // a fresh Create+Delete in the same packet is "doesn't exist at end". The planner
+        // elides both — see CommitPlannerTests.NewRecord_CreatedThenDeletedInSamePacket_IsNoOp.
+        Assert.False(rec.ExistsAtEnd);
     }
 
     [Fact]
