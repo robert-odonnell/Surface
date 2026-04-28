@@ -110,6 +110,11 @@ internal static class PartialEmitter
 
         WriteSessionPlumbing(builder, memberIndent);
 
+        // The id anchor is emitted unconditionally — the runtime needs IEntity.Id to read
+        // every entity's identity, and the typed {Name}Id struct is always emitted by
+        // IdEmitter regardless of whether the user opted into a public-facing [Id] property.
+        EmitIdAnchor(builder, memberIndent, table);
+
         var mandatoryRefs = new List<PropertyModel>();
 
         foreach (var t in partialProps)
@@ -201,7 +206,7 @@ internal static class PartialEmitter
             .AppendLine(" session)")
             .Append(indent).AppendLine("{")
             .Append(indent).AppendLine("    if (_pendingWrites is null) return;")
-            .Append(indent).AppendLine("    foreach (var (f, v, k) in _pendingWrites) session.SetField(this.Id, f, v, k);")
+            .Append(indent).AppendLine($"    foreach (var (f, v, k) in _pendingWrites) session.SetField((({EntityInterface})this).Id, f, v, k);")
             .Append(indent).AppendLine("    _pendingWrites = null;")
             .Append(indent).AppendLine("}")
             .AppendLine();
@@ -221,7 +226,7 @@ internal static class PartialEmitter
             .AppendLine()
             .Append(indent).AppendLine("{")
             .Append(indent).AppendLine("    if (_session is null) (_pendingWrites ??= new()).Add((field, value, kind));")
-            .Append(indent).AppendLine("    else _session.SetField(this.Id, field, value, kind);")
+            .Append(indent).AppendLine($"    else _session.SetField((({EntityInterface})this).Id, field, value, kind);")
             .Append(indent).AppendLine("}")
             .AppendLine()
             .Append(indent)
@@ -229,7 +234,7 @@ internal static class PartialEmitter
             .AppendLine()
             .Append(indent).AppendLine("{")
             .Append(indent).AppendLine("    if (_session is null) _pendingWrites?.RemoveAll(p => p.Field == field);")
-            .Append(indent).AppendLine("    else _session.UnsetField(this.Id, field, kind);")
+            .Append(indent).AppendLine($"    else _session.UnsetField((({EntityInterface})this).Id, field, kind);")
             .Append(indent).AppendLine("}");
     }
 
@@ -330,21 +335,43 @@ internal static class PartialEmitter
             .AppendLine(", __items));");
     }
 
+    /// <summary>
+    /// Emits the always-present id anchor: the private <c>_id</c> backing field plus the
+    /// explicit <c>IEntity.Id</c> accessor. Both lazy-mint via <c>{Name}Id.New()</c> on
+    /// first read; <c>Hydrate</c> writes the field directly when loading from the DB.
+    /// The user's optional <c>[Id]</c>-tagged partial property (if declared) is emitted
+    /// separately by <see cref="EmitIdProperty"/> as a delegate to this anchor.
+    /// </summary>
+    private static void EmitIdAnchor(StringBuilder builder, string indent, TableModel table)
+    {
+        var idType = $"global::{(string.IsNullOrEmpty(table.Namespace) ? table.Name : $"{table.Namespace}.{table.Name}")}Id";
+        builder
+            .AppendLine()
+            .Append(indent)
+            .Append("private ")
+            .Append(idType)
+            .AppendLine("? _id;")
+            .Append(indent)
+            .Append("global::Disruptor.Surface.Runtime.RecordId ")
+            .Append(EntityInterface)
+            .Append(".Id => _id ??= ")
+            .Append(idType)
+            .AppendLine(".New();");
+    }
+
+    /// <summary>
+    /// Emits the user-facing <c>[Id]</c> partial property — a get/set delegate to the
+    /// id anchor. Only called when the user has declared an <c>[Id]</c>-tagged partial
+    /// property; without one, the entity simply has no public-facing Id surface (the
+    /// anchor still exists internally).
+    /// </summary>
     private static void EmitIdProperty(StringBuilder builder, string indent, PropertyModel p)
     {
         var idType = p.Type.FullyQualifiedName;
         var idArg = StripNullable(idType);
         var access = FormatAccessibility(p.DeclaredAccessibility);
 
-        // Id is lazy-minted on first read (`Id.New()`) and overridable via the setter so
-        // callers can construct entity handles with a known id — handy for "look this
-        // record up in a freshly loaded workspace" patterns. Hydrate also goes through
-        // the setter (well, the backing field — same effect) when reloading.
         builder
-            .Append(indent)
-            .Append("private ")
-            .Append(idArg)
-            .AppendLine("? _id;")
             .Append(indent)
             .Append(access)
             .Append(" partial ")
@@ -356,17 +383,16 @@ internal static class PartialEmitter
             .Append(indent)
             .Append("    get => _id ??= ")
             .Append(idArg)
-            .AppendLine(".New();")
+            .AppendLine(".New();");
+        if (p.HasSetter)
+        {
+            builder
+                .Append(indent)
+                .AppendLine("    set => _id = value;");
+        }
+        builder
             .Append(indent)
-            .AppendLine("    set => _id = value;")
-            .Append(indent)
-            .AppendLine("}")
-            // IEntity.Id needs the canonical RecordId; the typed id's implicit conversion
-            // bridges the two so workspace internals key off a single struct type.
-            .Append(indent)
-            .Append("global::Disruptor.Surface.Runtime.RecordId ")
-            .Append(EntityInterface)
-            .AppendLine(".Id => this.Id;");
+            .AppendLine("}");
     }
 
     private static void EmitDataProperty(StringBuilder builder, string indent, PropertyModel p)
@@ -828,7 +854,7 @@ internal static class PartialEmitter
                 .Append(local)
                 .AppendLine(");")
                 .Append(indent)
-                .Append("    session.SetField(this.Id, ")
+                .Append($"    session.SetField((({EntityInterface})this).Id, ")
                 .Append(fieldLit)
                 .Append(", ")
                 .Append(local)
@@ -1099,7 +1125,7 @@ internal static class PartialEmitter
             .Append(typeArg)
             .Append(">(json, ")
             .Append(fieldLit)
-            .AppendLine(", this.Id, sink);");
+            .AppendLine($", (({EntityInterface})this).Id, sink);");
     }
 
     private static void EmitHydrateParent(StringBuilder builder, string indent, PropertyModel p)
@@ -1113,7 +1139,7 @@ internal static class PartialEmitter
             .Append(ToCamel(p.Name))
             .AppendLine("))")
             .Append(indent)
-            .Append("        sink.Parent(this.Id, __parent_")
+            .Append($"        sink.Parent((({EntityInterface})this).Id, __parent_")
             .Append(ToCamel(p.Name))
             .AppendLine(");");
     }

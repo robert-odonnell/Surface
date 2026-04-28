@@ -28,8 +28,12 @@ public sealed class DiagnosticsTests
     }
 
     [Fact]
-    public void CG007_TableMissingId()
+    public void NoIdAttribute_IsLegal_AnchorIsAlwaysEmitted()
     {
+        // [Id] is optional — without it, the entity has no public-facing Id surface, but
+        // the runtime still works because PartialEmitter unconditionally emits the _id
+        // anchor and IEntity.Id, and IdEmitter unconditionally emits the {Name}Id struct.
+        // CG007 was retired alongside this change.
         var src = """
             using Disruptor.Surface.Annotations;
             namespace M;
@@ -38,7 +42,8 @@ public sealed class DiagnosticsTests
             }
             """;
         var (_, _, runDiags, _) = GeneratorHarness.Run(src);
-        Assert.Contains(runDiags, d => d.Id == "CG007");
+        Assert.DoesNotContain(runDiags, d => d.Id == "CG007");
+        Assert.Empty(runDiags.Where(d => d.Severity == DiagnosticSeverity.Error));
     }
 
     [Fact]

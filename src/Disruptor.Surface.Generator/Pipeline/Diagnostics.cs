@@ -46,18 +46,15 @@ internal static class Diagnostics
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
-    public static readonly DiagnosticDescriptor TableMissingId = new(
-        id: "CG007",
-        title: "Table is missing its [Id] property",
-        messageFormat: "[Table] '{0}' must declare exactly one [Id] property; none were found",
-        category: Category,
-        defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
+    // CG007 retired (2026-04) — [Id] is now optional. The id anchor is always emitted by
+    // PartialEmitter and the {Name}Id struct is always emitted by IdEmitter; the user's
+    // optional [Id] partial property is purely a public-facing accessor that delegates
+    // to the anchor.
 
     public static readonly DiagnosticDescriptor TableHasMultipleIds = new(
         id: "CG008",
         title: "Table has more than one [Id] property",
-        messageFormat: "[Table] '{0}' declares {1} [Id] properties; exactly one is required",
+        messageFormat: "[Table] '{0}' declares {1} [Id] properties; at most one is allowed",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);

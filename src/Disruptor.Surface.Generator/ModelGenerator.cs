@@ -247,16 +247,14 @@ public sealed class ModelGenerator : IIncrementalGenerator
                 continue;
             }
 
-            // CG007 / CG008 — every [Table] needs exactly one [Id] property.
+            // CG008 — at most one [Id] property (the user's optional public-facing accessor).
+            // [Id] is no longer required: the generator always emits the internal id anchor
+            // and the IEntity.Id accessor on every [Table]; [Id] just opts the user into a
+            // public partial property that delegates to the anchor.
             var idCount = 0;
             foreach (var p in table.Properties)
             {
                 if (p.Kinds.HasFlag(PropertyKind.Id)) idCount++;
-            }
-            if (idCount == 0)
-            {
-                spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.TableMissingId, Location.None, table.FullName));
-                continue;
             }
             if (idCount > 1)
             {
