@@ -3,11 +3,19 @@
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <RootNamespace>Surface.Runtime</RootNamespace>
+
     <IsPackable>true</IsPackable>
+    <PackageId>Surface.Runtime</PackageId>
+    <Description>Runtime types for Surface — typed RecordId structs, SurrealSession, IRelationKind, WriterLease, the Surreal HTTP transport, and the commit pipeline. Pair with Surface.Generator (analyzer-style PackageReference) to drive [Table]-based code generation.</Description>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Ulid" Version="1.4.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>
