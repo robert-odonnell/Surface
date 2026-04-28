@@ -125,13 +125,15 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
-    public void RelationCollectionRead_UsesTypedKind()
+    public void RelationCollectionRead_UsesTypedKind_AndDirectionalMethod()
     {
         var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
         var allSrc = GeneratorHarness.AllGeneratedSource(result);
 
-        // Restrictions on Constraint should read via QueryRelated<Restricts, IEntity>.
-        Assert.Contains("Session.QueryRelated<global::M.Restricts, global::Surface.Runtime.IEntity>(this)", allSrc);
+        // Constraint.Restrictions is the FORWARD side of restricts → QueryOutgoing.
+        Assert.Contains("Session.QueryOutgoing<global::M.Restricts, global::Surface.Runtime.IEntity>(this)", allSrc);
+        // Design.Restrictions is the INVERSE side of restricts → QueryIncoming.
+        Assert.Contains("Session.QueryIncoming<global::M.Restricts, global::M.Constraint>(this)", allSrc);
     }
 
     [Fact]

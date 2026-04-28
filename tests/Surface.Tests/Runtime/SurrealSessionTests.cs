@@ -165,6 +165,79 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
+    public void QueryOutgoing_Returns_Targets_OnlyWhenOwnerIsSource()
+    {
+        var session = new SurrealSession();
+        var src = new StubEntity(new RecordId("a", "1"));
+        var tgt1 = new StubEntity(new RecordId("b", "1"));
+        var tgt2 = new StubEntity(new RecordId("b", "2"));
+
+        session.HydrateTrack(src);
+        session.HydrateTrack(tgt1);
+        session.HydrateTrack(tgt2);
+
+        session.HydrateEdge(src.Id, "stub_edge", tgt1.Id);
+        session.HydrateEdge(src.Id, "stub_edge", tgt2.Id);
+        // Reverse-direction edge that should NOT appear in src's outgoing query.
+        session.HydrateEdge(tgt1.Id, "stub_edge", src.Id);
+
+        var outgoing = session.QueryOutgoing<StubEntity>(src, "stub_edge");
+        Assert.Equal(2, outgoing.Count);
+        Assert.Contains(tgt1, outgoing);
+        Assert.Contains(tgt2, outgoing);
+    }
+
+    [Fact]
+    public void QueryIncoming_Returns_Sources_OnlyWhenOwnerIsTarget()
+    {
+        var session = new SurrealSession();
+        var src1 = new StubEntity(new RecordId("a", "1"));
+        var src2 = new StubEntity(new RecordId("a", "2"));
+        var tgt = new StubEntity(new RecordId("b", "1"));
+
+        session.HydrateTrack(src1);
+        session.HydrateTrack(src2);
+        session.HydrateTrack(tgt);
+
+        session.HydrateEdge(src1.Id, "stub_edge", tgt.Id);
+        session.HydrateEdge(src2.Id, "stub_edge", tgt.Id);
+        // Reverse-direction edge that should NOT appear in tgt's incoming query.
+        session.HydrateEdge(tgt.Id, "stub_edge", src1.Id);
+
+        var incoming = session.QueryIncoming<StubEntity>(tgt, "stub_edge");
+        Assert.Equal(2, incoming.Count);
+        Assert.Contains(src1, incoming);
+        Assert.Contains(src2, incoming);
+    }
+
+    [Fact]
+    public void TypedKind_QueryOutgoing_And_QueryIncoming_Differ_ForSameSelfReferentialEdge()
+    {
+        // The whole point of #3: same-table self-referential edges where forward and
+        // inverse must produce different results. Without directional split, "the other
+        // endpoint" returns BOTH neighbours regardless of which side the owner is on.
+        var session = new SurrealSession();
+        var a = new StubEntity(new RecordId("node", "a"));
+        var b = new StubEntity(new RecordId("node", "b"));
+        var c = new StubEntity(new RecordId("node", "c"));
+
+        session.HydrateTrack(a);
+        session.HydrateTrack(b);
+        session.HydrateTrack(c);
+
+        session.HydrateEdge(a.Id, "stub_edge", b.Id);   // a → b
+        session.HydrateEdge(c.Id, "stub_edge", a.Id);   // c → a
+
+        var outgoing = session.QueryOutgoing<StubKind, StubEntity>(a);
+        var incoming = session.QueryIncoming<StubKind, StubEntity>(a);
+
+        Assert.Single(outgoing);
+        Assert.Contains(b, outgoing);
+        Assert.Single(incoming);
+        Assert.Contains(c, incoming);
+    }
+
+    [Fact]
     public void UnrelateAllFrom_TypedKind_EmitsSingle_BulkCommand()
     {
         var session = new SurrealSession();

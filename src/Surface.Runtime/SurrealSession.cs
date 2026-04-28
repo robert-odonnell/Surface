@@ -183,29 +183,44 @@ public sealed class SurrealSession
     }
 
     /// <summary>
-    /// Walks the in-memory edge index for a given edge kind and returns the entity-typed
-    /// "other endpoint" of every edge that touches <paramref name="owner"/>. Forward and
-    /// inverse traversal both fall out of this single walk because Edges store the
-    /// canonical (source, edge, target) row only — direction is decided by which endpoint
-    /// matches the owner.
+    /// Walks the in-memory edge index along <paramref name="edgeKind"/> with
+    /// <paramref name="owner"/> on the SOURCE side; returns the entity-typed targets.
+    /// The forward/inverse split is explicit so same-table relations and overlapping
+    /// role types don't end up reading "the other endpoint" both ways at once.
     /// </summary>
-    public IReadOnlyCollection<T> QueryRelated<T>(IEntity owner, string edgeKind)
+    public IReadOnlyCollection<T> QueryOutgoing<T>(IEntity owner, string edgeKind)
         where T : class
     {
         var results = new List<T>();
         foreach (var kv in edges)
         {
-            if (!kv.Value || kv.Key.Edge != edgeKind)
+            if (!kv.Value || kv.Key.Edge != edgeKind || kv.Key.Source != owner.Id)
             {
                 continue;
             }
+            if (entities.TryGetValue(kv.Key.Target, out var other) && other is T typed)
+            {
+                results.Add(typed);
+            }
+        }
+        return results;
+    }
 
-            RecordId? otherId =
-                kv.Key.Source == owner.Id ? kv.Key.Target :
-                kv.Key.Target == owner.Id ? kv.Key.Source :
-                null;
-
-            if (otherId is { } id && entities.TryGetValue(id, out var other) && other is T typed)
+    /// <summary>
+    /// Walks the in-memory edge index along <paramref name="edgeKind"/> with
+    /// <paramref name="owner"/> on the TARGET side; returns the entity-typed sources.
+    /// </summary>
+    public IReadOnlyCollection<T> QueryIncoming<T>(IEntity owner, string edgeKind)
+        where T : class
+    {
+        var results = new List<T>();
+        foreach (var kv in edges)
+        {
+            if (!kv.Value || kv.Key.Edge != edgeKind || kv.Key.Target != owner.Id)
+            {
+                continue;
+            }
+            if (entities.TryGetValue(kv.Key.Source, out var other) && other is T typed)
             {
                 results.Add(typed);
             }
@@ -448,8 +463,10 @@ public sealed class SurrealSession
     public void UnrelateAllTo<TKind>(IEntity target) where TKind : IRelationKind
         => UnrelateAllTo(target.Id, TKind.EdgeName);
 
-    public IReadOnlyCollection<TElement> QueryRelated<TKind, TElement>(IEntity owner) where TKind : IRelationKind where TElement : class
-        => QueryRelated<TElement>(owner, TKind.EdgeName);
+    public IReadOnlyCollection<TElement> QueryOutgoing<TKind, TElement>(IEntity owner) where TKind : IRelationKind where TElement : class
+        => QueryOutgoing<TElement>(owner, TKind.EdgeName);
+    public IReadOnlyCollection<TElement> QueryIncoming<TKind, TElement>(IEntity owner) where TKind : IRelationKind where TElement : class
+        => QueryIncoming<TElement>(owner, TKind.EdgeName);
     public IReadOnlyCollection<IRecordId> QueryRelatedIds<TKind>(IEntity owner) where TKind : IRelationKind
         => QueryRelatedIds(owner, TKind.EdgeName);
     public IReadOnlyCollection<IRecordId> QueryInverseRelatedIds<TKind>(IEntity owner) where TKind : IRelationKind

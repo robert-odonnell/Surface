@@ -607,12 +607,14 @@ internal static class PartialEmitter
     /// A getter-only collection property carrying a forward/inverse relation attribute
     /// maps to either:
     /// <list type="bullet">
-    ///   <item>Within-aggregate → <c>Session.QueryRelated&lt;TKind, TElement&gt;(this)</c>
-    ///         (entity-typed, joins against the snapshot's <c>entities</c> dict; the kind
-    ///         marker carries the edge name).</item>
-    ///   <item>Cross-aggregate → <c>Session.QueryRelatedIds&lt;TKind&gt;(this)</c> /
-    ///         <c>QueryInverseRelatedIds&lt;TKind&gt;(this)</c> (id-typed, since
-    ///         target/source entities live in a different aggregate snapshot).</item>
+    ///   <item>Within-aggregate → <c>Session.QueryOutgoing&lt;TKind, TElement&gt;(this)</c>
+    ///         on the forward side, <c>Session.QueryIncoming&lt;TKind, TElement&gt;(this)</c>
+    ///         on the inverse side. Direction is explicit so same-table relations and
+    ///         overlapping role types don't accidentally read both endpoints.</item>
+    ///   <item>Cross-aggregate → <c>Session.QueryRelatedIds&lt;TKind&gt;(this)</c> on the
+    ///         forward side / <c>Session.QueryInverseRelatedIds&lt;TKind&gt;(this)</c> on
+    ///         the inverse side (id-typed, since target/source entities live in a
+    ///         different aggregate snapshot).</item>
     /// </list>
     /// </summary>
     private static void EmitRelationProperty(StringBuilder builder, string indent, PropertyModel p, ModelGraph graph)
@@ -647,6 +649,10 @@ internal static class PartialEmitter
             ? elementType.DisplayName
             : StripNullable(elementType.FullyQualifiedName);
 
+        var directionalMethod = p.RelationRole == MethodRole.ForwardRelation
+            ? "QueryOutgoing"
+            : "QueryIncoming";
+
         builder
             .Append(indent)
             .Append(access)
@@ -654,7 +660,9 @@ internal static class PartialEmitter
             .Append(declared)
             .Append(' ')
             .Append(p.Name)
-            .Append(" => Session.QueryRelated<")
+            .Append(" => Session.")
+            .Append(directionalMethod)
+            .Append('<')
             .Append(kindMarker)
             .Append(", ")
             .Append(elementArg)
