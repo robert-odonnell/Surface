@@ -594,24 +594,42 @@ public sealed class SurrealSession : IHydrationSink
 
     /// <summary>
     /// Flushes pending writes as a single SurrealQL script. The session is closed on
-    /// successful return — even when there was nothing to commit; the one-shot invariant
-    /// is "load → mutate → commit, then loop." If <paramref name="lease"/> is supplied,
-    /// it's renewed before the flush so a stolen lease aborts the commit cleanly via
+    /// return regardless of outcome — the one-shot invariant is "load → mutate →
+    /// commit (or fail), then loop." If <paramref name="lease"/> is supplied, it's
+    /// renewed before the flush so a stolen lease aborts the commit cleanly via
     /// <see cref="WriterLeaseStolenException"/>. The session doesn't own the lease —
     /// the caller manages its lifetime separately.
+    /// <para>
+    /// Single exception boundary for the whole session: any exception thrown during
+    /// commit (RenderBatch, lease renewal, or the transport call) marks the session
+    /// closed and propagates to the caller. The domain decides whether to reload-and-
+    /// retry or give up; the session itself never recovers — there is no half-committed
+    /// state to reason about. Nothing else in the runtime catches exceptions; everything
+    /// else is allowed to throw freely and lands here.
+    /// </para>
     /// </summary>
     public async Task CommitAsync(ISurrealTransport transport, WriterLease? lease = null, CancellationToken ct = default)
     {
         ThrowIfClosed();
-        var (sql, parameters) = RenderBatch();
-        if (!string.IsNullOrEmpty(sql))
+        try
         {
-            if (lease is not null)
+            var (sql, parameters) = RenderBatch();
+            if (!string.IsNullOrEmpty(sql))
             {
-                await lease.RenewAsync(ct);
-            }
+                if (lease is not null)
+                {
+                    await lease.RenewAsync(ct);
+                }
 
-            await transport.ExecuteAsync(sql, parameters, ct);
+                await transport.ExecuteAsync(sql, parameters, ct);
+            }
+        }
+        catch
+        {
+            // Fail-closed at the transport boundary. Don't pretend we can recover —
+            // the domain catches the rethrown exception and decides what to do.
+            _closed = true;
+            throw;
         }
 
         Log.Clear();

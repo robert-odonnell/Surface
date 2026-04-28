@@ -93,6 +93,25 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
+    public async Task CommitAsync_OnTransportFailure_ClosesSession_AndRethrows()
+    {
+        // Fail-closed at the single exception boundary: any exception out of the
+        // transport call marks the session closed and propagates to the domain.
+        // The session never tries to reason about partial commits or recover state.
+        var session = new SurrealSession();
+        var entity = session.Track(new StubEntity(new RecordId("designs", "x")));
+        session.SetField(entity.Id, "description", "edited"); // bare Create gets dead-weight-elided; force non-empty SQL
+        var transport = new ThrowingTransport(new IOException("boom"));
+
+        var ex = await Assert.ThrowsAsync<IOException>(() => session.CommitAsync(transport));
+        Assert.Equal("boom", ex.Message);
+
+        Assert.True(session.IsClosed);
+        // Subsequent reads/writes throw because the session is closed.
+        Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(new RecordId("designs", "y"))));
+    }
+
+    [Fact]
     public async Task CommitAsync_OnClosedSession_Throws()
     {
         var session = new SurrealSession();
@@ -440,5 +459,15 @@ public sealed class SurrealSessionTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
             => Task.FromResult(JsonDocument.Parse("[]"));
+    }
+
+    /// <summary>Always-throws transport — drives the fail-closed-on-exception test.</summary>
+    private sealed class ThrowingTransport : ISurrealTransport
+    {
+        private readonly Exception ex;
+        public ThrowingTransport(Exception ex) => this.ex = ex;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+            => Task.FromException<JsonDocument>(ex);
     }
 }
