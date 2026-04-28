@@ -1,8 +1,10 @@
 using Surface.Runtime;
 using Surface.Sample;
 using Surface.Sample.Models;
+using Surface.Sample.Relations;
 
-const string AggregateName = "design";
+const string DesignAggregate = "design";
+const string ReviewAggregate = "review";
 
 // Mirror of: surreal start --bind 127.0.0.1:8000 --default-namespace project-brain
 //                          --default-database workspace --username root --password secret
@@ -16,13 +18,14 @@ var config = new SurrealConfig(
 
 using var http = new HttpClient();
 await using var transport = new SurrealHttpClient(config, http);
+var workspace = new Workspace();
 
 Console.WriteLine("=== Surface.Sample harness ===");
 Console.WriteLine($"Connected: {config.Url}  ns={config.Namespace}  db={config.Database}\n");
 
-// ── 1. Apply schema (generator-emitted, idempotent). One transport call per chunk
-//    so a failure pinpoints which one broke. Iterate `Workspace.Schema` directly if
-//    you need to filter / log / transact per chunk.
+// ── 1. Apply schema. One transport call per chunk so a failure pinpoints which one
+//    broke. Iterate `Workspace.Schema` directly when you want to filter / log /
+//    transact per chunk.
 Console.WriteLine($"Applying schema ({Workspace.Schema.Count} chunks)...");
 await Workspace.ApplySchemaAsync(transport);
 Console.WriteLine("  schema ready.\n");
@@ -31,189 +34,329 @@ Console.WriteLine("  schema ready.\n");
 // half-released lease from a crashed previous attempt. Production code wouldn't do this.
 await transport.ExecuteAsync("DELETE writer_lease;");
 
-// ── 2. Acquire the per-aggregate writer lease. Held for the duration of this scope;
-//    released on dispose. CommitAsync renews it before flushing so a stolen lease
-//    aborts the write cleanly via WriterLeaseStolenException.
-Console.WriteLine($"Acquiring writer lease '{AggregateName}'...");
-await using var lease = await WriterLease.AcquireAsync(transport, AggregateName);
-Console.WriteLine($"  held by {lease.HolderId}\n");
-
-// ── 3. Mint a fresh Design aggregate (no preceding load — we're seeding).
-//var designId = new DesignId(Ulid.Parse("01KQ7AF5MDP9VPBMJFEYHZ32VH"));//) await SeedAndCommit();
-
-var seededIds = new List<DesignId>();
+// ── 2. Seed three Design aggregates. Each pass acquires + releases its own writer
+//    lease so the per-aggregate granularity is exercised.
+var seededDesignIds = new List<DesignId>();
 for (var i = 0; i < 3; i++)
 {
-    seededIds.Add(await SeedAndCommit($"seed-{i}"));
+    seededDesignIds.Add(await SeedAndCommitDesign($"seed-{i}"));
 }
 
-// ── 4. Reload one of the just-seeded designs. The loader must scope by parent path
-//    back to the root — if it doesn't, we'd see all 10 designs' children show up here.
-await ReloadAndPrint(seededIds[2]);
+// ── 3. Seed a Review aggregate that assesses the third Design. Exercises cross-
+//    aggregate edges (Review.Assesses → Design, Issue.Concerns → Constraint), plus
+//    within-aggregate edges that aren't `restricts` (Finding.Informs → Issue,
+//    Finding.Cites → Observation, DesignChange.Resolves → Issue).
+var reviewId = await SeedAndCommitReview(seededDesignIds[2]);
+
+// ── 4. Reload + print. Verifies the round-trip including SurrealArray<Scenario>
+//    contents, cross-aggregate id collections, and within-aggregate edge reads.
+await ReloadAndPrintDesign(seededDesignIds[2]);
+await ReloadAndPrintReview(reviewId);
+
+// ── 5. Lease theft demo — acquire a lease, simulate theft via direct DELETE, then
+//    attempt commit and observe the typed exception.
+await DemoLeaseTheft(seededDesignIds[2]);
 
 return 0;
 
-async Task<DesignId> SeedAndCommit(string text)
+async Task<DesignId> SeedAndCommitDesign(string text)
 {
-    var session = new SurrealSession();
+    Console.WriteLine($"--- Seeding design '{text}' ---");
+    await using var lease = await WriterLease.AcquireAsync(transport, DesignAggregate);
+
+    var session = new SurrealSession(Workspace.ReferenceRegistry);
+    var design = session.Track(new Design
     {
-        var design = session.Track(new Design
+        RepositoryRoot = $"design.repository_root: {text}",
+        Description = $"design.description: {text}",
+        Details = new Details
         {
-            RepositoryRoot = $"design.repository_root: {text}",
-            Description = $"design.description: {text}",
-            Details = new Details
-            {
-                Header = $"design.details.header: {text}",
-                Summary = $"design.details.summary: {text}",
-                Text = $"design.details.text: {text}"
-            }
-        });
+            Header = $"design.details.header: {text}",
+            Summary = $"design.details.summary: {text}",
+            Text = $"design.details.text: {text}"
+        }
+    });
 
+    var constraint = session.Track(new Constraint
+    {
+        Design = design,
+        Details = MintDetails($"design.constraint"),
+        Description = $"design.constraint.description: {text}"
+    });
 
-        //var constraint0 = new Constraint
-        //{
-        //    Design = design,
-        //    Details = CreateDetails("design.constraint.0"),
-        //    Description = $"design.constraint.0.description: {text}"
-        //};
-        //var constraint1 = new Constraint
-        //{
-        //    Design = design,
-        //    Details = CreateDetails("design.constraint.1"),
-        //    Description = $"design.constraint.1.description: {text}"
-        //};
-        //var constraint2 = new Constraint
-        //{
-        //    Design = design,
-        //    Details = CreateDetails("design.constraint.2"),
-        //    Description = $"design.constraint.2.description: {text}"
-        //};
-        var constraint3 = session.Track(new Constraint
+    for (var i = 0; i < 2; i++)
+    {
+        var epic = session.Track(new Epic
         {
             Design = design,
-            Details = CreateDetails("design.constraint.3"),
-            Description = $"design.constraint.3.description: {text}"
+            Details = MintDetails($"design.epic.{i}"),
+            Description = $"design.epic.{i}.description: {text}"
         });
 
-        for (int i = 0; i < 2; i++)
+        for (var j = 0; j < 2; j++)
         {
-            var epic = session.Track(new Epic
+            var feature = session.Track(new Feature
             {
                 Design = design,
-                Details = CreateDetails($"design.epic.{i}"),
-                Description = $"design.epic.{i}.description: {text}"
+                Epic = epic,
+                Details = MintDetails($"design.epic.{i}.feature.{j}"),
+                Description = $"design.epic.{i}.feature.{j}.description: {text}"
             });
 
-            for (int j = 0; j < 2; j++)
+            for (var k = 0; k < 2; k++)
             {
-                var feature = session.Track(new Feature
+                var userStory = session.Track(new UserStory
                 {
                     Design = design,
-                    Epic = epic,
-                    Details = CreateDetails($"design.epic.{i}.feature.{j}"),
-                    Description = $"design.epic.{i}.feature.{j}.description: {text}"
+                    Feature = feature,
+                    Details = MintDetails($"design.epic.{i}.feature.{j}.user_story.{k}"),
+                    AsA = $"as a user-{text}",
+                    IWant = $"i want feature-{i}.{j}.{k}",
+                    SoThat = $"so that {text}"
                 });
 
-                for (int k = 0; k < 2; k++)
+                for (var l = 0; l < 2; l++)
                 {
-                    var userStory = session.Track(new UserStory
+                    var ac = session.Track(new AcceptanceCriteria
                     {
                         Design = design,
-                        Feature = feature,
-                        Details = CreateDetails($"design.epic.{i}.feature.{j}.user_story.{k}"),
-                        AsA = $"design.epic.{i}.feature.{j}.user_story.{k}.as_a: {text}",
-                        IWant = $"design.epic.{i}.feature.{j}.user_story.{k}.i_want: {text}",
-                        SoThat = $"design.epic.{i}.feature.{j}.user_story.{k}.so_that: {text}"
+                        UserStory = userStory,
+                        Details = MintDetails($"design.epic.{i}.feature.{j}.user_story.{k}.acceptance_criteria.{l}"),
+                    });
+                    var test = session.Track(new Test
+                    {
+                        Design = design,
+                        UserStory = userStory,
+                        Details = MintDetails($"design.epic.{i}.feature.{j}.user_story.{k}.test.{l}"),
                     });
 
-                    for (var l = 0; l < 2; l++)
+                    constraint.Restricts(userStory);
+                    constraint.Restricts(ac);
+                    constraint.Restricts(test);
+
+                    // Within-aggregate `validates` edge: each Test validates its sibling
+                    // AcceptanceCriteria. Exercised so the harness covers more than just
+                    // `restricts` for the within-aggregate edge surface.
+                    session.Relate<Validates>(test, ac);
+
+                    for (var m = 0; m < 3; m++)
                     {
-                        var acceptanceCriteria = session.Track(new AcceptanceCriteria
-                        {
-                            Design = design,
-                            UserStory = userStory,
-                            Details = CreateDetails(
-                                $"design.epic.{i}.feature.{j}.user_story.{k}.acceptance_criteria.{l}"
-                            ),
-                        });
-                        var test = session.Track(new Test
-                        {
-                            Design = design,
-                            UserStory = userStory,
-                            Details = CreateDetails($"design.epic.{i}.feature.{j}.user_story.{k}.test.{l}"),
-                        });
-                        //constraint0.Restricts(userStory);
-                        //constraint1.Restricts(acceptanceCriteria);
-                        //constraint2.Restricts(test);
-                        constraint3.Restricts(userStory);
-                        constraint3.Restricts(acceptanceCriteria);
-                        constraint3.Restricts(test);
-                        for (var m = 0; m < 3; m++)
-                        {
-                            acceptanceCriteria.Scenarios.Add(
-                                new Scenario(
-                                    $"design.epic.{i}.feature.{j}.user_story.{k}.acceptance_criteria.{l}.scenario.{m}.kind: {text}",
-                                    $"design.epic.{i}.feature.{j}.user_story.{k}.acceptance_criteria.{l}.scenario.{m}.description: {text}"
-                                )
-                            );
-                            test.Facts.Add(
-                                new Fact(
-                                    $"design.epic.{i}.feature.{j}.user_story.{k}.test.{l}.fact.{m}.kind: {text}",
-                                    $"design.epic.{i}.feature.{j}.user_story.{k}.test.{l}.fact.{m}.arrange: {text}",
-                                    $"design.epic.{i}.feature.{j}.user_story.{k}.test.{l}.fact.{m}.act: {text}",
-                                    $"design.epic.{i}.feature.{j}.user_story.{k}.test.{l}.fact.{m}.assert: {text}"
-                                )
-                            );
-                        }
+                        ac.Scenarios.Add(new Scenario(
+                            $"scenario.{m}.kind",
+                            $"scenario.{m}.description: {text}"));
+                        test.Facts.Add(new Fact(
+                            $"fact.{m}.kind",
+                            $"fact.{m}.arrange",
+                            $"fact.{m}.act",
+                            $"fact.{m}.assert"));
                     }
                 }
             }
         }
+    }
 
-
-        Console.WriteLine($"Seeded design {design.Id}");
-        Console.WriteLine($"  pending: {session.Pending.Records.Count} records, {session.Log.Count} commands queued");
-        Console.WriteLine();
-
-        Console.WriteLine("Committing via SurrealHttpClient...");
-        await session.CommitAsync(transport, lease);
-        Console.WriteLine($"  committed; pending now: {session.Pending.Records.Count} records\n");
-
+    Console.WriteLine($"  pending: {session.Pending.Records.Count} records, {session.Log.Count} commands");
+    await session.CommitAsync(transport, lease);
+    Console.WriteLine($"  committed; design id = {design.Id}\n");
     return design.Id;
 
-    Details CreateDetails(string prefix)
-        => new()
-        {
-            Header = $"{prefix}.details.header: {text}",
-            Summary = $"{prefix}.details.summary: {text}",
-            Text = $"{prefix}.details.text: {text}"
-        };
-    }
+    Details MintDetails(string prefix) => new()
+    {
+        Header = $"{prefix}.details.header: {text}",
+        Summary = $"{prefix}.details.summary: {text}",
+        Text = $"{prefix}.details.text: {text}"
+    };
 }
 
-async Task ReloadAndPrint(DesignId designId)
+async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId)
 {
-    Console.WriteLine($"Reloading Design aggregate {designId}...");
-    var workspace = new Workspace();
-    var reloaded = await workspace.LoadDesignAsync(transport, designId);
+    Console.WriteLine($"--- Seeding review of {targetDesignId} ---");
 
-    var design = reloaded.Get<Design>(designId)
+    // Pre-load the target design so we can pick a real Constraint id to link `Concerns`
+    // against (cross-aggregate edges are id-typed; the link is just an id, not a typed
+    // entity). This is the canonical "load other aggregate to discover its ids" pattern.
+    var preload = await workspace.LoadDesignAsync(transport, targetDesignId);
+    var design = preload.Get<Design>(targetDesignId)
+        ?? throw new InvalidOperationException($"design {targetDesignId} did not hydrate");
+    var someConstraintId = design.Constraints.First().Id;
+
+    await using var lease = await WriterLease.AcquireAsync(transport, ReviewAggregate);
+    var session = new SurrealSession(Workspace.ReferenceRegistry);
+
+    var review = session.Track(new Review
+    {
+        Outcome = "needs-work",
+        Mode = "synchronous",
+        State = "open",
+        Details = new Details { Header = "review header", Summary = "review summary", Text = "review text" }
+    });
+
+    var observation = session.Track(new Observation
+    {
+        Review = review,
+        Kind = "behavioural",
+        Description = "design conflates concerns A and B",
+        Excerpt = "see line 42",
+        Confidence = "high",
+        Details = new Details { Header = "obs header", Summary = "obs summary", Text = "obs text" }
+    });
+
+    var finding = session.Track(new Finding
+    {
+        Review = review,
+        Kind = "structural",
+        Recommendation = "split A and B into separate aggregates",
+        Details = new Details { Header = "finding header", Summary = "finding summary", Text = "finding text" }
+    });
+
+    var issue = session.Track(new Issue
+    {
+        Review = review,
+        Severity = "high",
+        Disposition = "accepted",
+        DispositionReason = "valid concern",
+        Details = new Details { Header = "issue header", Summary = "issue summary", Text = "issue text" }
+    });
+
+    var change = session.Track(new DesignChange
+    {
+        Review = review,
+        Details = new Details { Header = "change header", Summary = "change summary", Text = "change text" }
+    });
+
+    // Within-aggregate edges: Finding informs Issue, Finding cites Observation,
+    // DesignChange resolves Issue.
+    session.Relate<Informs>(finding, issue);
+    session.Relate<Cites>(finding, observation);
+    session.Relate<Resolves>(change, issue);
+
+    // Cross-aggregate edges (Review → Design): Review assesses the Design, Observation
+    // references it, Issue concerns one of its Constraints, DesignChange revises it.
+    session.Relate<Assesses>(review.Id, targetDesignId);
+    session.Relate<Surface.Sample.Relations.References>(observation.Id, targetDesignId);
+    session.Relate<Concerns>(issue.Id, someConstraintId);
+    session.Relate<Revises>(change.Id, targetDesignId);
+
+    Console.WriteLine($"  pending: {session.Pending.Records.Count} records, {session.Log.Count} commands");
+    await session.CommitAsync(transport, lease);
+    Console.WriteLine($"  committed; review id = {review.Id}\n");
+    return review.Id;
+}
+
+async Task ReloadAndPrintDesign(DesignId designId)
+{
+    Console.WriteLine($"--- Reloading Design {designId} ---");
+    var session = await workspace.LoadDesignAsync(transport, designId);
+
+    var design = session.Get<Design>(designId)
                  ?? throw new InvalidOperationException($"Loader didn't hydrate {designId}.");
 
     Console.WriteLine($"  description:     '{design.Description}'");
     Console.WriteLine($"  repository_root: '{design.RepositoryRoot}'");
     Console.WriteLine(
-        $"  details:         {design.Details?.Id}  header='{design.Details?.Header}'  summary='{design.Details?.Summary}'"
-    );
+        $"  details:         {design.Details?.Id}  header='{design.Details?.Header}'");
     Console.WriteLine($"  epics ({design.Epics.Count}):");
     foreach (var e in design.Epics)
     {
-        Console.WriteLine($"    - {e.Id}  description='{e.Description}'  details={e.Details?.Id}");
+        Console.WriteLine($"    - {e.Id}  '{e.Description}'");
     }
 
     Console.WriteLine($"  constraints ({design.Constraints.Count}):");
     foreach (var c in design.Constraints)
     {
-        Console.WriteLine($"    - {c.Id}  description='{c.Description}'  details={c.Details?.Id}");
+        Console.WriteLine($"    - {c.Id}  '{c.Description}'");
     }
+
+    // SurrealArray round-trip — drill into one acceptance criteria, print scenario count
+    // and the first scenario's content. Tests survive the same way via Test.Facts.
+    var firstAc = design.Epics
+        .SelectMany(e => session.QueryChildren<Feature>(e, "features"))
+        .SelectMany(f => session.QueryChildren<UserStory>(f, "user_stories"))
+        .SelectMany(u => session.QueryChildren<AcceptanceCriteria>(u, "acceptance_criteria"))
+        .FirstOrDefault();
+    if (firstAc is not null)
+    {
+        Console.WriteLine($"  acceptance_criteria sample: {firstAc.Id}  scenarios.Count={firstAc.Scenarios.Count}");
+        if (firstAc.Scenarios.Count > 0)
+        {
+            var s = firstAc.Scenarios[0];
+            Console.WriteLine($"    scenario[0]: kind='{s.Kind}'  desc='{s.Description}'");
+        }
+    }
+
+    Console.WriteLine();
 }
+
+async Task ReloadAndPrintReview(ReviewId reviewId)
+{
+    Console.WriteLine($"--- Reloading Review {reviewId} ---");
+    var session = await workspace.LoadReviewAsync(transport, reviewId);
+
+    var review = session.Get<Review>(reviewId)
+                 ?? throw new InvalidOperationException($"Loader didn't hydrate {reviewId}.");
+
+    Console.WriteLine($"  outcome: '{review.Outcome}'  mode: '{review.Mode}'  state: '{review.State}'");
+    Console.WriteLine($"  details: {review.Details?.Id}  header='{review.Details?.Header}'");
+    Console.WriteLine($"  findings: {review.Findings.Count}, observations: {review.Observations.Count}, issues: {review.Issues.Count}, design_changes: {review.DesignChanges.Count}");
+
+    Console.WriteLine($"  cross-agg → assesses ({review.Assessments.Count}):");
+    foreach (var id in review.Assessments)
+    {
+        Console.WriteLine($"    - {id}");
+    }
+    foreach (var obs in review.Observations)
+    {
+        Console.WriteLine($"  observation {obs.Id} references ({obs.References.Count}):");
+        foreach (var id in obs.References)
+        {
+            Console.WriteLine($"    - {id}");
+        }
+    }
+    foreach (var iss in review.Issues)
+    {
+        Console.WriteLine($"  issue {iss.Id} concerns ({iss.Concerns.Count}):");
+        foreach (var id in iss.Concerns)
+        {
+            Console.WriteLine($"    - {id}");
+        }
+    }
+
+    Console.WriteLine();
+}
+
+async Task DemoLeaseTheft(DesignId designId)
+{
+    Console.WriteLine("--- Lease theft recovery demo ---");
+    await using var lease = await WriterLease.AcquireAsync(transport, DesignAggregate);
+    var session = await workspace.LoadDesignAsync(transport, designId);
+    var design = session.Get<Design>(designId)!;
+    // Mutate, but don't commit yet.
+    var beforeReload = design.Description;
+    Console.WriteLine($"  loaded; current description: '{beforeReload}'");
+
+    // Simulate another writer stealing the lease — direct DELETE wipes the lock row
+    // out from under us. Real life would be a TTL expiring + another acquirer claiming.
+    await transport.ExecuteAsync("DELETE writer_lease;");
+    Console.WriteLine("  simulated lease theft (DELETE writer_lease;)");
+
+    // The (now-invalid) writer attempts to commit. RenewAsync runs first inside
+    // CommitAsync; it should detect the missing/stolen row and throw.
+    var rwSession = new SurrealSession(Workspace.ReferenceRegistry);
+    var rwTracked = rwSession.Track(new Design { Id = designId, Description = beforeReload + " [edit]" });
+    try
+    {
+        await rwSession.CommitAsync(transport, lease);
+        Console.WriteLine("  ⚠  commit succeeded — lease theft NOT detected (unexpected)");
+    }
+    catch (WriterLeaseStolenException ex)
+    {
+        Console.WriteLine($"  caught WriterLeaseStolenException: {ex.Message}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"  caught {ex.GetType().Name}: {ex.Message}");
+    }
+
+    Console.WriteLine();
+}
+
