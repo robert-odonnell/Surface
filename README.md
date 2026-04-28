@@ -116,10 +116,10 @@ runtime library. Real consumer projects do the same.
 ## Building
 
 ```sh
-dotnet build Surface.sln
+dotnet build Surface.slnx
 ```
 
-Generated files land in `src/Surface.Sample/obj/Debug/net9.0/generated/Surface.Generator/Surface.Generator.ModelGenerator/`
+Generated files land in `src/Surface.Sample/obj/Debug/net10.0/generated/Surface.Generator/Surface.Generator.ModelGenerator/`
 — inspect them to see what the generator emitted for a given `[Table]` class.
 
 ## Running the harness

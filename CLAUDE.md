@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & run
 
-- Build the whole solution: `dotnet build Surface.sln`
+- Build the whole solution: `dotnet build Surface.slnx`
 - Build just the generator (no consumer): `dotnet build src/Surface.Generator/Surface.Generator.csproj`
 - Build just the runtime library: `dotnet build src/Surface.Runtime/Surface.Runtime.csproj`
 - Build the consumer (this triggers source generation): `dotnet build src/Surface.Sample/Surface.Sample.csproj`
-- Generated files land in `src/Surface.Sample/obj/Debug/net9.0/generated/Surface.Generator/Surface.Generator.ModelGenerator/` — inspect these to see what the generator actually emitted for a given `[Table]` class. `EmitCompilerGeneratedFiles=true` is set in `Surface.Sample.csproj` to make this directory authoritative.
+- Generated files land in `src/Surface.Sample/obj/Debug/net10.0/generated/Surface.Generator/Surface.Generator.ModelGenerator/` — inspect these to see what the generator actually emitted for a given `[Table]` class. `EmitCompilerGeneratedFiles=true` is set in `Surface.Sample.csproj` to make this directory authoritative.
 - Force a clean re-run of the generator: `dotnet build … --no-incremental`. The generator caches by record equality, so a stale `.g.cs` from a deleted source class lingers as an orphan in the generated dir until you wipe it manually.
 - Run the harness against a live Surreal: `dotnet run --project src/Surface.Sample` (see `## Running the harness` in `README.md`).
 
@@ -16,9 +16,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Three projects, dependencies fan out from `Surface.Sample`:
 
-- `src/Surface.Generator` (`netstandard2.0`, `IsRoslynComponent=true`) — the incremental Roslyn source generator. Cannot reference `net9.0` types; everything in `Model/` is hand-rolled to be equatable so the incremental pipeline can dedupe. Bundles `Humanizer.Core` as an analyzer dep via the `GetDependencyTargetPaths` MSBuild trick (see `Surface.Generator.csproj`) — without that, the analyzer host can't load `Humanizer.dll`.
-- `src/Surface.Runtime` (`net9.0`) — the library half: every type generated code targets (`SurrealSession`, `IEntity`, `IRelationKind`, `RecordId`, `SurrealArray`, `WriterLease`, `CommitPlanner`, `PendingState`, `IReferenceRegistry`, `ReferenceFieldInfo`, `HydrationJson`, the Surreal HTTP transport). Namespace `Surface.Runtime`. Single package dep: `Ulid`. Consumers add a `ProjectReference` (or `PackageReference` once published).
-- `src/Surface.Sample` (`net9.0`) — the test bed: the schema modeled in `[Table]` classes, the `[CompositionRoot]`-tagged `Workspace` partial, and a console-app harness in `Program.cs`. `ProjectReference` to `Surface.Runtime`, plus `OutputItemType="Analyzer"` on the generator so it picks up `[Table]`-driven emission without taking a runtime dependency on the generator assembly.
+- `src/Surface.Generator` (`netstandard2.0`, `IsRoslynComponent=true`) — the incremental Roslyn source generator. Cannot reference `net10.0` types; everything in `Model/` is hand-rolled to be equatable so the incremental pipeline can dedupe. Bundles `Humanizer.Core` as an analyzer dep via the `GetDependencyTargetPaths` MSBuild trick (see `Surface.Generator.csproj`) — without that, the analyzer host can't load `Humanizer.dll`.
+- `src/Surface.Runtime` (`net10.0`) — the library half: every type generated code targets (`SurrealSession`, `IEntity`, `IRelationKind`, `RecordId`, `SurrealArray`, `WriterLease`, `CommitPlanner`, `PendingState`, `IReferenceRegistry`, `ReferenceFieldInfo`, `HydrationJson`, the Surreal HTTP transport). Namespace `Surface.Runtime`. Single package dep: `Ulid`. Consumers add a `ProjectReference` (or `PackageReference` once published).
+- `src/Surface.Sample` (`net10.0`) — the test bed: the schema modeled in `[Table]` classes, the `[CompositionRoot]`-tagged `Workspace` partial, and a console-app harness in `Program.cs`. `ProjectReference` to `Surface.Runtime`, plus `OutputItemType="Analyzer"` on the generator so it picks up `[Table]`-driven emission without taking a runtime dependency on the generator assembly.
 
 ## Generator pipeline (read this before touching `Surface.Generator`)
 
