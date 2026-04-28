@@ -17,19 +17,19 @@ namespace MyApp.Model;
 [Table, AggregateRoot]
 public partial class Design
 {
-    [Id]        public partial DesignId Id { get; set; }
-    [Reference] public partial Details? Details { get; set; }
-    [Property]  public partial string Description { get; set; }
-    [Children]  public partial IReadOnlyCollection<Constraint> Constraints { get; }
+    [Id]                public partial DesignId Id { get; set; }
+    [Reference, Inline] public partial Details? Details { get; set; }
+    [Property]          public partial string Description { get; set; }
+    [Children]          public partial IReadOnlyCollection<Constraint> Constraints { get; }
 }
 
 [Table]
 public partial class Constraint
 {
-    [Id]        public partial ConstraintId Id { get; set; }
-    [Reference] public partial Details? Details { get; set; }
-    [Parent]    public partial Design Design { get; set; }
-    [Property]  public partial string Description { get; set; }
+    [Id]                public partial ConstraintId Id { get; set; }
+    [Reference, Inline] public partial Details? Details { get; set; }
+    [Parent]            public partial Design Design { get; set; }
+    [Property]          public partial string Description { get; set; }
 }
 ```
 
@@ -40,15 +40,20 @@ public partial class Constraint
 public partial class Workspace { }
 ```
 
+`[Inline]` marks owned-sidecar references that hydrate alongside their owner; plain
+`[Reference]` is a foreign pointer that stores only the id.
+
 The generator emits everything needed to make this work end-to-end:
 
 - Per-table `{Name}Id` `readonly record struct` with implicit conversion to the canonical `RecordId`
 - A `Workspace.LoadDesignAsync(transport, id, ct)` instance method (grafted onto your `[CompositionRoot]` partial) that hydrates the whole aggregate from SurrealDB in a single nested-`SELECT`
 - A `SurrealSession` surface with sync reads (`design.Description`, `design.Constraints`) and mutations queued to a dirty batch
 - `SurrealSession.CommitAsync(transport, lease?)` rendering the dirty batch as a single SurrealQL script
-- A `Restricts : IRelationKind` marker class for every forward relation attribute, so `session.Relate<Restricts>(constraint, userStory)` is type-checked at compile time
-- A `GeneratedSchema.Script` chunked DDL list — `IReadOnlyList<string>`, runtime's `writer_lease` table + entity tables + per-`[Table]` fields + per-relation table, each as its own chunk (idempotent: `DEFINE … IF NOT EXISTS`)
-- Diagnostics (CG001–CG019) that catch model-level mistakes at compile time
+- A `Restricts : IRelationKind` marker class per forward relation attribute, so `session.Relate<Restricts>(constraint, userStory)` is type-checked at compile time
+- Directional read primitives (`Session.QueryOutgoing<TKind, T>(this)`, `Session.QueryIncoming<TKind, T>(this)`) — no ambiguity on self-referential edges
+- `Workspace.Schema` (`IReadOnlyList<string>` of idempotent DDL chunks) and `Workspace.ApplySchemaAsync(transport)` — model-scoped, no process globals
+- `Workspace.ReferenceRegistry` carrying the per-model `[Reference]` field metadata (delete behaviour) the commit planner reads through
+- Diagnostics (CG001–CG020) that catch model-level mistakes at compile time
 
 The library promise is **minimal intrusion**: the generator never forces a base class, ctor, or
 inherited member on you. The `[CompositionRoot]` partial is yours — wire transport, caches,
@@ -60,11 +65,10 @@ telemetry, and DI however you want. The library only contributes the load method
 using var http = new HttpClient();
 await using var transport = new SurrealHttpClient(SurrealConfig.Default(), http);
 
-// Bootstrap (idempotent — every run is fine). Each chunk runs in its own transport
-// call so a failure pinpoints which chunk broke; many chunks lets you also filter,
-// log, or run them in separate transactions if your migration story needs that.
-foreach (var chunk in GeneratedSchema.Script)
-    await transport.ExecuteAsync(chunk);
+// Bootstrap (idempotent — every run is fine). One transport call per chunk so a
+// failure pinpoints which one broke. Iterate `Workspace.Schema` directly when you
+// want to filter, run in custom transactions, or log per-chunk progress.
+await Workspace.ApplySchemaAsync(transport);
 
 // Construct your composition root once at startup. The generator grafts the Load*Async
 // methods onto your partial — ctor + transport plumbing are entirely yours.
@@ -148,11 +152,12 @@ grafts the per-aggregate load methods onto it.
 | `[Id]`                | `partial {Name}Id Id { get; set; }`                       | Lazy-minted typed id; assignable for "construct a handle to a known record"                 |
 | `[Property]`          | `partial T Name { get; set; }`                            | Backing field + setter that buffers/forwards via `__WriteField`. Get-only also legal.       |
 | `[Property]`          | `partial SurrealArray<T> Name { get; }`                   | Inline `array<object>` column with mutation-aware wrapper                                   |
-| `[Reference]`         | `partial T Name { get; }` (mandatory)                     | `OnCreate{Name}` hook fires from `IEntity.Initialize`; auto-mints a fresh target via `new`  |
-| `[Reference]`         | `partial T? Name { get; set; }` (optional)                | Setter routes through `__WriteField`/`__ClearField` with `FieldKind.Reference`              |
+| `[Reference]`         | `partial T Name { get; }` (mandatory)                     | Foreign pointer; `OnCreate{Name}` hook auto-mints a fresh target via `new`. Hydrates as id only. |
+| `[Reference]`         | `partial T? Name { get; set; }` (optional)                | Foreign pointer; setter routes through `__WriteField`/`__ClearField` with `FieldKind.Reference`. |
+| `[Reference, Inline]` | either shape above, plus `[Inline]`                       | Owned-sidecar — loader emits `field.*` projection, hydrates the linked record alongside its owner. |
 | `[Parent]`            | `partial T Name { get; set; }`                            | `Session.GetParent<T>(this)` + `__WriteField(..., FieldKind.Parent)`                        |
 | `[Children]`          | `partial IReadOnlyCollection<T> Name { get; }`            | Reverse-fk traversal via `Session.QueryChildren`                                            |
-| `[CompositionRoot]`   | tag on a partial class                                    | Generator emits `Load{Root}Async(transport, id, ct)` per `[AggregateRoot]` as instance methods |
+| `[CompositionRoot]`   | tag on a partial class                                    | Generator grafts per-`[AggregateRoot]` `Load{Root}Async` plus `Schema` / `ApplySchemaAsync` / `ReferenceRegistry` |
 
 Plus aggregate / relation marker attributes:
 
@@ -184,26 +189,40 @@ Plus aggregate / relation marker attributes:
   (drains object-initializer writes that were buffered while the entity was unbound).
   `SetField` cascades into `Track` for any `IEntity` value, so nested object
   initialisers auto-track without an explicit `Track` per fresh ref.
-- **Typed relation kinds.** Every forward relation attribute (e.g. `RestrictsAttribute`)
-  gets a sibling marker class (`Restricts : IRelationKind`) emitted alongside it.
-  `session.Relate<Restricts>(constraint, userStory)` is the canonical typed mutation;
-  `Session.QueryRelated<Restricts, IEntity>(this)` is the typed read. The marker carries
-  the SurrealDB edge name as a static property; no string literals in user code.
+- **Typed relation kinds + directional reads.** Every forward relation attribute
+  (e.g. `RestrictsAttribute`) gets a sibling marker class (`Restricts : IRelationKind`)
+  emitted alongside it. `session.Relate<Restricts>(constraint, userStory)` is the
+  canonical typed mutation; `Session.QueryOutgoing<Restricts, T>(this)` /
+  `Session.QueryIncoming<Restricts, T>(this)` are the explicit-direction reads.
+  The marker carries the SurrealDB edge name as a static property; no string literals in user code.
+- **Owned-sidecar carve-out.** `[Inline]` paired with `[Reference]` marks a reference as
+  owned/compositional — the loader inlines the target's payload via `field.*`. Plain
+  `[Reference]` is a foreign pointer, hydrated as an id only. Keeps aggregate boundaries
+  honest.
+- **Model-scoped runtime.** No process-global state. The user's `[CompositionRoot]`
+  partial owns the model metadata (`Workspace.Schema`, `Workspace.ReferenceRegistry`),
+  and `Load*Async` constructs sessions with that registry. Multiple Surface-generated
+  consumers can coexist in one process without trampling each other.
+- **Safe SQL formatting.** All record ids, identifiers, and string literals route through
+  `SurrealFormatter` — bare `table:value` when safe, Surreal's `table:⟨value⟩` escape
+  when not. Especially relevant if you set `[assembly: RecordIdValue<string>]`.
 - **Writer lease.** A per-aggregate row in `writer_lease` with a 5-minute TTL. The
   caller acquires it before committing and passes it into `CommitAsync` for renewal;
   theft surfaces as `WriterLeaseStolenException` so the commit aborts cleanly. Stale
   leases expire and become stealable, capping crash recovery to one TTL window.
-- **Commit pipeline.** Recorded commands → `PendingState` (compacted indexed view)
-  → `CommitPlanner` (resolves reference-delete behavior, orders phases) →
+- **Commit pipeline.** Recorded commands → `PendingState` (compacted indexed view, plus
+  per-field `ReferenceTransition` snapshots) → `CommitPlanner` (three-phase reference-
+  delete resolve: cascade/unset to fixpoint, then collect Reject blockers) →
   `SurrealCommandEmitter` (single SurrealQL script). One transport call per commit.
 
 ## Diagnostics
 
-The generator emits CG001–CG019 covering: missing `partial` modifier, missing /
+The generator emits CG001–CG020 covering: missing `partial` modifier, missing /
 duplicate `[Id]`, invalid relation method shape, `[Children]` element-type mistakes,
 multiple-aggregate ownership, reference-delete behavior validation, cascade cycles,
 dangling-`Ignore` warnings, multiple `[CompositionRoot]` declarations, and
-non-partial `[CompositionRoot]`. Full list in
+non-partial `[CompositionRoot]`, and `[Children]` member without a `[Parent]` path
+back to the aggregate root. Full list in
 `src/Surface.Generator/Pipeline/Diagnostics.cs`.
 
 ## Status
