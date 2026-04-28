@@ -7,16 +7,20 @@ namespace Disruptor.Surface.Generator.Emit;
 
 /// <summary>
 /// Emits the per-table <c>{Name}Id</c> — a <c>readonly record struct</c> wrapping a
-/// <c>Ulid</c> and implementing <c>IRecordId</c>. Kept zero-alloc so id values can flow
-/// through SurrealSession primitives without hydrating an entity. Ulid is the only
-/// supported id value type — quoted-string ids are not supported, and Guid / int / cuid2
-/// can be added later if a real need surfaces.
+/// validated <c>string</c> and implementing <c>IRecordId</c>. Kept zero-alloc so id values
+/// can flow through SurrealSession primitives without hydrating an entity. Two and only
+/// two value forms are accepted (validated in the ctor via
+/// <c>Disruptor.Surface.Runtime.RecordIdFormat.Validate</c>):
+/// <list type="bullet">
+///   <item>Ulid stringifications — what <c>{Name}Id.New()</c> mints (the default).</item>
+///   <item>Short lower_snake_case slugs (max 32 chars) — opt-in for stable-named records.</item>
+/// </list>
 /// </summary>
 internal static class IdEmitter
 {
     private const string IRecordIdType = "global::Disruptor.Surface.Runtime.IRecordId";
     private const string RecordIdType = "global::Disruptor.Surface.Runtime.RecordId";
-    private const string UlidType = "global::System.Ulid";
+    private const string FormatType = "global::Disruptor.Surface.Runtime.RecordIdFormat";
 
     public static void Emit(SourceProductionContext spc, TableModel table, ModelGraph graph)
     {
@@ -40,9 +44,7 @@ internal static class IdEmitter
             .Append(indent)
             .Append("public readonly record struct ")
             .Append(idTypeName)
-            .Append('(')
-            .Append(UlidType)
-            .Append(" Value) : ")
+            .Append("(string Value) : ")
             .Append(IRecordIdType);
         // Add id-side union interfaces (one per multi-member union this table is in).
         // Mirrors PartialEmitter's entity-side base list — IRestrictedById alongside IRestrictedBy.
@@ -56,6 +58,14 @@ internal static class IdEmitter
             .AppendLine()
             .Append(indent)
             .AppendLine("{")
+            // Re-declare Value with a validating initializer — the primary-ctor parameter
+            // flows through RecordIdFormat.Validate, which rejects anything that isn't a
+            // Ulid stringification or a short lower_snake_case slug.
+            .Append(memberIndent)
+            .Append("public string Value { get; } = ")
+            .Append(FormatType)
+            .AppendLine(".Validate(Value);")
+            .AppendLine()
             // Table name — Surreal convention is lower_snake_case + pluralised. Stays in lockstep
             // with the strings PartialEmitter bakes for child/reference/relation calls so that
             // SurrealSession.IsForTable comparisons line up.
@@ -64,20 +74,17 @@ internal static class IdEmitter
             .Append(SurrealNaming.ToTableName(table.Name))
             .AppendLine("\";")
             .AppendLine()
-            // Ulid stringifies idempotently; that's the literal half of the record id.
             .Append(memberIndent)
-            .AppendLine("public string ToLiteral() => Value.ToString();")
+            .AppendLine("public string ToLiteral() => Value;")
             .AppendLine()
-            // Fresh-id factory — Ulid.NewUlid() is the only mint path.
+            // Fresh-id factory — Ulid.NewUlid().ToString() is the only mint path.
             .Append(memberIndent)
             .Append("public static ")
             .Append(idTypeName)
-            .Append(" New() => new(")
-            .Append(UlidType)
-            .AppendLine(".NewUlid());")
+            .AppendLine(" New() => new(global::System.Ulid.NewUlid().ToString());")
             .AppendLine()
             .Append(memberIndent)
-            .AppendLine("public override string ToString() => Table + \":\" + ToLiteral();")
+            .AppendLine("public override string ToString() => Table + \":\" + Value;")
             .AppendLine()
             // Implicit conversion to the canonical RecordId — SurrealSession internals key off (Table, Value)
             // tuples, so every generated id should be able to flow into that shape transparently.
@@ -86,7 +93,7 @@ internal static class IdEmitter
             .Append(RecordIdType)
             .Append('(')
             .Append(idTypeName)
-            .Append(" id) => new(id.Table, id.ToLiteral());")
+            .Append(" id) => new(id.Table, id.Value);")
             .AppendLine()
             .Append(indent)
             .AppendLine("}");

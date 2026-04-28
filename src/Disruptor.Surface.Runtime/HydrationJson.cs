@@ -72,9 +72,6 @@ public static class HydrationJson
         }
     }
 
-    public static Ulid ReadUlidIdValue(JsonElement idElement) =>
-        Ulid.Parse(ReadRecordId(idElement).Value);
-
     public static string ReadString(JsonElement parent, string field, string fallback = "") =>
         parent.TryGetProperty(field, out var elem) && elem.ValueKind == JsonValueKind.String
             ? elem.GetString() ?? fallback

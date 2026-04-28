@@ -936,8 +936,9 @@ internal static class PartialEmitter
             .AppendLine("{");
 
         // The id anchor is always emitted by EmitIdAnchor, so Hydrate always writes _id
-        // when the row carries an `id` field. {Name}Id wraps a Ulid; HydrationJson does
-        // the parsing.
+        // when the row carries an `id` field. {Name}Id wraps a validated string; we pass
+        // the parsed RecordId.Value through directly — DB rows are trusted (we've written
+        // them or they came back from Surreal), so the validator passes.
         var idType = $"global::{(string.IsNullOrEmpty(table.Namespace) ? table.Name : $"{table.Namespace}.{table.Name}")}Id";
         builder
             .Append(indent)
@@ -945,7 +946,7 @@ internal static class PartialEmitter
             .Append(indent)
             .Append("        _id = new ")
             .Append(idType)
-            .AppendLine("(global::Disruptor.Surface.Runtime.HydrationJson.ReadUlidIdValue(__idElem));");
+            .AppendLine("(global::Disruptor.Surface.Runtime.HydrationJson.ReadRecordId(__idElem).Value);");
 
         builder
             .Append(indent)
