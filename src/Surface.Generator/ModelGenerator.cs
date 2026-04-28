@@ -161,6 +161,24 @@ public sealed class ModelGenerator : IIncrementalGenerator
                             table.FullName, p.Name, targetFqn));
                     }
                 }
+
+                // CG021 — [Reference] target must be in the same aggregate as the owner
+                // (or in no aggregate at all, like a shared sidecar). Cross-aggregate
+                // links go through forward/inverse relation kinds, not entity references.
+                if (p.Type.IsTableType)
+                {
+                    var targetFqn = StripGlobalAndNullable(p.Type.FullyQualifiedName);
+                    var ownerAggregate = graph.AggregateRootOf(table.FullName);
+                    var targetAggregate = graph.AggregateRootOf(targetFqn);
+                    if (ownerAggregate is not null
+                        && targetAggregate is not null
+                        && !string.Equals(ownerAggregate, targetAggregate, StringComparison.Ordinal))
+                    {
+                        spc.ReportDiagnostic(Diagnostic.Create(
+                            Diagnostics.ReferenceCrossesAggregate, Location.None,
+                            table.FullName, p.Name, targetFqn, targetAggregate, ownerAggregate));
+                    }
+                }
             }
         }
 

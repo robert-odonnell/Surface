@@ -149,4 +149,12 @@ internal static class Diagnostics
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor ReferenceCrossesAggregate = new(
+        id: "CG021",
+        title: "[Reference] target must be in the same aggregate (or in no aggregate)",
+        messageFormat: "[Reference] property '{0}.{1}' targets '{2}', which belongs to aggregate '{3}' — different from the owner's aggregate '{4}'. Cross-aggregate links should be expressed as a relation kind (forward/inverse attribute pair) instead. Same-aggregate references and references to shared records (no aggregate) are fine.",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }

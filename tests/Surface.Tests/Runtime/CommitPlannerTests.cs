@@ -229,6 +229,71 @@ public sealed class CommitPlannerTests
     }
 
     [Fact]
+    public void Relate_ThenUnrelate_SamePacket_OnFreshEdge_IsNoOp()
+    {
+        // Edge didn't exist at start. Relate then Unrelate cancels out — no commands.
+        var pending = Empty();
+        var src = new RecordId("constraints", "c");
+        var tgt = new RecordId("user_stories", "u");
+
+        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
+
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
+        Assert.Empty(plan);
+    }
+
+    [Fact]
+    public void Relate_ThenUnrelate_SamePacket_OnExistingEdge_StillEmitsUnrelate()
+    {
+        // Edge existed at start. Relate-then-Unrelate net-effect is "edge removed";
+        // the planner emits the Unrelate so the DB drops the row.
+        var src = new RecordId("constraints", "c");
+        var tgt = new RecordId("user_stories", "u");
+        var existing = new HashSet<(string, RecordId, RecordId)> { ("restricts", src, tgt) };
+        var pending = new PendingState([], existing);
+
+        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
+
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
+        Assert.Single(plan);
+        Assert.Equal(CommandOp.Unrelate, plan[0].Op);
+    }
+
+    [Fact]
+    public void Unrelate_ThenRelate_SamePacket_OnExistingEdge_IsNoOp()
+    {
+        // Edge existed at start, intent is Related at end → no change vs. start, no-op.
+        var src = new RecordId("constraints", "c");
+        var tgt = new RecordId("user_stories", "u");
+        var existing = new HashSet<(string, RecordId, RecordId)> { ("restricts", src, tgt) };
+        var pending = new PendingState([], existing);
+
+        pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
+        Assert.Empty(plan);
+    }
+
+    [Fact]
+    public void Unrelate_ThenRelate_SamePacket_OnFreshEdge_EmitsRelate()
+    {
+        // Edge didn't exist at start. Unrelate-then-Relate is just a Relate.
+        var pending = Empty();
+        var src = new RecordId("constraints", "c");
+        var tgt = new RecordId("user_stories", "u");
+
+        pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
+        Assert.Single(plan);
+        Assert.Equal(CommandOp.Relate, plan[0].Op);
+    }
+
+    [Fact]
     public void Relate_OnExistingRelation_WithNoPayload_IsNoOp()
     {
         var src = new RecordId("constraints", "c");

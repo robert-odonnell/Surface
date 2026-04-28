@@ -136,6 +136,65 @@ public sealed class DiagnosticsTests
     }
 
     [Fact]
+    public void CG021_Reference_CrossesAggregateBoundary()
+    {
+        // Constraint is in the Design aggregate (via [Children]); Finding is in the
+        // Review aggregate. A [Reference] from Constraint to Finding crosses
+        // aggregate boundaries — should fire CG021.
+        var src = """
+            using Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Design {
+                [Id] public partial DesignId Id { get; set; }
+                [Children] public partial IReadOnlyCollection<Constraint> Constraints { get; }
+            }
+
+            [Table, AggregateRoot] public partial class Review {
+                [Id] public partial ReviewId Id { get; set; }
+                [Children] public partial IReadOnlyCollection<Finding> Findings { get; }
+            }
+
+            [Table] public partial class Constraint {
+                [Id] public partial ConstraintId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [Reference] public partial Finding? OffendingFinding { get; set; }   // crosses aggregate
+            }
+
+            [Table] public partial class Finding {
+                [Id] public partial FindingId Id { get; set; }
+                [Parent] public partial Review Review { get; set; }
+            }
+            """;
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.Contains(runDiags, d => d.Id == "CG021");
+    }
+
+    [Fact]
+    public void CG021_Allows_Reference_ToSharedRecord_NotInAnyAggregate()
+    {
+        // Details is referenced from Design but isn't a member of any aggregate
+        // (no [Parent] back to a root). Shared/foreign records like this are fine.
+        var src = """
+            using Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Design {
+                [Id] public partial DesignId Id { get; set; }
+                [Reference] public partial Details? Details { get; set; }
+            }
+
+            [Table] public partial class Details {
+                [Id] public partial DetailsId Id { get; set; }
+            }
+            """;
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.DoesNotContain(runDiags, d => d.Id == "CG021");
+    }
+
+    [Fact]
     public void HappyPath_ProducesNoDiagnostics()
     {
         var src = """
