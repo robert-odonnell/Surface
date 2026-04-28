@@ -6,18 +6,19 @@ using Microsoft.CodeAnalysis.Text;
 namespace Disruptor.Surface.Generator.Emit;
 
 /// <summary>
-/// Emits the per-table <c>{Name}Id</c> — a <c>readonly record struct</c> that wraps the
-/// user-chosen value type and implements <c>IRecordId</c>. Kept zero-alloc so id values
-/// can flow through SurrealSession Add/Remove/Set without forcing the caller to hydrate an
-/// entity. The value type ("what's inside <c>Value</c>") is driven by the assembly-level
-/// <c>[RecordIdValue&lt;T&gt;]</c> attribute, falling back to <c>Ulid</c> by default.
+/// Emits the per-table <c>{Name}Id</c> — a <c>readonly record struct</c> wrapping a
+/// <c>Ulid</c> and implementing <c>IRecordId</c>. Kept zero-alloc so id values can flow
+/// through SurrealSession primitives without hydrating an entity. Ulid is the only
+/// supported id value type — quoted-string ids are not supported, and Guid / int / cuid2
+/// can be added later if a real need surfaces.
 /// </summary>
 internal static class IdEmitter
 {
     private const string IRecordIdType = "global::Disruptor.Surface.Runtime.IRecordId";
     private const string RecordIdType = "global::Disruptor.Surface.Runtime.RecordId";
+    private const string UlidType = "global::System.Ulid";
 
-    public static void Emit(SourceProductionContext spc, TableModel table, string valueTypeFqn, ModelGraph graph)
+    public static void Emit(SourceProductionContext spc, TableModel table, ModelGraph graph)
     {
         var idTypeName = $"{table.Name}Id";
         var builder = new StringBuilder()
@@ -40,7 +41,7 @@ internal static class IdEmitter
             .Append("public readonly record struct ")
             .Append(idTypeName)
             .Append('(')
-            .Append(valueTypeFqn)
+            .Append(UlidType)
             .Append(" Value) : ")
             .Append(IRecordIdType);
         // Add id-side union interfaces (one per multi-member union this table is in).
@@ -63,19 +64,17 @@ internal static class IdEmitter
             .Append(SurrealNaming.ToTableName(table.Name))
             .AppendLine("\";")
             .AppendLine()
-            // ToLiteral — serialises the typed value to its Surreal string half.
+            // Ulid stringifies idempotently; that's the literal half of the record id.
             .Append(memberIndent)
-            .Append("public string ToLiteral() => ")
-            .Append(LiteralExpr(valueTypeFqn))
-            .AppendLine(";")
+            .AppendLine("public string ToLiteral() => Value.ToString();")
             .AppendLine()
-            // Fresh-id factory — generator-side table maps known value types to their minting call.
+            // Fresh-id factory — Ulid.NewUlid() is the only mint path.
             .Append(memberIndent)
             .Append("public static ")
             .Append(idTypeName)
             .Append(" New() => new(")
-            .Append(NewValueExpr(valueTypeFqn))
-            .AppendLine(");")
+            .Append(UlidType)
+            .AppendLine(".NewUlid());")
             .AppendLine()
             .Append(memberIndent)
             .AppendLine("public override string ToString() => Table + \":\" + ToLiteral();")
@@ -100,19 +99,4 @@ internal static class IdEmitter
             : $"{table.Namespace}.{idTypeName}.g.cs";
         spc.AddSource(hint, SourceText.From(builder.ToString(), Encoding.UTF8));
     }
-
-    private static string LiteralExpr(string valueTypeFqn) => valueTypeFqn switch
-    {
-        "global::System.String" => "Value",
-        "global::System.Guid" => "Value.ToString(\"N\")",
-        _ => "Value.ToString()" // Ulid and friends stringify idempotently
-    };
-
-    private static string NewValueExpr(string valueTypeFqn) => valueTypeFqn switch
-    {
-        "global::System.String" => "global::System.Guid.NewGuid().ToString(\"N\")",
-        "global::System.Guid" => "global::System.Guid.NewGuid()",
-        "global::System.Ulid" => "global::System.Ulid.NewUlid()",
-        _ => $"throw new global::System.NotImplementedException(\"No built-in id-value factory for {valueTypeFqn}. Built-in support: Ulid, Guid, string.\")",
-    };
 }

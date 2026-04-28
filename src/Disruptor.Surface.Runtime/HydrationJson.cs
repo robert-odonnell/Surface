@@ -75,14 +75,6 @@ public static class HydrationJson
     public static Ulid ReadUlidIdValue(JsonElement idElement) =>
         Ulid.Parse(ReadRecordId(idElement).Value);
 
-    /// <summary>Mirrors <c>IdEmitter.LiteralExpr</c> for <c>Guid</c> — formats as <c>"N"</c> on emit, parses with the same format here.</summary>
-    public static Guid ReadGuidIdValue(JsonElement idElement) =>
-        Guid.ParseExact(ReadRecordId(idElement).Value, "N");
-
-    /// <summary>Mirrors <c>IdEmitter.LiteralExpr</c> for <c>string</c> — the literal half of the record id is the value verbatim.</summary>
-    public static string ReadStringIdValue(JsonElement idElement) =>
-        ReadRecordId(idElement).Value;
-
     public static string ReadString(JsonElement parent, string field, string fallback = "") =>
         parent.TryGetProperty(field, out var elem) && elem.ValueKind == JsonValueKind.String
             ? elem.GetString() ?? fallback

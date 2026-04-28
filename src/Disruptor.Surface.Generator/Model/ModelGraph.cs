@@ -15,7 +15,6 @@ namespace Disruptor.Surface.Generator.Model;
 public sealed record ModelGraph(
     EquatableArray<TableModel> Tables,
     EquatableArray<RelationKindModel> RelationKinds,
-    string IdValueTypeFullName,
     EquatableArray<RelationUnion> Unions,
     EquatableArray<AggregateModel> Aggregates,
     EquatableArray<string> AggregateConflicts,
@@ -25,7 +24,6 @@ public sealed record ModelGraph(
     public static readonly ModelGraph Empty = new(
         EquatableArray<TableModel>.Empty,
         EquatableArray<RelationKindModel>.Empty,
-        "global::System.Ulid",
         EquatableArray<RelationUnion>.Empty,
         EquatableArray<AggregateModel>.Empty,
         EquatableArray<string>.Empty,

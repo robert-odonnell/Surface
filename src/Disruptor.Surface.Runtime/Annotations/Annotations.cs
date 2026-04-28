@@ -66,6 +66,3 @@ public abstract class InverseRelation<TForward> : RelationAttribute
     public Type ForwardKind => typeof(TForward);
 }
 
-/// <summary>Assembly-level override that pins the value type used for every generated <c>{Name}Id</c>. Omit to default to <c>Ulid</c>. Built-in support: <c>Ulid</c>, <c>Guid</c>, <c>string</c>.</summary>
-[AttributeUsage(AttributeTargets.Assembly, AllowMultiple = false, Inherited = false)]
-public sealed class RecordIdValueAttribute<TValue> : Attribute { }

@@ -25,7 +25,6 @@ internal static class RelationLinker
         ImmutableArray<TableModel> tables,
         ImmutableArray<RelationKindModel> forwardKinds,
         ImmutableArray<RelationKindModel> inverseKinds,
-        string idValueTypeFullName,
         ImmutableArray<CompositionRootModel> compositionRoots)
     {
         var tableFullNames = new HashSet<string>();
@@ -53,7 +52,6 @@ internal static class RelationLinker
         return new ModelGraph(
             Tables: linked,
             RelationKinds: combinedKinds.ToImmutable(),
-            IdValueTypeFullName: idValueTypeFullName,
             Unions: new EquatableArray<RelationUnion>(unions),
             Aggregates: new EquatableArray<AggregateModel>(aggregates),
             AggregateConflicts: new EquatableArray<string>(conflicts),

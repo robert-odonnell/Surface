@@ -935,43 +935,17 @@ internal static class PartialEmitter
             .Append(indent)
             .AppendLine("{");
 
-        var idProp = table.Properties.FirstOrDefault(p => p.Kinds.HasFlag(PropertyKind.Id));
-        if (idProp is not null)
-        {
-            // Match IdEmitter's LiteralExpr/NewValueExpr surface: built-in factories for
-            // Ulid (default), Guid, and string. Anything else — extend IdEmitter and add
-            // a matching reader to HydrationJson.
-            var reader = graph.IdValueTypeFullName switch
-            {
-                "global::System.Ulid"   => "ReadUlidIdValue",
-                "global::System.Guid"   => "ReadGuidIdValue",
-                "global::System.String" => "ReadStringIdValue",
-                _ => null,
-            };
-            var idType = StripNullable(idProp.Type.FullyQualifiedName);
-            builder
-                .Append(indent)
-                .AppendLine("    if (json.TryGetProperty(\"id\", out var __idElem))");
-
-            if (reader is null)
-            {
-                builder
-                    .Append(indent)
-                    .Append("        throw new global::System.NotSupportedException(\"No built-in id-value reader for ")
-                    .Append(graph.IdValueTypeFullName)
-                    .AppendLine(". Built-in support: Ulid, Guid, string.\");");
-            }
-            else
-            {
-                builder
-                    .Append(indent)
-                    .Append("        _id = new ")
-                    .Append(idType)
-                    .Append("(global::Disruptor.Surface.Runtime.HydrationJson.")
-                    .Append(reader)
-                    .AppendLine("(__idElem));");
-            }
-        }
+        // The id anchor is always emitted by EmitIdAnchor, so Hydrate always writes _id
+        // when the row carries an `id` field. {Name}Id wraps a Ulid; HydrationJson does
+        // the parsing.
+        var idType = $"global::{(string.IsNullOrEmpty(table.Namespace) ? table.Name : $"{table.Namespace}.{table.Name}")}Id";
+        builder
+            .Append(indent)
+            .AppendLine("    if (json.TryGetProperty(\"id\", out var __idElem))")
+            .Append(indent)
+            .Append("        _id = new ")
+            .Append(idType)
+            .AppendLine("(global::Disruptor.Surface.Runtime.HydrationJson.ReadUlidIdValue(__idElem));");
 
         builder
             .Append(indent)

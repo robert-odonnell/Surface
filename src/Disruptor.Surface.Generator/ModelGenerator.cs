@@ -34,9 +34,6 @@ public sealed class ModelGenerator : IIncrementalGenerator
         var forwardKinds = allRelationKinds.Where(static k => k.Direction == RelationDirection.Forward);
         var inverseKinds = allRelationKinds.Where(static k => k.Direction == RelationDirection.Inverse);
 
-        var idValueType = context.CompilationProvider
-            .Select(static (compilation, _) => ResolveIdValueType(compilation));
-
         var compositionRoots = context.SyntaxProvider
             .ForAttributeWithMetadataName(
                 AnnotationsMetadata.CompositionRoot,
@@ -48,44 +45,15 @@ public sealed class ModelGenerator : IIncrementalGenerator
         var graph = tables.Collect()
             .Combine(forwardKinds.Collect())
             .Combine(inverseKinds.Collect())
-            .Combine(idValueType)
             .Combine(compositionRoots.Collect())
             .Select(static (combined, _) =>
                 RelationLinker.Build(
-                    combined.Left.Left.Left.Left,
-                    combined.Left.Left.Left.Right,
+                    combined.Left.Left.Left,
                     combined.Left.Left.Right,
                     combined.Left.Right,
                     combined.Right));
 
         context.RegisterSourceOutput(graph, static (spc, g) => Emit(spc, g));
-    }
-
-    /// <summary>
-    /// Resolves the id value type the generator should weave into every <c>{Name}Id</c>
-    /// struct. Scans the compilation's assembly-level attributes for
-    /// <c>[RecordIdValue&lt;T&gt;]</c>; absent that, defaults to <c>Ulid</c>.
-    /// </summary>
-    private static string ResolveIdValueType(Compilation compilation)
-    {
-        foreach (var attr in compilation.Assembly.GetAttributes())
-        {
-            var cls = attr.AttributeClass;
-            if (cls is null || !cls.IsGenericType)
-            {
-                continue;
-            }
-
-            var def = cls.OriginalDefinition;
-            var ns  = def.ContainingNamespace?.ToDisplayString();
-            if (ns == AnnotationsMetadata.Namespace
-                && def.Name == "RecordIdValueAttribute"
-                && cls.TypeArguments.Length == 1)
-            {
-                return cls.TypeArguments[0].ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-            }
-        }
-        return "global::System.Ulid";
     }
 
     private static void Emit(SourceProductionContext spc, ModelGraph graph)
@@ -262,7 +230,7 @@ public sealed class ModelGenerator : IIncrementalGenerator
                 continue;
             }
 
-            IdEmitter.Emit(spc, table, graph.IdValueTypeFullName, graph);
+            IdEmitter.Emit(spc, table, graph);
 
             var valid = true;
             foreach (var (memberName, memberType) in EnumerateReadSideTypes(table, PropertyKind.Children))

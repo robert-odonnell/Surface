@@ -26,5 +26,4 @@ internal static class AnnotationsMetadata
     public const string RelationAttribute    = $"{Namespace}.RelationAttribute";
     public const string ForwardRelation      = $"{Namespace}.ForwardRelation";
     public const string InverseRelation      = $"{Namespace}.InverseRelation`1";
-    public const string RecordIdValue        = $"{Namespace}.RecordIdValueAttribute`1";
 }

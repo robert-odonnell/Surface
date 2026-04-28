@@ -11,10 +11,10 @@ namespace Disruptor.Surface.Runtime;
 /// <para>
 /// Generator-emitted identifiers (table names, field names) come from snake-cased C#
 /// member names — they're trusted but still validated against a strict regex so a
-/// misbehaving emitter can't smuggle in unexpected characters. User-supplied record id
-/// VALUES (e.g. via <c>[assembly: RecordIdValue&lt;string&gt;]</c>) are not trusted and
-/// are routed through Surreal's <c>⟨value⟩</c> escape form when they contain anything
-/// outside <c>[A-Za-z0-9_]</c>.
+/// misbehaving emitter can't smuggle in unexpected characters. Record id VALUES are
+/// always Ulid stringifications today, but every value flowing through here is still
+/// routed through Surreal's <c>⟨value⟩</c> escape form when it contains anything outside
+/// <c>[A-Za-z0-9_]</c> — defence in depth against future id types or stale call sites.
 /// </para>
 /// </summary>
 public static class SurrealFormatter
