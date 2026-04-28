@@ -1,9 +1,14 @@
 name: Release
 
 # Triggered when a version tag is pushed. Builds in Release config, packs
-# Surface.Generator + Surface.Runtime, and pushes the .nupkg files to NuGet.org.
-# Requires the NUGET_API_KEY repository secret to be set in GitHub Settings →
-# Secrets and variables → Actions.
+# Surface.Generator + Surface.Runtime, and pushes the .nupkg files to NuGet.org
+# using NuGet's Trusted Publishing — GitHub mints a short-lived OIDC token, the
+# NuGet/login action exchanges it for a temporary API key, and the push step
+# consumes that key. No long-lived secrets in the repo; the trust policy lives
+# on NuGet (configured per package + per workflow + per branch ref).
+#
+# Required: the NUGET_USER repository secret (the NuGet username that owns the
+# trusted-publishing policy for these packages).
 
 on:
   push:
@@ -13,6 +18,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC token minting
+      contents: read
 
     steps:
       - name: Checkout
@@ -35,9 +43,15 @@ jobs:
       - name: Pack
         run: dotnet pack Surface.slnx --configuration Release --no-build --output ./artifacts
 
+      - name: NuGet login (OIDC → temp API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       - name: Publish to NuGet
         run: |
           dotnet nuget push "./artifacts/*.nupkg" \
-            --api-key "${{ secrets.NUGET_API_KEY }}" \
+            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
             --source https://api.nuget.org/v3/index.json \
             --skip-duplicate
