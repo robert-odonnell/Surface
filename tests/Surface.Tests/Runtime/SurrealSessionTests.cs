@@ -37,6 +37,70 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
+    public async Task CommitAsync_ClosesTheSession()
+    {
+        var session = new SurrealSession();
+        var transport = new NullTransport();
+
+        await session.CommitAsync(transport);
+
+        Assert.True(session.IsClosed);
+        Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(new RecordId("t", "1"))));
+    }
+
+    [Fact]
+    public async Task AbandonAsync_ClosesTheSession_AndIsIdempotent()
+    {
+        var session = new SurrealSession();
+        await session.AbandonAsync();
+        Assert.True(session.IsClosed);
+        // Second call must not throw — idempotent close.
+        await session.AbandonAsync();
+    }
+
+    [Fact]
+    public async Task ClosedSession_Reads_Throw()
+    {
+        var session = new SurrealSession();
+        var entity = new StubEntity(new RecordId("t", "1"));
+        session.HydrateTrack(entity);
+
+        await session.CommitAsync(new NullTransport());
+
+        Assert.Throws<InvalidOperationException>(() => session.Get<StubEntity>(entity.Id));
+        Assert.Throws<InvalidOperationException>(() => session.GetReferenceOrDefault<StubEntity>(entity, "x"));
+        Assert.Throws<InvalidOperationException>(() => session.QueryChildren<StubEntity>(entity, "child"));
+        Assert.Throws<InvalidOperationException>(() => session.QueryOutgoing<StubEntity>(entity, "edge"));
+        Assert.Throws<InvalidOperationException>(() => session.QueryIncoming<StubEntity>(entity, "edge"));
+    }
+
+    [Fact]
+    public async Task ClosedSession_Writes_Throw()
+    {
+        var session = new SurrealSession();
+        await session.AbandonAsync();
+        var id = new RecordId("t", "1");
+
+        Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(id)));
+        Assert.Throws<InvalidOperationException>(() => session.SetField(id, "field", "v"));
+        Assert.Throws<InvalidOperationException>(() => session.UnsetField(id, "field"));
+        Assert.Throws<InvalidOperationException>(() => session.Delete(id));
+        Assert.Throws<InvalidOperationException>(() => session.Relate(id, id, "edge"));
+        Assert.Throws<InvalidOperationException>(() => session.Unrelate(id, id, "edge"));
+        Assert.Throws<InvalidOperationException>(() => session.UnrelateAllFrom(id, "edge"));
+        Assert.Throws<InvalidOperationException>(() => session.UnrelateAllTo(id, "edge"));
+        Assert.Throws<InvalidOperationException>(() => session.RenderBatch());
+    }
+
+    [Fact]
+    public async Task CommitAsync_OnClosedSession_Throws()
+    {
+        var session = new SurrealSession();
+        await session.CommitAsync(new NullTransport());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.CommitAsync(new NullTransport()));
+    }
+
+    [Fact]
     public void Track_DifferentInstance_SameId_Throws()
     {
         var session = new SurrealSession();
@@ -283,5 +347,13 @@ public sealed class SurrealSessionTests
     private sealed class StubKind : IRelationKind
     {
         public static string EdgeName => "stub_edge";
+    }
+
+    /// <summary>No-op transport — accepts any call, returns an empty document. Used for closure tests where the SQL doesn't matter.</summary>
+    private sealed class NullTransport : ISurrealTransport
+    {
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+            => Task.FromResult(JsonDocument.Parse("[]"));
     }
 }

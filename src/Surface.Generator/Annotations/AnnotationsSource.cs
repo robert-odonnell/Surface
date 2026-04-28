@@ -95,8 +95,8 @@ public sealed class CascadeAttribute : Attribute { }
 [AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
 public sealed class IgnoreAttribute : Attribute { }
 
-/// <summary>Shared abstract base for every user-defined relation attribute (forward and inverse). Carries the <see cref=""AttributeUsageAttribute""/> for property/method application — derived attributes inherit the usage policy without restating it. The generator detects relation membership by walking up to this base.</summary>
-[AttributeUsage(AttributeTargets.Property | AttributeTargets.Method, AllowMultiple = true, Inherited = false)]
+/// <summary>Shared abstract base for every user-defined relation attribute (forward and inverse). Property-only — relations declare model shape and aren't a method-naming convention. The generator detects relation membership by walking up to this base.</summary>
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = true, Inherited = false)]
 public abstract class RelationAttribute : Attribute { }
 
 /// <summary>Abstract base for forward-direction relation attributes. Derive directly: <c>public sealed class RestrictsAttribute : ForwardRelation;</c>. Inheritance from this base IS the discoverability signal — no marker attribute needed.</summary>

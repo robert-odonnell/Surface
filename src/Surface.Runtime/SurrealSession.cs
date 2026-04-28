@@ -107,6 +107,24 @@ public sealed class SurrealSession
     private readonly Dictionary<(RecordId Owner, string Field), RecordId> references = new();
     private readonly Dictionary<(RecordId Source, string Edge, RecordId Target), bool> edges = new();
 
+    // One-shot lifecycle invariant: a session represents one loaded snapshot plus one
+    // pending mutation batch. Successful CommitAsync or AbandonAsync flips `_closed` to
+    // true, after which every public method throws. Hydrate-side helpers stay open
+    // because they only ever run during initial load — before the user gets a handle.
+    private bool _closed;
+
+    private void ThrowIfClosed()
+    {
+        if (_closed)
+        {
+            throw new InvalidOperationException(
+                "This SurrealSession is closed. Load a new session for further work.");
+        }
+    }
+
+    /// <summary>True after <see cref="CommitAsync"/> or <see cref="AbandonAsync"/> has run; further reads or writes throw.</summary>
+    public bool IsClosed => _closed;
+
     // Filled by the loader's HydrateTrack / HydrateEdge — used by PendingState to
     // distinguish "record (or edge) already in the DB" from "new in this packet". The
     // commit planner needs that bit to decide whether a Delete actually emits a DELETE
@@ -141,6 +159,7 @@ public sealed class SurrealSession
 
     public T GetParent<T>(IEntity owner) where T : class, IEntity
     {
+        ThrowIfClosed();
         if (parents.TryGetValue(owner.Id, out var parentId)
             && entities.TryGetValue(parentId, out var parent)
             && parent is T typed)
@@ -156,6 +175,7 @@ public sealed class SurrealSession
 
     public T? GetReferenceOrDefault<T>(IEntity owner, string fieldName) where T : class, IEntity
     {
+        ThrowIfClosed();
         if (references.TryGetValue((owner.Id, fieldName), out var refId)
             && entities.TryGetValue(refId, out var entity)
             && entity is T typed)
@@ -173,6 +193,7 @@ public sealed class SurrealSession
     /// </summary>
     public T? Get<T>(IRecordId id) where T : class, IEntity
     {
+        ThrowIfClosed();
         var rid = RecordId.From(id);
         return entities.TryGetValue(rid, out var entity) && entity is T typed ? typed : null;
     }
@@ -180,6 +201,7 @@ public sealed class SurrealSession
     public IReadOnlyCollection<T> QueryChildren<T>(IEntity owner, string childTable)
         where T : class, IEntity
     {
+        ThrowIfClosed();
         var results = new List<T>();
         foreach (var kv in parents)
         {
@@ -203,6 +225,7 @@ public sealed class SurrealSession
     public IReadOnlyCollection<T> QueryOutgoing<T>(IEntity owner, string edgeKind)
         where T : class
     {
+        ThrowIfClosed();
         var results = new List<T>();
         foreach (var kv in edges)
         {
@@ -225,6 +248,7 @@ public sealed class SurrealSession
     public IReadOnlyCollection<T> QueryIncoming<T>(IEntity owner, string edgeKind)
         where T : class
     {
+        ThrowIfClosed();
         var results = new List<T>();
         foreach (var kv in edges)
         {
@@ -248,6 +272,7 @@ public sealed class SurrealSession
     /// </summary>
     public IReadOnlyCollection<IRecordId> QueryRelatedIds(IEntity owner, string edgeKind)
     {
+        ThrowIfClosed();
         var results = new List<IRecordId>();
         foreach (var kv in edges)
         {
@@ -267,6 +292,7 @@ public sealed class SurrealSession
     /// <summary>Cross-aggregate inverse-side read: edges that land on <paramref name="owner"/>.</summary>
     public IReadOnlyCollection<IRecordId> QueryInverseRelatedIds(IEntity owner, string edgeKind)
     {
+        ThrowIfClosed();
         var results = new List<IRecordId>();
         foreach (var kv in edges)
         {
@@ -301,6 +327,7 @@ public sealed class SurrealSession
     /// </summary>
     public T Track<T>(T entity) where T : class, IEntity
     {
+        ThrowIfClosed();
         if (entities.TryGetValue(entity.Id, out var existing))
         {
             // Same instance — idempotent Track call, just return.
@@ -339,6 +366,7 @@ public sealed class SurrealSession
     /// </summary>
     public void SetField(IRecordId owner, string field, object? value, FieldKind kind = FieldKind.Property)
     {
+        ThrowIfClosed();
         var ownerId = RecordId.From(owner);
         // Entity → cascade-track + use its id; IRecordId → canonicalise; anything else
         // passes through verbatim (scalars, strings, bools, surreal-array snapshots).
@@ -373,6 +401,7 @@ public sealed class SurrealSession
     /// <summary>Clears a single field. <paramref name="kind"/> picks the local-state dict to evict from.</summary>
     public void UnsetField(IRecordId owner, string field, FieldKind kind = FieldKind.Property)
     {
+        ThrowIfClosed();
         var ownerId = RecordId.From(owner);
         switch (kind)
         {
@@ -396,6 +425,7 @@ public sealed class SurrealSession
     /// </summary>
     public void Relate(IRecordId source, IRecordId target, string edgeKind)
     {
+        ThrowIfClosed();
         var src = RecordId.From(source);
         var tgt = RecordId.From(target);
         edges[(src, edgeKind, tgt)] = true;
@@ -405,6 +435,7 @@ public sealed class SurrealSession
     /// <summary>Removes a single specific edge. No-op if the edge isn't currently tracked.</summary>
     public void Unrelate(IRecordId source, IRecordId target, string edgeKind)
     {
+        ThrowIfClosed();
         var src = RecordId.From(source);
         var tgt = RecordId.From(target);
         edges.Remove((src, edgeKind, tgt));
@@ -419,6 +450,7 @@ public sealed class SurrealSession
     /// </summary>
     public void UnrelateAllFrom(IRecordId source, string edgeKind)
     {
+        ThrowIfClosed();
         var src = RecordId.From(source);
         foreach (var key in edges.Keys.ToList())
         {
@@ -436,6 +468,7 @@ public sealed class SurrealSession
     /// </summary>
     public void UnrelateAllTo(IRecordId target, string edgeKind)
     {
+        ThrowIfClosed();
         var tgt = RecordId.From(target);
         foreach (var key in edges.Keys.ToList())
         {
@@ -493,6 +526,7 @@ public sealed class SurrealSession
     /// </summary>
     public void Delete(IEntity entity)
     {
+        ThrowIfClosed();
         entity.OnDeleting();
         Record(Command.Delete(entity.Id));
         CleanupLocalState(entity.Id);
@@ -505,6 +539,7 @@ public sealed class SurrealSession
     /// </summary>
     public void Delete(IRecordId id)
     {
+        ThrowIfClosed();
         var canonical = RecordId.From(id);
         Record(Command.Delete(canonical));
         CleanupLocalState(canonical);
@@ -518,39 +553,44 @@ public sealed class SurrealSession
     /// </summary>
     public (string Sql, IReadOnlyDictionary<string, object?> Parameters) RenderBatch()
     {
+        ThrowIfClosed();
         var plan = CommitPlanner.Build(Pending, ReferenceRegistry);
         return SurrealCommandEmitter.Emit(plan);
     }
 
     /// <summary>
-    /// Flushes pending writes as a single SurrealQL script. No-op when nothing has been
-    /// recorded. If <paramref name="lease"/> is supplied, it's renewed before the flush
-    /// so a stolen lease aborts the commit cleanly via <see cref="WriterLeaseStolenException"/>.
-    /// The session doesn't own the lease — the caller manages its lifetime separately.
+    /// Flushes pending writes as a single SurrealQL script. The session is closed on
+    /// successful return — even when there was nothing to commit; the one-shot invariant
+    /// is "load → mutate → commit, then loop." If <paramref name="lease"/> is supplied,
+    /// it's renewed before the flush so a stolen lease aborts the commit cleanly via
+    /// <see cref="WriterLeaseStolenException"/>. The session doesn't own the lease —
+    /// the caller manages its lifetime separately.
     /// </summary>
     public async Task CommitAsync(ISurrealTransport transport, WriterLease? lease = null, CancellationToken ct = default)
     {
+        ThrowIfClosed();
         var (sql, parameters) = RenderBatch();
-        if (string.IsNullOrEmpty(sql))
+        if (!string.IsNullOrEmpty(sql))
         {
-            return;
+            if (lease is not null)
+            {
+                await lease.RenewAsync(ct);
+            }
+
+            await transport.ExecuteAsync(sql, parameters, ct);
         }
 
-        if (lease is not null)
-        {
-            await lease.RenewAsync(ct);
-        }
-
-        await transport.ExecuteAsync(sql, parameters, ct);
         Log.Clear();
         Pending.Clear();
+        _closed = true;
     }
 
-    /// <summary>Drop pending writes without flushing.</summary>
+    /// <summary>Drop pending writes without flushing. Closes the session — once abandoned, it's done.</summary>
     public Task AbandonAsync(CancellationToken ct = default)
     {
         Log.Clear();
         Pending.Clear();
+        _closed = true;
         return Task.CompletedTask;
     }
 

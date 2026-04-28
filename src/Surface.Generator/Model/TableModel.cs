@@ -34,10 +34,4 @@ public sealed record TableModel(
 
     public IEnumerable<PropertyModel> RelationProperties =>
         Properties.Where(p => p.RelationRole is MethodRole.ForwardRelation or MethodRole.InverseRelation);
-
-    public IEnumerable<MethodModel> ForwardRelationMethods =>
-        Methods.Where(m => m.Role == MethodRole.ForwardRelation);
-
-    public IEnumerable<MethodModel> InverseRelationMethods =>
-        Methods.Where(m => m.Role == MethodRole.InverseRelation);
 }

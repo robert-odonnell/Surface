@@ -309,6 +309,62 @@ public sealed class PendingState
         BulkUnrelateFrom.Clear();
         BulkUnrelateTo.Clear();
     }
+
+    /// <summary>
+    /// Deep-copy of this <see cref="PendingState"/>. The commit planner clones at entry
+    /// so its cascade/unset resolution mutations don't leak back into the session's
+    /// pending state — calling <see cref="SurrealSession.RenderBatch"/> twice should
+    /// produce the same script both times. The <c>loadedAtStart</c> /
+    /// <c>relationsAtStart</c> sets are shared by reference (immutable from the
+    /// planner's POV).
+    /// </summary>
+    public PendingState Clone()
+    {
+        var copy = new PendingState(loadedAtStart, relationsAtStart);
+
+        foreach (var kv in Records)
+        {
+            var src = kv.Value;
+            var dst = new RecordPendingState(src.Id, src.ExistedAtStart);
+            dst.Segments.Clear();
+            foreach (var seg in src.Segments)
+            {
+                var segCopy = new LifecycleSegment
+                {
+                    Created = seg.Created,
+                    Upserted = seg.Upserted,
+                    Deleted = seg.Deleted,
+                };
+                foreach (var (k, v) in seg.Sets) segCopy.Sets[k] = v;
+                foreach (var u in seg.Unsets) segCopy.Unsets.Add(u);
+                dst.Segments.Add(segCopy);
+            }
+            copy.Records[kv.Key] = dst;
+        }
+
+        foreach (var kv in Relations)
+        {
+            var src = kv.Value;
+            var dst = new RelationPendingState(src.Kind, src.Source, src.Target, src.ExistedAtStart)
+            {
+                State = src.State,
+            };
+            foreach (var (k, v) in src.PayloadSets) dst.PayloadSets[k] = v;
+            foreach (var u in src.PayloadUnsets) dst.PayloadUnsets.Add(u);
+            copy.Relations[kv.Key] = dst;
+        }
+
+        foreach (var kv in References)
+        {
+            var src = kv.Value;
+            copy.References[kv.Key] = new ReferenceTransition(src.Owner, src.Field, src.TargetAtStart, src.TargetAtEnd);
+        }
+
+        foreach (var entry in BulkUnrelateFrom) copy.BulkUnrelateFrom.Add(entry);
+        foreach (var entry in BulkUnrelateTo) copy.BulkUnrelateTo.Add(entry);
+
+        return copy;
+    }
 }
 
 /// <summary>

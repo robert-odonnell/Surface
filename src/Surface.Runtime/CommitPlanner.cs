@@ -22,6 +22,11 @@ public static class CommitPlanner
 {
     public static IReadOnlyList<Command> Build(PendingState pending, IReferenceRegistry registry)
     {
+        // Reference-delete resolution mutates pending state (records get ApplyDelete,
+        // ApplyUnset for cascades / unsets). Operate on a deep copy so the caller's
+        // PendingState stays untouched — RenderBatch becomes idempotent and safe to
+        // call repeatedly for diagnostics.
+        pending = pending.Clone();
         ResolveReferenceDeletes(pending, registry);
 
         var preDeletes        = new List<Command>(); // §16 phase 5
@@ -243,10 +248,12 @@ public static class CommitPlanner
 
         if (final.Deleted)
         {
-            // Final segment ends in deletion. Emit DELETE only if there's something
-            // to delete — i.e., the record existed at start (and survived earlier
-            // segments) or was created/upserted in this same segment.
-            if (existing || final.Created || final.Upserted)
+            // Emit DELETE only when the record actually exists in the DB at the start
+            // of this segment. Create + Delete (or Create + Set* + Delete) on a fresh
+            // record in the same packet is a no-op — the row never reached SurrealDB
+            // so there's nothing to delete; emitting `DELETE` against a non-existent
+            // row would also be a no-op at the DB but adds noise to the script.
+            if (existing)
             {
                 finalDeletes.Add(Command.Delete(rec.Id));
             }

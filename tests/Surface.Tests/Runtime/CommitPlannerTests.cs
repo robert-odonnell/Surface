@@ -117,13 +117,12 @@ public sealed class CommitPlannerTests
     }
 
     [Fact]
-    public void NewRecord_CreatedThenDeletedInSamePacket_EmitsOnly_FinalDelete()
+    public void NewRecord_CreatedThenDeletedInSamePacket_IsNoOp()
     {
-        // §16: a fresh record with Create+Set+Delete in the same segment produces only
-        // the final-segment DELETE — Set is dropped (record is gone), and the planner's
-        // EmitRecord short-circuits the Create branch when `final.Deleted` is set.
-        // Pinned by this test in case the rule changes; today's emission is debatable
-        // (the DELETE can fail at the DB if the matching CREATE never went out).
+        // Fresh record with Create + Set + Delete in the same packet: the row never
+        // reached the DB, so the plan should be empty. Earlier behaviour emitted a
+        // final DELETE for a row that was never CREATE'd in the script — that was the
+        // smell #6 in the punch list called out.
         var pending = Empty();
         var id = new RecordId("designs", "x");
 
@@ -132,8 +131,40 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.Delete(id));
 
         var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
-        Assert.Single(plan);
-        Assert.Equal(CommandOp.Delete, plan[0].Op);
+        Assert.Empty(plan);
+    }
+
+    [Fact]
+    public void Build_DoesNotMutate_Pending_AcrossCalls()
+    {
+        // RenderBatch / Build used to mutate the input PendingState during cascade
+        // resolution. Now Build clones at entry — calling twice produces the same
+        // plan and leaves the caller's pending state intact.
+        var registry = new StubRegistry(
+            ("a", "b_ref", "b", ReferenceDeleteBehavior.Cascade));
+
+        var a = new RecordId("a", "1");
+        var b = new RecordId("b", "1");
+
+        var pending = WithLoaded(a, b);
+        pending.HydrateReference(a, "b_ref", b);
+        pending.ApplyCommand(Command.Delete(b));
+
+        var planFirst = CommitPlanner.Build(pending, registry);
+        var planSecond = CommitPlanner.Build(pending, registry);
+
+        Assert.Equal(planFirst.Count, planSecond.Count);
+        for (var i = 0; i < planFirst.Count; i++)
+        {
+            Assert.Equal(planFirst[i].Op, planSecond[i].Op);
+            Assert.Equal(planFirst[i].Target, planSecond[i].Target);
+        }
+
+        // The cascade resolution would have created a record entry for `a` to mark it
+        // Deleted. With Clone() at planner entry, that mutation lands on the copy —
+        // the caller's pending state never had a record for `a`, and shouldn't now.
+        Assert.False(pending.Records.ContainsKey(a),
+            "cascade resolution must not mutate caller's PendingState");
     }
 
     [Fact]

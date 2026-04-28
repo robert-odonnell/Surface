@@ -734,48 +734,19 @@ internal static class PartialEmitter
     // ──────────────────────────── method emission ────────────────────────────
 
     /// <summary>
-    /// Methods only carry meaning for relation Add/Remove/Clear today — <c>[Property]</c>,
-    /// <c>[Parent]</c>, <c>[Reference]</c>, <c>[Children]</c> are property-only attributes.
-    /// Anything else falls through to a NotImplementedException body so a stale partial
-    /// method declaration surfaces clearly instead of silently emitting nothing.
+    /// All model annotations are property-targeted; methods are plain user code with no
+    /// generator-supplied bodies. A partial method declaration that the user leaves
+    /// unimplemented gets a NotImplementedException stub so the stale declaration
+    /// surfaces clearly instead of silently emitting nothing.
     /// </summary>
     private static void EmitMethod(StringBuilder builder, string indent, MethodModel m, ModelGraph graph)
     {
-        var body = m.Role switch
-        {
-            MethodRole.ForwardRelation or MethodRole.InverseRelation => BuildRelationBody(m, graph),
-            _ => "throw new global::System.NotImplementedException()",
-        };
         WriteMethodSignature(builder, indent, m);
-        builder
-            .Append(" => ")
-            .Append(body)
-            .AppendLine(";");
+        builder.AppendLine(" => throw new global::System.NotImplementedException();");
     }
 
     private static string ToCamel(string s) =>
         s.Length == 0 ? s : char.ToLowerInvariant(s[0]) + s[1..];
-
-    private static string BuildRelationBody(MethodModel m, ModelGraph graph)
-    {
-        var kindMarker = ResolveKindMarkerFqn(m.RelationKindFullName, graph);
-        var (a, b) = m.Role == MethodRole.ForwardRelation
-            ? ("this", FirstParamName(m))
-            : (FirstParamName(m), "this");
-
-        return m.Verb switch
-        {
-            MethodVerb.Add =>
-                $"Session.Relate<{kindMarker}>({a}, {b})",
-            MethodVerb.Remove =>
-                $"Session.Unrelate<{kindMarker}>({a}, {b})",
-            MethodVerb.Clear =>
-                m.Role == MethodRole.ForwardRelation
-                    ? $"Session.UnrelateAllFrom<{kindMarker}>(this)"
-                    : $"Session.UnrelateAllTo<{kindMarker}>(this)",
-            _ => "throw new global::System.NotImplementedException()",
-        };
-    }
 
     /// <summary>
     /// Resolves element info for a TypeRef. The <c>NameExpr</c> is the Surreal table-name
@@ -1166,9 +1137,6 @@ internal static class PartialEmitter
     }
 
     // ──────────────────────────── helpers ────────────────────────────────────
-
-    private static string FirstParamName(MethodModel m) =>
-        m.Parameters.Count > 0 ? m.Parameters[0].Name : "default!";
 
     private static string Quote(string s) => $"\"{s.Replace("\"", "\\\"")}\"";
 
