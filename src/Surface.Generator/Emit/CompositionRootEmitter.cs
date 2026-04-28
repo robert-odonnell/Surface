@@ -84,7 +84,7 @@ internal static class CompositionRootEmitter
               .Append(idType).Append(" rootId, ")
               .Append(CtFqn).AppendLine(" ct = default)");
             sb.Append(memberIndent).AppendLine("{");
-            sb.Append(memberIndent).Append("    var ws = new ").Append(SessionFqn).AppendLine("();");
+            sb.Append(memberIndent).Append("    var ws = new ").Append(SessionFqn).AppendLine("(ReferenceRegistry);");
             sb.Append(memberIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(ws, transport, rootId, ct);");
             sb.Append(memberIndent).AppendLine("    return ws;");
             sb.Append(memberIndent).AppendLine("}");

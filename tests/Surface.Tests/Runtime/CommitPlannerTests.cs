@@ -24,7 +24,7 @@ public sealed class CommitPlannerTests
         var ghost = new RecordId("designs", "ghost");
         pending.ApplyCommand(Command.Create(ghost));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
 
         Assert.Empty(plan);
     }
@@ -42,7 +42,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.Create(design));
         pending.ApplyCommand(Command.Set(design, "details", details));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
 
         Assert.Equal(2, plan.Count(c => c.Op is CommandOp.Create or CommandOp.Upsert));
     }
@@ -66,7 +66,7 @@ public sealed class CommitPlannerTests
         // Use the original Relate-bearing pending for ordering, but check the field-update
         // ordering with pending2 separately.
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
 
         // The plan should have creates first, then relations.
         var createIdx = IndexOfFirst(plan, c => c.Op is CommandOp.Create or CommandOp.Upsert);
@@ -74,7 +74,7 @@ public sealed class CommitPlannerTests
         Assert.True(createIdx < relateIdx, "creates must precede relations");
 
         // Field-update ordering against the loaded record:
-        var plan2 = CommitPlanner.Build(pending2);
+        var plan2 = CommitPlanner.Build(pending2, NullReferenceRegistry.Instance);
         var setIdx = IndexOfFirst(plan2, c => c.Op == CommandOp.Set);
         Assert.True(setIdx >= 0, "expected a Set command in the plan");
     }
@@ -88,7 +88,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.Delete(id));
         pending.ApplyCommand(Command.Create(id));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
 
         // Two ops: a closed-segment DELETE followed by a CREATE/UPSERT for the new
         // segment — order matters because the schema would otherwise reject a duplicate.
@@ -108,7 +108,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.Set(id, "description", "edit"));
         pending.ApplyCommand(Command.Delete(id));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
 
         // §16: final-segment deletes are the last phase. Field updates from before
         // the delete are dropped because the record is gone at commit.
@@ -131,7 +131,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.Set(id, "description", "edit"));
         pending.ApplyCommand(Command.Delete(id));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
         Assert.Single(plan);
         Assert.Equal(CommandOp.Delete, plan[0].Op);
     }
@@ -152,7 +152,7 @@ public sealed class CommitPlannerTests
         pending2.ApplyCommand(Command.Unrelate(a, "restricts", c));
         pending2.ApplyCommand(Command.Relate(b, "restricts", c));
 
-        var plan = CommitPlanner.Build(pending2);
+        var plan = CommitPlanner.Build(pending2, NullReferenceRegistry.Instance);
 
         var unrelIdx = IndexOfFirst(plan, x => x.Op == CommandOp.Unrelate);
         var relIdx   = IndexOfFirst(plan, x => x.Op == CommandOp.Relate);
@@ -170,7 +170,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
         pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
 
         var bulkIdx = IndexOfFirst(plan, c => c.Op == CommandOp.UnrelateAllFrom);
         var relateIdx = IndexOfFirst(plan, c => c.Op == CommandOp.Relate);
@@ -191,7 +191,7 @@ public sealed class CommitPlannerTests
 
         pending.ApplyCommand(Command.Upsert(id, new Dictionary<string, object?>()));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
 
         Assert.Single(plan);
         Assert.Equal(CommandOp.Upsert, plan[0].Op);
@@ -207,7 +207,7 @@ public sealed class CommitPlannerTests
 
         pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
         Assert.Empty(plan);
     }
 
@@ -220,7 +220,7 @@ public sealed class CommitPlannerTests
 
         pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
         Assert.Empty(plan);
     }
 
@@ -228,8 +228,8 @@ public sealed class CommitPlannerTests
     public void RejectReference_ToDeletedTarget_Throws()
     {
         // Stub registry: design.parent references constraints with Reject behavior.
-        ReferenceRegistry.Register(new StubRegistry(
-            ("designs", "constraint", "constraints", ReferenceDeleteBehavior.Reject)));
+        var registry = new StubRegistry(
+            ("designs", "constraint", "constraints", ReferenceDeleteBehavior.Reject));
 
         var design = new RecordId("designs", "d");
         var constraint = new RecordId("constraints", "c");
@@ -237,15 +237,15 @@ public sealed class CommitPlannerTests
         pending.HydrateReference(design, "constraint", constraint);
         pending.ApplyCommand(Command.Delete(constraint));
 
-        var ex = Assert.Throws<CommitPlanRejectException>(() => CommitPlanner.Build(pending));
+        var ex = Assert.Throws<CommitPlanRejectException>(() => CommitPlanner.Build(pending, registry));
         Assert.Contains(ex.Blockers, b => b.Contains("constraints:c") && b.Contains("designs:d"));
     }
 
     [Fact]
     public void UnsetReference_ToDeletedTarget_GeneratesFieldUnset()
     {
-        ReferenceRegistry.Register(new StubRegistry(
-            ("designs", "constraint", "constraints", ReferenceDeleteBehavior.Unset)));
+        var registry = new StubRegistry(
+            ("designs", "constraint", "constraints", ReferenceDeleteBehavior.Unset));
 
         var design = new RecordId("designs", "d");
         var constraint = new RecordId("constraints", "c");
@@ -253,7 +253,7 @@ public sealed class CommitPlannerTests
         pending.HydrateReference(design, "constraint", constraint);
         pending.ApplyCommand(Command.Delete(constraint));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, registry);
 
         // The owner survives; the field gets Unset; the target gets Deleted.
         Assert.Contains(plan, c => c.Op == CommandOp.Unset && c.Target == design && c.Key == "constraint");
@@ -266,9 +266,9 @@ public sealed class CommitPlannerTests
         // Three-phase reject: A points at C with Reject. A also points at B with
         // Cascade. B is deleted. Cascade phase deletes A. C's Reject scan should
         // therefore NOT see A as a blocker for C, because A is gone.
-        ReferenceRegistry.Register(new StubRegistry(
+        var registry = new StubRegistry(
             ("a", "b_ref", "b", ReferenceDeleteBehavior.Cascade),
-            ("a", "c_ref", "c", ReferenceDeleteBehavior.Reject)));
+            ("a", "c_ref", "c", ReferenceDeleteBehavior.Reject));
 
         var a = new RecordId("a", "1");
         var b = new RecordId("b", "1");
@@ -280,7 +280,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.Delete(b));
         pending.ApplyCommand(Command.Delete(c));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, registry);
 
         Assert.Contains(plan, x => x.Op == CommandOp.Delete && x.Target == a);
         Assert.Contains(plan, x => x.Op == CommandOp.Delete && x.Target == b);
@@ -292,8 +292,8 @@ public sealed class CommitPlannerTests
     {
         // A points at C with Reject. C is deleted. A is NOT cascade-deleted via any
         // other edge — A survives, so the Reject blocker is real.
-        ReferenceRegistry.Register(new StubRegistry(
-            ("a", "c_ref", "c", ReferenceDeleteBehavior.Reject)));
+        var registry = new StubRegistry(
+            ("a", "c_ref", "c", ReferenceDeleteBehavior.Reject));
 
         var a = new RecordId("a", "1");
         var c = new RecordId("c", "1");
@@ -302,7 +302,7 @@ public sealed class CommitPlannerTests
         pending.HydrateReference(a, "c_ref", c);
         pending.ApplyCommand(Command.Delete(c));
 
-        var ex = Assert.Throws<CommitPlanRejectException>(() => CommitPlanner.Build(pending));
+        var ex = Assert.Throws<CommitPlanRejectException>(() => CommitPlanner.Build(pending, registry));
         Assert.Contains(ex.Blockers, b => b.Contains("c:1") && b.Contains("a:1"));
     }
 
@@ -312,8 +312,8 @@ public sealed class CommitPlannerTests
         // A loaded with A.ref = X. User reassigns A.ref = Y, then deletes X.
         // The reject behavior is on the field, but at-end A no longer points at X,
         // so X can be deleted cleanly.
-        ReferenceRegistry.Register(new StubRegistry(
-            ("a", "ref", "x", ReferenceDeleteBehavior.Reject)));
+        var registry = new StubRegistry(
+            ("a", "ref", "x", ReferenceDeleteBehavior.Reject));
 
         var a = new RecordId("a", "1");
         var x = new RecordId("x", "1");
@@ -329,15 +329,15 @@ public sealed class CommitPlannerTests
 
         // No reject — A's at-end target is Y, not X. (Y is not deleted, so its own
         // Reject doesn't fire.)
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, registry);
         Assert.Contains(plan, c => c.Op == CommandOp.Delete && c.Target == x);
     }
 
     [Fact]
     public void CascadeReference_ToDeletedTarget_DeletesOwnerToo()
     {
-        ReferenceRegistry.Register(new StubRegistry(
-            ("designs", "constraint", "constraints", ReferenceDeleteBehavior.Cascade)));
+        var registry = new StubRegistry(
+            ("designs", "constraint", "constraints", ReferenceDeleteBehavior.Cascade));
 
         var design = new RecordId("designs", "d");
         var constraint = new RecordId("constraints", "c");
@@ -345,7 +345,7 @@ public sealed class CommitPlannerTests
         pending.HydrateReference(design, "constraint", constraint);
         pending.ApplyCommand(Command.Delete(constraint));
 
-        var plan = CommitPlanner.Build(pending);
+        var plan = CommitPlanner.Build(pending, registry);
 
         Assert.Contains(plan, c => c.Op == CommandOp.Delete && c.Target == design);
         Assert.Contains(plan, c => c.Op == CommandOp.Delete && c.Target == constraint);

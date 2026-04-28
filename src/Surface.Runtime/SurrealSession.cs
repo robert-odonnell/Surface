@@ -120,8 +120,20 @@ public sealed class SurrealSession
     /// <summary>Indexed write intent. Updated as commands arrive; consumed by <see cref="CommitPlanner.Build"/> at commit time.</summary>
     public PendingState Pending { get; }
 
-    public SurrealSession()
+    /// <summary>
+    /// The model's reference-field registry — used by the commit planner to resolve
+    /// <c>[Reject]</c> / <c>[Unset]</c> / <c>[Cascade]</c> behavior against incoming
+    /// references. Pass <c>{CompositionRoot}.ReferenceRegistry</c> from your generated
+    /// partial; sessions created without one see no reference metadata, which makes the
+    /// planner permissive on deletes (acceptable for tests, not real consumers).
+    /// </summary>
+    public IReferenceRegistry ReferenceRegistry { get; }
+
+    public SurrealSession() : this(NullReferenceRegistry.Instance) { }
+
+    public SurrealSession(IReferenceRegistry referenceRegistry)
     {
+        ReferenceRegistry = referenceRegistry;
         Pending = new PendingState(loadedAtStart, relationsAtStart);
     }
 
@@ -506,7 +518,7 @@ public sealed class SurrealSession
     /// </summary>
     public (string Sql, IReadOnlyDictionary<string, object?> Parameters) RenderBatch()
     {
-        var plan = CommitPlanner.Build(Pending);
+        var plan = CommitPlanner.Build(Pending, ReferenceRegistry);
         return SurrealCommandEmitter.Emit(plan);
     }
 

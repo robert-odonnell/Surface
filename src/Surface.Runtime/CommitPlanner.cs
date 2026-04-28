@@ -20,9 +20,9 @@ namespace Surface.Runtime;
 /// </summary>
 public static class CommitPlanner
 {
-    public static IReadOnlyList<Command> Build(PendingState pending)
+    public static IReadOnlyList<Command> Build(PendingState pending, IReferenceRegistry registry)
     {
-        ResolveReferenceDeletes(pending);
+        ResolveReferenceDeletes(pending, registry);
 
         var preDeletes        = new List<Command>(); // §16 phase 5
         var creates           = new List<Command>(); // §16 phase 6
@@ -81,7 +81,7 @@ public static class CommitPlanner
     // dict. The live dict gets cleaned up as a read-side concern; the planner needs the
     // immutable transition state to reason about the reference graph correctly.
 
-    private static void ResolveReferenceDeletes(PendingState pending)
+    private static void ResolveReferenceDeletes(PendingState pending, IReferenceRegistry registry)
     {
         // Phase 2: cascade + unset to fixpoint.
         var processed = new HashSet<RecordId>();
@@ -94,7 +94,7 @@ public static class CommitPlanner
                 if (!IsEffectivelyDeleted(rec)) continue;
                 if (!processed.Add(rec.Id)) continue;
 
-                foreach (var (ownerId, fieldName, info) in EffectiveIncomingReferences(rec.Id, pending))
+                foreach (var (ownerId, fieldName, info) in EffectiveIncomingReferences(rec.Id, pending, registry))
                 {
                     switch (info.Behavior)
                     {
@@ -129,7 +129,7 @@ public static class CommitPlanner
         {
             if (!IsEffectivelyDeleted(rec)) continue;
 
-            foreach (var (ownerId, fieldName, info) in EffectiveIncomingReferences(rec.Id, pending))
+            foreach (var (ownerId, fieldName, info) in EffectiveIncomingReferences(rec.Id, pending, registry))
             {
                 if (info.Behavior == ReferenceDeleteBehavior.Reject)
                 {
@@ -159,9 +159,10 @@ public static class CommitPlanner
     /// </summary>
     private static IEnumerable<(RecordId Owner, string Field, ReferenceFieldInfo Info)> EffectiveIncomingReferences(
         RecordId targetId,
-        PendingState pending)
+        PendingState pending,
+        IReferenceRegistry registry)
     {
-        var infos = ReferenceRegistry.IncomingReferencesTo(targetId.Table);
+        var infos = registry.IncomingReferencesTo(targetId.Table);
         if (infos.Count == 0) yield break;
 
         foreach (var transition in pending.References.Values)

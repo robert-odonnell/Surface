@@ -20,14 +20,11 @@ await using var transport = new SurrealHttpClient(config, http);
 Console.WriteLine("=== Surface.Sample harness ===");
 Console.WriteLine($"Connected: {config.Url}  ns={config.Namespace}  db={config.Database}\n");
 
-// ── 1. Apply schema (generator-emitted, idempotent). Each chunk is one logical unit
-//    — entity tables, per-table fields, per-relation table — applied in its own
-//    transport call so a failure points at exactly which chunk broke.
-Console.WriteLine($"Applying schema ({GeneratedSchema.Script.Count} chunks)...");
-foreach (var chunk in GeneratedSchema.Script)
-{
-    await transport.ExecuteAsync(chunk);
-}
+// ── 1. Apply schema (generator-emitted, idempotent). One transport call per chunk
+//    so a failure pinpoints which one broke. Iterate `Workspace.Schema` directly if
+//    you need to filter / log / transact per chunk.
+Console.WriteLine($"Applying schema ({Workspace.Schema.Count} chunks)...");
+await Workspace.ApplySchemaAsync(transport);
 Console.WriteLine("  schema ready.\n");
 
 // Dev-time hygiene: clear any stale writer_lease record so reruns don't trip on a
@@ -220,56 +217,3 @@ async Task ReloadAndPrint(DesignId designId)
         Console.WriteLine($"    - {c.Id}  description='{c.Description}'  details={c.Details?.Id}");
     }
 }
-
-// Optional simple-form OnCreate hooks — generator emits a `partial void OnCreate{Ref}`
-// declaration for every mandatory [Reference]; if we don't implement it, the call is
-// elided and the auto-minted Details just keeps its DEFAULT field values.
-namespace Surface.Sample.Models
-{
-    //public partial class Design
-    //{
-    //    partial void OnCreateDetails(Details entity)
-    //    {
-    //        entity.Header  = "design header";
-    //        entity.Summary = "auto-seeded summary";
-    //    }
-    //}
-
-    //public partial class Epic
-    //{
-    //    partial void OnCreateDetails(Details entity) =>
-    //        entity.Header = "epic header";
-    //}
-
-    //public partial class Constraint
-    //{
-    //    partial void OnCreateDetails(Details entity) =>
-    //        entity.Header = "constraint header";
-    //}
-}
-
-
-//SELECT * FROM designs:01KQ7AF5MDP9VPBMJFEYHZ32VH;
-//SELECT * FROM constraints WHERE design.id INSIDE (SELECT VALUE id FROM designs);
-//SELECT * FROM epics WHERE design.id INSIDE (SELECT VALUE id FROM designs);
-//SELECT * FROM features WHERE epic.id INSIDE (SELECT VALUE id FROM epics);
-//SELECT * FROM user_stories WHERE feature.id INSIDE (SELECT VALUE id FROM features);
-//SELECT * FROM acceptance_criteria WHERE user_story.id INSIDE (SELECT VALUE id FROM user_stories);
-//SELECT * FROM tests WHERE user_story.id INSIDE (SELECT VALUE id FROM user_stories);
-
-//SELECT 
-// array::flatten(id,
-//     (SELECT VALUE id FROM constraints WHERE design = $parent.id) ,
-//     (SELECT VALUE id FROM epics WHERE design = $parent.id) ,
-//     (SELECT VALUE id FROM features WHERE epic.design = $parent.id),
-//     (SELECT VALUE id FROM user_stories WHERE feature.epic.design = $parent.id),
-//     (SELECT VALUE id FROM acceptance_criteria WHERE user_story.feature.epic.design = $parent.id),
-//     (SELECT VALUE id FROM tests WHERE user_story.feature.epic.design = $parent.id)]) as ids
-// FROM designs:01KQ7BKJX2K8DB3SC3KKEN25DZ;
-
-//SELECT in, out FROM restricts WHERE in.id INSIDE (SELECT VALUE id FROM constraints);
-//SELECT in, out FROM validates WHERE in.id INSIDE (SELECT VALUE id FROM tests);
-//SELECT in, out FROM assesses WHERE out.id INSIDE ((SELECT VALUE id FROM designs));
-//SELECT in, out FROM concerns WHERE out.id INSIDE ((SELECT VALUE id FROM acceptance_criteria) + (SELECT VALUE id FROM constraints) + (SELECT VALUE id FROM designs) + (SELECT VALUE id FROM epics) + (SELECT VALUE id FROM features) + (SELECT VALUE id FROM tests) + (SELECT VALUE id FROM user_stories));
-//SELECT in, out FROM references WHERE out.id INSIDE ((SELECT VALUE id FROM acceptance_criteria) + (SELECT VALUE id FROM constraints) + (SELECT VALUE id FROM designs) + (SELECT VALUE id FROM epics) + (SELECT VALUE id FROM features) + (SELECT VALUE id FROM tests) + (SELECT VALUE id FROM user_stories));
-//SELECT in, out FROM revises WHERE out.id INSIDE ((SELECT VALUE id FROM acceptance_criteria) + (SELECT VALUE id FROM constraints) + (SELECT VALUE id FROM designs) + (SELECT VALUE id FROM epics) + (SELECT VALUE id FROM features) + (SELECT VALUE id FROM tests) + (SELECT VALUE id FROM user_stories));

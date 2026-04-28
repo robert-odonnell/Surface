@@ -128,6 +128,29 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
+    public void CompositionRoot_HostsModelMetadata_AsStaticMembers()
+    {
+        var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        // Schema chunks live behind a static accessor on the user's [CompositionRoot].
+        Assert.Contains("public static System.Collections.Generic.IReadOnlyList<string> Schema", allSrc);
+        // Reference registry exposed the same way; the impl class is internal.
+        Assert.Contains("public static global::Surface.Runtime.IReferenceRegistry ReferenceRegistry", allSrc);
+        Assert.Contains("internal sealed class GeneratedReferenceRegistry", allSrc);
+
+        // No more global static facade or [ModuleInitializer] hookup.
+        Assert.DoesNotContain("ModuleInitializer", allSrc);
+        Assert.DoesNotContain("Surface.Runtime.ReferenceRegistry.Register", allSrc);
+
+        // Load*Async passes the local registry into the new SurrealSession ctor.
+        Assert.Contains("new global::Surface.Runtime.SurrealSession(ReferenceRegistry)", allSrc);
+
+        // Convenience ApplySchemaAsync sits next to Schema for the common boot path.
+        Assert.Contains("public static async global::System.Threading.Tasks.Task ApplySchemaAsync", allSrc);
+    }
+
+    [Fact]
     public void NoCompositionRoot_SuppressesLoadMethodEmission()
     {
         var src = """
