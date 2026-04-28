@@ -53,11 +53,18 @@ The generator emits everything needed to make this work end-to-end:
 - Directional read primitives (`Session.QueryOutgoing<TKind, T>(this)`, `Session.QueryIncoming<TKind, T>(this)`) — no ambiguity on self-referential edges
 - `Workspace.Schema` (`IReadOnlyList<string>` of idempotent DDL chunks) and `Workspace.ApplySchemaAsync(transport)` — model-scoped, no process globals
 - `Workspace.ReferenceRegistry` carrying the per-model `[Reference]` field metadata (delete behaviour) the commit planner reads through
-- Diagnostics (CG001–CG020) that catch model-level mistakes at compile time
+- Diagnostics (CG001-CG021) that catch model-level mistakes at compile time
 
 The library promise is **minimal intrusion**: the generator never forces a base class, ctor, or
 inherited member on you. The `[CompositionRoot]` partial is yours — wire transport, caches,
 telemetry, and DI however you want. The library only contributes the load methods.
+
+## Documentation
+
+- [Introduction](docs/intro.md)
+- [Quickstart](docs/quickstart.md)
+- [API reference](docs/api.md)
+- [Architecture](docs/architecture.md)
 
 ## Quick start
 
@@ -143,7 +150,9 @@ instance lives elsewhere.
 
 ## Authoring conventions
 
-A `[Table]` class must be `partial` and declare exactly one `[Id]` partial property.
+A `[Table]` class must be `partial` and may declare at most one `[Id]` partial property.
+Declaring `[Id]` is recommended for a public typed-id accessor; if omitted, the generator
+still emits the internal id anchor required by the runtime.
 A single class may be tagged `[CompositionRoot]` and must also be partial — the generator
 grafts the per-aggregate load methods onto it.
 
@@ -217,12 +226,13 @@ Plus aggregate / relation marker attributes:
 
 ## Diagnostics
 
-The generator emits CG001–CG020 covering: missing `partial` modifier, missing /
-duplicate `[Id]`, invalid relation method shape, `[Children]` element-type mistakes,
+The generator emits CG001-CG021 covering: missing `partial` modifier, duplicate `[Id]`,
+invalid relation method shape, `[Children]` element-type mistakes,
 multiple-aggregate ownership, reference-delete behavior validation, cascade cycles,
 dangling-`Ignore` warnings, multiple `[CompositionRoot]` declarations, and
 non-partial `[CompositionRoot]`, and `[Children]` member without a `[Parent]` path
-back to the aggregate root. Full list in
+back to the aggregate root, and `[Reference]` fields that cross aggregate boundaries.
+Full list in
 `src/Disruptor.Surface.Generator/Pipeline/Diagnostics.cs`.
 
 ## Status
