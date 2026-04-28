@@ -364,6 +364,14 @@ internal static class PartialEmitter
     /// id anchor. Only called when the user has declared an <c>[Id]</c>-tagged partial
     /// property; without one, the entity simply has no public-facing Id surface (the
     /// anchor still exists internally).
+    /// <para>
+    /// The setter (when declared) refuses to mutate the anchor once the entity is bound
+    /// to a session — by that point the entity lives in the session's identity map keyed
+    /// on the current id, and silently overwriting it would corrupt every dict. Pre-bind
+    /// sets are fine: the session hasn't adopted the entity yet, and the
+    /// <c>new Design { Id = knownId }</c> object-initializer pattern (handy for
+    /// constructing handles to look up in a freshly loaded workspace) keeps working.
+    /// </para>
     /// </summary>
     private static void EmitIdProperty(StringBuilder builder, string indent, PropertyModel p)
     {
@@ -388,7 +396,17 @@ internal static class PartialEmitter
         {
             builder
                 .Append(indent)
-                .AppendLine("    set => _id = value;");
+                .AppendLine("    set")
+                .Append(indent)
+                .AppendLine("    {")
+                .Append(indent)
+                .AppendLine("        if (_session is not null)")
+                .Append(indent)
+                .AppendLine("            throw new global::System.InvalidOperationException(\"Cannot mutate Id after the entity is bound to a session.\");")
+                .Append(indent)
+                .AppendLine("        _id = value;")
+                .Append(indent)
+                .AppendLine("    }");
         }
         builder
             .Append(indent)

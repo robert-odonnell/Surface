@@ -62,6 +62,21 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
+    public void IdSetter_Throws_When_EntityIsBoundToSession()
+    {
+        // [Id] is the user's optional public-facing accessor — we own its body, so the
+        // setter (when declared) refuses to overwrite the anchor once the entity is bound:
+        // the session's identity map is keyed on the current id, so silently mutating it
+        // after bind would corrupt every dict. Pre-bind sets are fine; that's the
+        // `new Design { Id = knownId }` pattern.
+        var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        Assert.Contains("if (_session is not null)", allSrc);
+        Assert.Contains("Cannot mutate Id after the entity is bound to a session.", allSrc);
+    }
+
+    [Fact]
     public void Emits_CompositionRoot_LoadAsync_PerAggregateRoot()
     {
         var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
