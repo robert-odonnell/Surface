@@ -4,35 +4,34 @@ using System.Collections;
 namespace Surface.Runtime;
 
 /// <summary>
-/// A mutable, ordered collection that lives on an entity field and notifies the owner's
-/// bound <see cref="SurrealSession"/> on every mutation. Backs SurrealDB's
-/// <c>array&lt;object&gt;</c> inline-collection columns (e.g. <c>acceptance_criteria.scenarios</c>,
-/// <c>tests.facts</c>) — Surreal preserves insertion order natively, so reordering
-/// operations like <see cref="Move"/> just shuffle the underlying list and re-record.
+/// A mutable, ordered collection that lives on an entity field and routes every mutation
+/// through a writer callback supplied by the generator. Backs SurrealDB's
+/// <c>array&lt;object&gt;</c> inline-collection columns (e.g.
+/// <c>acceptance_criteria.scenarios</c>, <c>tests.facts</c>) — Surreal preserves
+/// insertion order natively, so reordering operations like <see cref="Move"/> just
+/// shuffle the underlying list and re-record.
 /// <para>
-/// Each mutation call routes the underlying <see cref="List{T}"/> reference through
-/// <see cref="SurrealSession.SetField"/>; the dirty batch holds the live reference, so
-/// subsequent mutations are automatically picked up at commit time without re-recording.
-/// Mutations made before the owner is tracked (object-initializer time) silently update
-/// the in-memory list — the owner's <see cref="IEntity.Flush"/> picks them up via the
-/// final SetField when Track binds it.
+/// The writer callback is the generator-emitted entity's <c>__WriteField</c>: same lifecycle
+/// as scalar / reference / parent setters, so pre-bind mutations buffer alongside object-
+/// initializer values and replay through <see cref="IEntity.Flush"/> when the owner is
+/// tracked. The dirty batch holds the live <see cref="List{T}"/> reference, so subsequent
+/// mutations on the same list are automatically picked up at commit time.
 /// </para>
 /// </summary>
 public sealed class SurrealArray<T> : IList<T>, IReadOnlyList<T>
 {
     private readonly List<T> items;
-    private readonly IEntity owner;
-    private readonly string fieldName;
+    private readonly Action<List<T>> writer;
 
     /// <summary>
-    /// Construct a tracked list bound to <paramref name="owner"/>'s
-    /// <paramref name="fieldName"/>. Generator-emitted property getters call this with no
-    /// initial items; the loader (when wired) calls it with the hydrated payload.
+    /// Construct a tracked list with a writer callback. Generator-emitted property getters
+    /// call this with no initial items and a lambda that routes through the entity's
+    /// <c>__WriteField</c>; the loader's <see cref="IEntity.Hydrate"/> path calls it with
+    /// the hydrated payload (and the same writer).
     /// </summary>
-    public SurrealArray(IEntity owner, string fieldName, IEnumerable<T>? initial = null)
+    public SurrealArray(IEnumerable<T>? initial, Action<List<T>> writer)
     {
-        this.owner = owner;
-        this.fieldName = fieldName;
+        this.writer = writer;
         items = initial is null ? [] : [..initial];
     }
 
@@ -111,11 +110,5 @@ public sealed class SurrealArray<T> : IList<T>, IReadOnlyList<T>
     IEnumerator<T> IEnumerable<T>.GetEnumerator() => items.GetEnumerator();
     IEnumerator IEnumerable.GetEnumerator() => items.GetEnumerator();
 
-    /// <summary>
-    /// Mutation goes via the owner's currently-bound session. If the owner hasn't been
-    /// tracked yet, the call is a silent no-op — the underlying list is still updated, and
-    /// the owner's <see cref="IEntity.Flush"/> will queue the final state when it's
-    /// tracked.
-    /// </summary>
-    private void Notify() => owner.Session?.SetField(owner.Id, fieldName, items);
+    private void Notify() => writer(items);
 }

@@ -306,6 +306,9 @@ internal static class PartialEmitter
         var backing = $"_{ToCamel(p.Name)}";
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
 
+        // The writer lambda routes through __WriteField — same path as scalar setters —
+        // so pre-bind mutations buffer in _pendingWrites and replay through Flush when
+        // Track binds the entity. Nothing reaches Session.SetField directly.
         builder
             .Append(indent)
             .Append("private ")
@@ -323,9 +326,9 @@ internal static class PartialEmitter
             .Append(backing)
             .Append(" ??= new ")
             .Append(declaredType)
-            .Append("(this, ")
+            .Append("(null, __items => __WriteField(")
             .Append(fieldLit)
-            .AppendLine(");");
+            .AppendLine(", __items));");
     }
 
     private static void EmitIdProperty(StringBuilder builder, string indent, PropertyModel p)
@@ -1108,11 +1111,11 @@ internal static class PartialEmitter
             .Append(backing)
             .Append(" = new ")
             .Append(declaredType)
-            .Append("(this, ")
-            .Append(fieldLit)
-            .Append(", ")
+            .Append('(')
             .Append(localItems)
-            .AppendLine(");")
+            .Append(", __items => __WriteField(")
+            .Append(fieldLit)
+            .AppendLine(", __items));")
             .Append(indent)
             .AppendLine("    }");
     }
