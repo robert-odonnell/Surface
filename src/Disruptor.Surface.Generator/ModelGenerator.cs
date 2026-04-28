@@ -4,7 +4,6 @@ using Disruptor.Surface.Generator.Model;
 using Disruptor.Surface.Generator.Pipeline;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.CodeAnalysis.Text;
 
 namespace Disruptor.Surface.Generator;
 
@@ -13,9 +12,6 @@ public sealed class ModelGenerator : IIncrementalGenerator
 {
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        context.RegisterPostInitializationOutput(static ctx =>
-            ctx.AddSource(AnnotationsSource.HintName, SourceText.From(AnnotationsSource.Source, System.Text.Encoding.UTF8)));
-
         var tables = context.SyntaxProvider
             .ForAttributeWithMetadataName(
                 AnnotationsMetadata.Table,
