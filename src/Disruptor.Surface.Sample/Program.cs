@@ -3,8 +3,8 @@ using Disruptor.Surface.Sample;
 using Disruptor.Surface.Sample.Models;
 using Disruptor.Surface.Sample.Relations;
 
-const string DesignAggregate = "design";
-const string ReviewAggregate = "review";
+const string designAggregate = "design";
+const string reviewAggregate = "review";
 
 // Mirror of: surreal start --bind 127.0.0.1:8000 --default-namespace project-brain
 //                          --default-database workspace --username root --password secret
@@ -18,12 +18,13 @@ var config = new SurrealConfig(
 
 using var http = new HttpClient();
 await using var transport = new SurrealHttpClient(config, http);
+
 var workspace = new Workspace();
 
 Console.WriteLine("=== Disruptor.Surface.Sample harness ===");
 Console.WriteLine($"Connected: {config.Url}  ns={config.Namespace}  db={config.Database}\n");
 
-// ── 1. Apply schema. One transport call per chunk so a failure pinpoints which one
+// ── 1. Apply schema. One db call per chunk so a failure pinpoints which one
 //    broke. Iterate `Workspace.Schema` directly when you want to filter / log /
 //    transact per chunk.
 Console.WriteLine($"Applying schema ({Workspace.Schema.Count} chunks)...");
@@ -39,30 +40,30 @@ await transport.ExecuteAsync("DELETE writer_lease;");
 var seededDesignIds = new List<DesignId>();
 for (var i = 0; i < 3; i++)
 {
-    seededDesignIds.Add(await SeedAndCommitDesign($"seed-{i}"));
+    seededDesignIds.Add(await SeedAndCommitDesign($"seed-{i}", transport));
 }
 
 // ── 3. Seed a Review aggregate that assesses the third Design. Exercises cross-
 //    aggregate edges (Review.Assesses → Design, Issue.Concerns → Constraint), plus
 //    within-aggregate edges that aren't `restricts` (Finding.Informs → Issue,
 //    Finding.Cites → Observation, DesignChange.Resolves → Issue).
-var reviewId = await SeedAndCommitReview(seededDesignIds[2]);
+var reviewId = await SeedAndCommitReview(seededDesignIds[2], transport);
 
 // ── 4. Reload + print. Verifies the round-trip including SurrealArray<Scenario>
 //    contents, cross-aggregate id collections, and within-aggregate edge reads.
-await ReloadAndPrintDesign(seededDesignIds[2]);
-await ReloadAndPrintReview(reviewId);
+await ReloadAndPrintDesign(seededDesignIds[2], transport);
+await ReloadAndPrintReview(reviewId, transport);
 
 // ── 5. Lease theft demo — acquire a lease, simulate theft via direct DELETE, then
 //    attempt commit and observe the typed exception.
-await DemoLeaseTheft(seededDesignIds[2]);
+await DemoLeaseTheft(seededDesignIds[2], transport);
 
 return 0;
 
-async Task<DesignId> SeedAndCommitDesign(string text)
+async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
 {
     Console.WriteLine($"--- Seeding design '{text}' ---");
-    await using var lease = await WriterLease.AcquireAsync(transport, DesignAggregate);
+    await using var lease = await WriterLease.AcquireAsync(db, designAggregate);
 
     var session = new SurrealSession(Workspace.ReferenceRegistry);
     var design = session.Track(new Design
@@ -80,7 +81,7 @@ async Task<DesignId> SeedAndCommitDesign(string text)
     var constraint = session.Track(new Constraint
     {
         Design = design,
-        Details = MintDetails($"design.constraint"),
+        Details = MintDetails("design.constraint"),
         Description = $"design.constraint.description: {text}"
     });
 
@@ -156,7 +157,7 @@ async Task<DesignId> SeedAndCommitDesign(string text)
     }
 
     Console.WriteLine($"  pending: {session.Pending.Records.Count} records, {session.Log.Count} commands");
-    await session.CommitAsync(transport, lease);
+    await session.CommitAsync(db, lease);
     Console.WriteLine($"  committed; design id = {design.Id}\n");
     return design.Id;
 
@@ -168,19 +169,19 @@ async Task<DesignId> SeedAndCommitDesign(string text)
     };
 }
 
-async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId)
+async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SurrealHttpClient db)
 {
     Console.WriteLine($"--- Seeding review of {targetDesignId} ---");
 
     // Pre-load the target design so we can pick a real Constraint id to link `Concerns`
     // against (cross-aggregate edges are id-typed; the link is just an id, not a typed
     // entity). This is the canonical "load other aggregate to discover its ids" pattern.
-    var preload = await workspace.LoadDesignAsync(transport, targetDesignId);
+    var preload = await workspace.LoadDesignAsync(db, targetDesignId);
     var design = preload.Get<Design>(targetDesignId)
         ?? throw new InvalidOperationException($"design {targetDesignId} did not hydrate");
     var someConstraintId = design.Constraints.First().Id;
 
-    await using var lease = await WriterLease.AcquireAsync(transport, ReviewAggregate);
+    await using var lease = await WriterLease.AcquireAsync(db, reviewAggregate);
     var session = new SurrealSession(Workspace.ReferenceRegistry);
 
     var review = session.Track(new Review
@@ -233,20 +234,20 @@ async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId)
     // Cross-aggregate edges (Review → Design): Review assesses the Design, Observation
     // references it, Issue concerns one of its Constraints, DesignChange revises it.
     session.Relate<Assesses>(review.Id, targetDesignId);
-    session.Relate<Disruptor.Surface.Sample.Relations.References>(observation.Id, targetDesignId);
+    session.Relate<References>(observation.Id, targetDesignId);
     session.Relate<Concerns>(issue.Id, someConstraintId);
     session.Relate<Revises>(change.Id, targetDesignId);
 
     Console.WriteLine($"  pending: {session.Pending.Records.Count} records, {session.Log.Count} commands");
-    await session.CommitAsync(transport, lease);
+    await session.CommitAsync(db, lease);
     Console.WriteLine($"  committed; review id = {review.Id}\n");
     return review.Id;
 }
 
-async Task ReloadAndPrintDesign(DesignId designId)
+async Task ReloadAndPrintDesign(DesignId designId, SurrealHttpClient db)
 {
     Console.WriteLine($"--- Reloading Design {designId} ---");
-    var session = await workspace.LoadDesignAsync(transport, designId);
+    var session = await workspace.LoadDesignAsync(db, designId);
 
     var design = session.Get<Design>(designId)
                  ?? throw new InvalidOperationException($"Loader didn't hydrate {designId}.");
@@ -287,13 +288,13 @@ async Task ReloadAndPrintDesign(DesignId designId)
     Console.WriteLine();
 }
 
-async Task ReloadAndPrintReview(ReviewId reviewId)
+async Task ReloadAndPrintReview(ReviewId reloadId, SurrealHttpClient db)
 {
-    Console.WriteLine($"--- Reloading Review {reviewId} ---");
-    var session = await workspace.LoadReviewAsync(transport, reviewId);
+    Console.WriteLine($"--- Reloading Review {reloadId} ---");
+    var session = await workspace.LoadReviewAsync(db, reloadId);
 
-    var review = session.Get<Review>(reviewId)
-                 ?? throw new InvalidOperationException($"Loader didn't hydrate {reviewId}.");
+    var review = session.Get<Review>(reloadId)
+                 ?? throw new InvalidOperationException($"Loader didn't hydrate {reloadId}.");
 
     Console.WriteLine($"  outcome: '{review.Outcome}'  mode: '{review.Mode}'  state: '{review.State}'");
     Console.WriteLine($"  details: header='{review.Details?.Header}'");
@@ -324,11 +325,11 @@ async Task ReloadAndPrintReview(ReviewId reviewId)
     Console.WriteLine();
 }
 
-async Task DemoLeaseTheft(DesignId designId)
+async Task DemoLeaseTheft(DesignId designId, SurrealHttpClient db)
 {
     Console.WriteLine("--- Lease theft recovery demo ---");
-    await using var lease = await WriterLease.AcquireAsync(transport, DesignAggregate);
-    var session = await workspace.LoadDesignAsync(transport, designId);
+    await using var lease = await WriterLease.AcquireAsync(db, designAggregate);
+    var session = await workspace.LoadDesignAsync(db, designId);
     var design = session.Get<Design>(designId)!;
     // Mutate, but don't commit yet.
     var beforeReload = design.Description;
@@ -336,16 +337,16 @@ async Task DemoLeaseTheft(DesignId designId)
 
     // Simulate another writer stealing the lease — direct DELETE wipes the lock row
     // out from under us. Real life would be a TTL expiring + another acquirer claiming.
-    await transport.ExecuteAsync("DELETE writer_lease;");
+    await db.ExecuteAsync("DELETE writer_lease;");
     Console.WriteLine("  simulated lease theft (DELETE writer_lease;)");
 
     // The (now-invalid) writer attempts to commit. RenewAsync runs first inside
     // CommitAsync; it should detect the missing/stolen row and throw.
     var rwSession = new SurrealSession(Workspace.ReferenceRegistry);
-    var rwTracked = rwSession.Track(new Design { Id = designId, Description = beforeReload + " [edit]" });
+    rwSession.Track(new Design { Id = designId, Description = beforeReload + " [edit]" });
     try
     {
-        await rwSession.CommitAsync(transport, lease);
+        await rwSession.CommitAsync(db, lease);
         Console.WriteLine("  ⚠  commit succeeded — lease theft NOT detected (unexpected)");
     }
     catch (WriterLeaseStolenException ex)

@@ -426,11 +426,9 @@ public sealed class SurrealSessionTests
     }
 
     /// <summary>Test-only entity that records the order of session-side hook calls.</summary>
-    private sealed class StubEntity : IEntity
+    private sealed class StubEntity(RecordId id) : IEntity
     {
-        public StubEntity(RecordId id) { Id = id; }
-
-        public RecordId Id { get; }
+        public RecordId Id { get; } = id;
         public SurrealSession? Session { get; private set; }
         public SurrealSession? BoundSession => Session;
         public List<string> Calls { get; } = [];
@@ -462,10 +460,8 @@ public sealed class SurrealSessionTests
     }
 
     /// <summary>Always-throws transport — drives the fail-closed-on-exception test.</summary>
-    private sealed class ThrowingTransport : ISurrealTransport
+    private sealed class ThrowingTransport(Exception ex) : ISurrealTransport
     {
-        private readonly Exception ex;
-        public ThrowingTransport(Exception ex) => this.ex = ex;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
             => Task.FromException<JsonDocument>(ex);

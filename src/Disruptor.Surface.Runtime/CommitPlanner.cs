@@ -1,5 +1,3 @@
-#nullable enable
-
 namespace Disruptor.Surface.Runtime;
 
 /// <summary>
@@ -388,13 +386,8 @@ public static class CommitPlanner
 }
 
 /// <summary>Thrown by <see cref="CommitPlanner.Build"/> when one or more <c>[Reject]</c> incoming references would block a pending delete.</summary>
-public sealed class CommitPlanRejectException : Exception
+public sealed class CommitPlanRejectException(IReadOnlyList<string> blockers)
+    : Exception($"Commit plan rejected: {string.Join(" | ", blockers)}")
 {
-    public IReadOnlyList<string> Blockers { get; }
-
-    public CommitPlanRejectException(IReadOnlyList<string> blockers)
-        : base($"Commit plan rejected: {string.Join(" | ", blockers)}")
-    {
-        Blockers = blockers;
-    }
+    public IReadOnlyList<string> Blockers { get; } = blockers;
 }

@@ -17,10 +17,10 @@ namespace Disruptor.Surface.Runtime;
 /// <c>[A-Za-z0-9_]</c> — defence in depth against future id types or stale call sites.
 /// </para>
 /// </summary>
-public static class SurrealFormatter
+public static partial class SurrealFormatter
 {
-    private static readonly Regex IdentifierPattern = new(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
-    private static readonly Regex BareValuePattern = new(@"^[A-Za-z0-9_]+$", RegexOptions.Compiled);
+    private static readonly Regex IdentifierPattern = IdentifierPatternRegex();
+    private static readonly Regex BareValuePattern = BareValuePatternRegex();
 
     /// <summary>
     /// Validates a generator-emitted identifier (table name, field name, edge name) and
@@ -45,7 +45,7 @@ public static class SurrealFormatter
     public static string RecordId(RecordId id)
     {
         var table = Identifier(id.Table);
-        var value = id.Value ?? string.Empty;
+        var value = id.Value;
 
         if (BareValuePattern.IsMatch(value))
         {
@@ -74,6 +74,9 @@ public static class SurrealFormatter
             .Replace("\t", "\\t", StringComparison.Ordinal);
         return $"\"{escaped}\"";
     }
+
+    [GeneratedRegex("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled)] private static partial Regex IdentifierPatternRegex();
+    [GeneratedRegex("^[A-Za-z0-9_]+$", RegexOptions.Compiled)] private static partial Regex BareValuePatternRegex();
 }
 
 public sealed class SurrealFormatException(string message) : Exception(message);

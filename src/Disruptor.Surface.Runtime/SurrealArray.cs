@@ -1,4 +1,3 @@
-#nullable enable
 using System.Collections;
 
 namespace Disruptor.Surface.Runtime;

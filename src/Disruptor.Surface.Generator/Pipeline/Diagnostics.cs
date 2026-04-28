@@ -14,37 +14,29 @@ internal static class Diagnostics
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
-    public static readonly DiagnosticDescriptor RelationVerbUnknown = new(
-        id: "CG003",
-        title: "Unsupported relation method verb",
-        messageFormat: "Relation method '{0}' must start with Add, Remove, Clear, Set, List or Get",
-        category: Category,
-        defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
+    //public static readonly DiagnosticDescriptor RelationKindMissingBase = new(
+    //    id: "CG004",
+    //    title: "Relation kind attribute has wrong base",
+    //    messageFormat: "'{0}' is marked as a relation kind but does not derive from ForwardRelation or InverseRelation<T>",
+    //    category: Category,
+    //    defaultSeverity: DiagnosticSeverity.Error,
+    //    isEnabledByDefault: true);
 
-    public static readonly DiagnosticDescriptor RelationKindMissingBase = new(
-        id: "CG004",
-        title: "Relation kind attribute has wrong base",
-        messageFormat: "'{0}' is marked as a relation kind but does not derive from ForwardRelation or InverseRelation<T>",
-        category: Category,
-        defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
+    //public static readonly DiagnosticDescriptor InverseRelationMissingForward = new(
+    //    id: "CG005",
+    //    title: "Inverse relation kind missing forward pair",
+    //    messageFormat: "Inverse kind '{0}' references forward kind '{1}' which does not derive from ForwardRelation",
+    //    category: Category,
+    //    defaultSeverity: DiagnosticSeverity.Warning,
+    //    isEnabledByDefault: true);
 
-    public static readonly DiagnosticDescriptor InverseRelationMissingForward = new(
-        id: "CG005",
-        title: "Inverse relation kind missing forward pair",
-        messageFormat: "Inverse kind '{0}' references forward kind '{1}' which does not derive from ForwardRelation",
-        category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
-        isEnabledByDefault: true);
-
-    public static readonly DiagnosticDescriptor RelationReturnTypeInvalid = new(
-        id: "CG006",
-        title: "Relation method return type invalid",
-        messageFormat: "Relation method '{0}' must return void, a [Table] type, or IReadOnlyCollection<T> where T is a [Table] type",
-        category: Category,
-        defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
+    //public static readonly DiagnosticDescriptor RelationReturnTypeInvalid = new(
+    //    id: "CG006",
+    //    title: "Relation method return type invalid",
+    //    messageFormat: "Relation method '{0}' must return void, a [Table] type, or IReadOnlyCollection<T> where T is a [Table] type",
+    //    category: Category,
+    //    defaultSeverity: DiagnosticSeverity.Error,
+    //    isEnabledByDefault: true);
 
     // CG007 retired (2026-04) — [Id] is now optional. The id anchor is always emitted by
     // PartialEmitter and the {Name}Id struct is always emitted by IdEmitter; the user's

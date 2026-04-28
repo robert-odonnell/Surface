@@ -138,11 +138,11 @@ public sealed class SurrealSession : IHydrationSink
     // pending mutation batch. Successful CommitAsync or AbandonAsync flips `_closed` to
     // true, after which every public method throws. Hydrate-side helpers stay open
     // because they only ever run during initial load — before the user gets a handle.
-    private bool _closed;
+    private bool closed;
 
     private void ThrowIfClosed()
     {
-        if (_closed)
+        if (closed)
         {
             throw new InvalidOperationException(
                 "This SurrealSession is closed. Load a new session for further work.");
@@ -150,7 +150,7 @@ public sealed class SurrealSession : IHydrationSink
     }
 
     /// <summary>True after <see cref="CommitAsync"/> or <see cref="AbandonAsync"/> has run; further reads or writes throw.</summary>
-    public bool IsClosed => _closed;
+    public bool IsClosed => closed;
 
     // Filled by the loader's HydrateTrack / HydrateEdge — used by PendingState to
     // distinguish "record (or edge) already in the DB" from "new in this packet". The
@@ -628,13 +628,13 @@ public sealed class SurrealSession : IHydrationSink
         {
             // Fail-closed at the transport boundary. Don't pretend we can recover —
             // the domain catches the rethrown exception and decides what to do.
-            _closed = true;
+            closed = true;
             throw;
         }
 
         Log.Clear();
         Pending.Clear();
-        _closed = true;
+        closed = true;
     }
 
     /// <summary>Drop pending writes without flushing. Closes the session — once abandoned, it's done.</summary>
@@ -642,7 +642,7 @@ public sealed class SurrealSession : IHydrationSink
     {
         Log.Clear();
         Pending.Clear();
-        _closed = true;
+        closed = true;
         return Task.CompletedTask;
     }
 

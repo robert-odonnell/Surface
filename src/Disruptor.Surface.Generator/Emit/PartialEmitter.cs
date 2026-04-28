@@ -135,7 +135,7 @@ internal static class PartialEmitter
 
         // Hydrate hook — invoked by the per-aggregate loader on each loaded row.
         builder.AppendLine();
-        EmitHydrate(builder, memberIndent, table, graph);
+        EmitHydrate(builder, memberIndent, table);
 
         // OnDeleting hook — invoked by Session.Delete(IEntity) before the entity's own
         // delete command is queued. User can implement the simple-form partial method to
@@ -925,7 +925,7 @@ internal static class PartialEmitter
     /// of taking the bare session — keeps the four hydration ops out of the user-facing
     /// session surface.
     /// </summary>
-    private static void EmitHydrate(StringBuilder builder, string indent, TableModel table, ModelGraph graph)
+    private static void EmitHydrate(StringBuilder builder, string indent, TableModel table)
     {
         builder
             .Append(indent)

@@ -33,17 +33,17 @@ public sealed class WriterLease : IAsyncDisposable, IDisposable
         DEFINE FIELD IF NOT EXISTS expires_at ON writer_lease TYPE datetime;
         """;
 
-    private readonly ISurrealTransport _transport;
-    private readonly TimeSpan _ttl;
-    private bool _released;
+    private readonly ISurrealTransport transport;
+    private readonly TimeSpan ttl;
+    private bool released;
 
     public string AggregateName { get; }
     public Ulid HolderId { get; }
 
     private WriterLease(ISurrealTransport transport, string aggregateName, Ulid holderId, TimeSpan ttl)
     {
-        _transport = transport;
-        _ttl = ttl;
+        this.transport = transport;
+        this.ttl = ttl;
         AggregateName = aggregateName;
         HolderId = holderId;
     }
@@ -99,12 +99,12 @@ COMMIT TRANSACTION;
     /// </summary>
     public async Task RenewAsync(CancellationToken ct = default)
     {
-        if (_released)
+        if (released)
         {
             throw new InvalidOperationException("Lease has already been released.");
         }
 
-        var ttlSeconds = (int)_ttl.TotalSeconds;
+        var ttlSeconds = (int)ttl.TotalSeconds;
         var sql = $@"
 BEGIN TRANSACTION;
 LET $now = time::now();
@@ -118,7 +118,7 @@ LET $result = IF $still_ours THEN {{
 }} END;
 COMMIT TRANSACTION;
 ";
-        using var doc = await _transport.ExecuteAsync(sql, null, ct);
+        using var doc = await transport.ExecuteAsync(sql, null, ct);
         var (ok, currentHolder, currentExpiry) = ParseLeaseResult(doc);
         if (!ok)
         {
@@ -133,14 +133,14 @@ COMMIT TRANSACTION;
     /// </summary>
     public async Task ReleaseAsync(CancellationToken ct = default)
     {
-        if (_released)
+        if (released)
         {
             return;
         }
 
-        _released = true;
+        released = true;
         var sql = $@"DELETE writer_lease:{AggregateName} WHERE holder_id = '{HolderId}';";
-        await _transport.ExecuteAsync(sql, null, ct);
+        await transport.ExecuteAsync(sql, null, ct);
     }
 
     public ValueTask DisposeAsync() => new(ReleaseAsync());
@@ -153,7 +153,7 @@ COMMIT TRANSACTION;
     /// </summary>
     public void Dispose()
     {
-        if (_released)
+        if (released)
         {
             return;
         }

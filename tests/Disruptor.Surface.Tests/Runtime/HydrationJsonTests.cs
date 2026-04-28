@@ -122,9 +122,9 @@ public sealed class HydrationJsonTests
     {
         public static int HydrationCount;
 
-        private RecordId _id;
+        private RecordId id;
 
-        public RecordId Id => _id;
+        public RecordId Id => id;
         public SurrealSession? Session { get; private set; }
 
         public void Bind(SurrealSession session) => Session = session;
@@ -136,7 +136,7 @@ public sealed class HydrationJsonTests
             HydrationCount++;
             if (json.TryGetProperty("id", out var idE))
             {
-                _id = HydrationJson.ReadRecordId(idE);
+                id = HydrationJson.ReadRecordId(idE);
             }
             sink.Track(this);
         }

@@ -41,7 +41,7 @@ public static class RecordIdFormat
 
     /// <summary>True iff <paramref name="value"/> would pass <see cref="Validate"/>.</summary>
     public static bool IsValid(string? value)
-        => !string.IsNullOrEmpty(value) && (IsUlidForm(value!) || IsSlugForm(value!));
+        => !string.IsNullOrEmpty(value) && (IsUlidForm(value) || IsSlugForm(value));
 
     private static bool IsUlidForm(string v)
     {

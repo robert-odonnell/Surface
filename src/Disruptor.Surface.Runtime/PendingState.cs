@@ -106,20 +106,12 @@ public sealed class RecordPendingState
 /// is what makes <c>[Reject]</c>/<c>[Unset]</c>/<c>[Cascade]</c> reliable in the face
 /// of mid-packet deletes.
 /// </summary>
-public sealed class ReferenceTransition
+public sealed class ReferenceTransition(RecordId owner, string field, RecordId? targetAtStart, RecordId? targetAtEnd)
 {
-    public RecordId Owner { get; }
-    public string Field { get; }
-    public RecordId? TargetAtStart { get; }
-    public RecordId? TargetAtEnd { get; set; }
-
-    public ReferenceTransition(RecordId owner, string field, RecordId? targetAtStart, RecordId? targetAtEnd)
-    {
-        Owner = owner;
-        Field = field;
-        TargetAtStart = targetAtStart;
-        TargetAtEnd = targetAtEnd;
-    }
+    public RecordId Owner { get; } = owner;
+    public string Field { get; } = field;
+    public RecordId? TargetAtStart { get; } = targetAtStart;
+    public RecordId? TargetAtEnd { get; set; } = targetAtEnd;
 }
 
 /// <summary>Final intent for a relation across a unit of work — never both <see cref="Related"/> and <see cref="Unrelated"/>; later writes overwrite earlier ones.</summary>
@@ -130,23 +122,15 @@ public enum RelationFinalState { Untouched, Related, Unrelated }
 /// <c>(Kind, Source, Target)</c> — inverse-side API calls must already have been
 /// canonicalised before reaching pending state (no inverse facts).
 /// </summary>
-public sealed class RelationPendingState
+public sealed class RelationPendingState(string kind, RecordId source, RecordId target, bool existedAtStart)
 {
-    public string Kind { get; }
-    public RecordId Source { get; }
-    public RecordId Target { get; }
-    public bool ExistedAtStart { get; }
+    public string Kind { get; } = kind;
+    public RecordId Source { get; } = source;
+    public RecordId Target { get; } = target;
+    public bool ExistedAtStart { get; } = existedAtStart;
     public RelationFinalState State { get; set; } = RelationFinalState.Untouched;
     public Dictionary<string, object?> PayloadSets { get; } = new(StringComparer.Ordinal);
     public HashSet<string> PayloadUnsets { get; } = new(StringComparer.Ordinal);
-
-    public RelationPendingState(string kind, RecordId source, RecordId target, bool existedAtStart)
-    {
-        Kind = kind;
-        Source = source;
-        Target = target;
-        ExistedAtStart = existedAtStart;
-    }
 }
 
 /// <summary>
@@ -155,24 +139,15 @@ public sealed class RelationPendingState
 /// (<c>DELETE edge WHERE in = source</c> / <c>WHERE out = target</c>). Updated as
 /// commands arrive; consumed by <see cref="CommitPlanner"/> at commit time.
 /// </summary>
-public sealed class PendingState
+public sealed class PendingState(
+    HashSet<RecordId> loadedAtStart,
+    HashSet<(string Kind, RecordId Source, RecordId Target)> relationsAtStart)
 {
     public Dictionary<RecordId, RecordPendingState> Records { get; } = new();
     public Dictionary<(string Kind, RecordId Source, RecordId Target), RelationPendingState> Relations { get; } = new();
     public Dictionary<(RecordId Owner, string Field), ReferenceTransition> References { get; } = new();
     public HashSet<(string Kind, RecordId Source)> BulkUnrelateFrom { get; } = new();
     public HashSet<(string Kind, RecordId Target)> BulkUnrelateTo { get; } = new();
-
-    private readonly HashSet<RecordId> loadedAtStart;
-    private readonly HashSet<(string Kind, RecordId Source, RecordId Target)> relationsAtStart;
-
-    public PendingState(
-        HashSet<RecordId> loadedAtStart,
-        HashSet<(string Kind, RecordId Source, RecordId Target)> relationsAtStart)
-    {
-        this.loadedAtStart = loadedAtStart;
-        this.relationsAtStart = relationsAtStart;
-    }
 
     public RecordPendingState GetOrCreateRecord(RecordId id)
     {

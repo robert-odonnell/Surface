@@ -7,8 +7,6 @@ namespace Disruptor.Surface.Runtime;
 [JsonConverter(typeof(RecordIdJsonConverter))]
 public readonly record struct RecordId(string Table, string Value) : IRecordId, IComparable<RecordId>
 {
-    public static RecordId None => default;
-
     public string Table { get; } = Table;
     public string Value { get; } = Value;
 
@@ -73,10 +71,4 @@ public sealed class RecordIdJsonConverter : JsonConverter<RecordId>
 
     public override void Write(Utf8JsonWriter writer, RecordId value, JsonSerializerOptions options) =>
         writer.WriteStringValue(value.ToString());
-}
-
-public static class RecordIdExtensions
-{
-    public static bool IsNone(this RecordId id) =>
-        string.IsNullOrEmpty(id.Table) && string.IsNullOrEmpty(id.Value);
 }

@@ -135,7 +135,7 @@ internal static class AggregateLoaderEmitter
 
     private static string BuildLoadSql(ModelGraph graph, TableModel root, AggregateModel agg, Dictionary<string, TableModel> byFullName, Dictionary<string, string> pathToRoot)
     {
-        var rootTable = SurrealNaming.ToTableName(root.Name);
+        SurrealNaming.ToTableName(root.Name);
         var sb = new StringBuilder();
 
         // Root projection — `*` plus inline-expansion for each [Reference] field.

@@ -91,7 +91,7 @@ public static class SurrealResultReader
     public static T? ReadSingleOrDefault<T>(
         JsonElement root,
         JsonSerializerOptions json,
-        int statementIndex = 0)
+        int statementIndex)
     {
         var statement = GetSuccessfulStatement(root, statementIndex);
         return ReadSingleOrDefault<T>(statement.Result, json);

@@ -5,7 +5,7 @@ namespace Disruptor.Surface.Generator.Model;
 /// appear multiple times in the owning table — once per kind — though in practice only one
 /// kind is meaningful. Kept as a flag enum so future combinations are cheap.
 /// </summary>
-[System.Flags]
+[Flags]
 public enum PropertyKind
 {
     None       = 0,

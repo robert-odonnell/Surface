@@ -13,15 +13,15 @@ public readonly struct EquatableArray<T> : IEquatable<EquatableArray<T>>, IReadO
 {
     public static readonly EquatableArray<T> Empty = new(ImmutableArray<T>.Empty);
 
-    private readonly ImmutableArray<T> _items;
+    private readonly ImmutableArray<T> items;
 
-    public EquatableArray(ImmutableArray<T> items) => _items = items;
-    public EquatableArray(IEnumerable<T> items) => _items = [..items];
+    public EquatableArray(ImmutableArray<T> items) => this.items = items;
+    public EquatableArray(IEnumerable<T> items) => this.items = [..items];
 
-    public ImmutableArray<T> AsImmutableArray() => _items.IsDefault ? ImmutableArray<T>.Empty : _items;
+    public ImmutableArray<T> AsImmutableArray() => items.IsDefault ? ImmutableArray<T>.Empty : items;
 
-    public int Count => _items.IsDefault ? 0 : _items.Length;
-    public T this[int index] => _items[index];
+    public int Count => items.IsDefault ? 0 : items.Length;
+    public T this[int index] => items[index];
 
     public bool Equals(EquatableArray<T> other)
     {

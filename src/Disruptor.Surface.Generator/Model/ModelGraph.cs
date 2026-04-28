@@ -21,14 +21,14 @@ public sealed record ModelGraph(
     EquatableArray<string> CascadeCycles,
     EquatableArray<CompositionRootModel> CompositionRoots)
 {
-    public static readonly ModelGraph Empty = new(
-        EquatableArray<TableModel>.Empty,
-        EquatableArray<RelationKindModel>.Empty,
-        EquatableArray<RelationUnion>.Empty,
-        EquatableArray<AggregateModel>.Empty,
-        EquatableArray<string>.Empty,
-        EquatableArray<string>.Empty,
-        EquatableArray<CompositionRootModel>.Empty);
+    //public static readonly ModelGraph Empty = new(
+    //    EquatableArray<TableModel>.Empty,
+    //    EquatableArray<RelationKindModel>.Empty,
+    //    EquatableArray<RelationUnion>.Empty,
+    //    EquatableArray<AggregateModel>.Empty,
+    //    EquatableArray<string>.Empty,
+    //    EquatableArray<string>.Empty,
+    //    EquatableArray<CompositionRootModel>.Empty);
 
     public IReadOnlyDictionary<string, TableModel> BuildTableIndex()
         => Tables.ToDictionary(t => t.FullName);

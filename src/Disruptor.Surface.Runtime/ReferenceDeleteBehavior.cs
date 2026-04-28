@@ -1,5 +1,3 @@
-#nullable enable
-
 namespace Disruptor.Surface.Runtime;
 
 /// <summary>

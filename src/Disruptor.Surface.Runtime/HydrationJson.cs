@@ -1,5 +1,3 @@
-#nullable enable
-using Disruptor.Surface.Runtime;
 using System.Text.Json;
 
 namespace Disruptor.Surface.Runtime;
@@ -31,7 +29,7 @@ public static class HydrationJson
             if (element.TryGetProperty("id", out var idE) && idE.ValueKind == JsonValueKind.String)
             {
                 var idString = idE.GetString();
-                if (!string.IsNullOrEmpty(idString) && idString!.IndexOf(':') >= 0)
+                if (!string.IsNullOrEmpty(idString) && idString.Contains(':'))
                 {
                     return RecordId.Parse(idString);
                 }
@@ -90,7 +88,7 @@ public static class HydrationJson
         {
             return default;
         }
-        return JsonSerializer.Deserialize<T>(elem, SurrealJson.SerializerOptions);
+        return elem.Deserialize<T>(SurrealJson.SerializerOptions);
     }
 
     public static bool TryReadRecordId(JsonElement parent, string field, out RecordId value)
@@ -133,7 +131,7 @@ public static class HydrationJson
             && !sink.IsTracked(refId))
         {
             var entity = new T();
-            ((IEntity)entity).Hydrate(elem, sink);
+            entity.Hydrate(elem, sink);
         }
     }
 }
