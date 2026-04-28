@@ -90,9 +90,14 @@ internal static class AggregateLoaderEmitter
         sb.AppendLine("            if (rootRow is null) return;");
         sb.AppendLine();
 
+        // The hydration write surface — explicit-interface on SurrealSession so the
+        // four loader-only ops aren't visible to domain code via IntelliSense.
+        sb.AppendLine("            global::Disruptor.Surface.Runtime.IHydrationSink sink = ws;");
+        sb.AppendLine();
+
         // Hydrate the root entity. Hydrate also picks up the inlined `details.*` etc.
         sb.Append("            var __root = new global::").Append(root.FullName).AppendLine("();");
-        sb.AppendLine("            ((global::Disruptor.Surface.Runtime.IEntity)__root).Hydrate(rootRow.Value, ws);");
+        sb.AppendLine("            ((global::Disruptor.Surface.Runtime.IEntity)__root).Hydrate(rootRow.Value, sink);");
         sb.AppendLine();
 
         // Hydrate non-root members from their per-table-name array on the root row.
@@ -102,7 +107,7 @@ internal static class AggregateLoaderEmitter
             if (member.FullName == root.FullName) continue;
             var tableName = SurrealNaming.ToTableName(member.Name);
             sb.Append("            HydrateChildren<global::").Append(member.FullName)
-              .Append(">(rootRow.Value, \"").Append(tableName).AppendLine("\", ws);");
+              .Append(">(rootRow.Value, \"").Append(tableName).AppendLine("\", sink);");
         }
 
         // Hydrate edges from each per-edge `_<edge>` array.
@@ -112,7 +117,7 @@ internal static class AggregateLoaderEmitter
             if (whereClause is null) continue;
             var edgeName = SurrealNaming.ToEdgeName(fwdKind.Name);
             sb.Append("            HydrateEdges(rootRow.Value, \"_").Append(edgeName)
-              .Append("\", \"").Append(edgeName).AppendLine("\", ws);");
+              .Append("\", \"").Append(edgeName).AppendLine("\", sink);");
         }
 
         sb.AppendLine("        }");
@@ -341,7 +346,7 @@ internal static class AggregateLoaderEmitter
         sb.AppendLine("        }");
         sb.AppendLine();
         sb.AppendLine("        /// <summary>Walk a JSON array attached to <paramref name=\"key\"/> and Hydrate each element as a <typeparamref name=\"T\"/>.</summary>");
-        sb.AppendLine("        private static void HydrateChildren<T>(JsonElement parent, string key, global::Disruptor.Surface.Runtime.SurrealSession ws)");
+        sb.AppendLine("        private static void HydrateChildren<T>(JsonElement parent, string key, global::Disruptor.Surface.Runtime.IHydrationSink sink)");
         sb.AppendLine("            where T : class, global::Disruptor.Surface.Runtime.IEntity, new()");
         sb.AppendLine("        {");
         sb.AppendLine("            if (!parent.TryGetProperty(key, out var arr) || arr.ValueKind != JsonValueKind.Array) return;");
@@ -349,19 +354,19 @@ internal static class AggregateLoaderEmitter
         sb.AppendLine("            {");
         sb.AppendLine("                if (row.ValueKind != JsonValueKind.Object) continue;");
         sb.AppendLine("                var entity = new T();");
-        sb.AppendLine("                ((global::Disruptor.Surface.Runtime.IEntity)entity).Hydrate(row, ws);");
+        sb.AppendLine("                ((global::Disruptor.Surface.Runtime.IEntity)entity).Hydrate(row, sink);");
         sb.AppendLine("            }");
         sb.AppendLine("        }");
         sb.AppendLine();
-        sb.AppendLine("        /// <summary>Walk a JSON edge array {{id, in, out}} and call <c>HydrateEdge(in, edge, out)</c> on the session per row.</summary>");
-        sb.AppendLine("        private static void HydrateEdges(JsonElement parent, string key, string edgeName, global::Disruptor.Surface.Runtime.SurrealSession ws)");
+        sb.AppendLine("        /// <summary>Walk a JSON edge array {{id, in, out}} and call <c>sink.Edge(in, edgeName, out)</c> per row.</summary>");
+        sb.AppendLine("        private static void HydrateEdges(JsonElement parent, string key, string edgeName, global::Disruptor.Surface.Runtime.IHydrationSink sink)");
         sb.AppendLine("        {");
         sb.AppendLine("            if (!parent.TryGetProperty(key, out var arr) || arr.ValueKind != JsonValueKind.Array) return;");
         sb.AppendLine("            foreach (var row in arr.EnumerateArray())");
         sb.AppendLine("            {");
         sb.AppendLine("                if (!global::Disruptor.Surface.Runtime.HydrationJson.TryReadRecordId(row, \"in\", out var src)) continue;");
         sb.AppendLine("                if (!global::Disruptor.Surface.Runtime.HydrationJson.TryReadRecordId(row, \"out\", out var dst)) continue;");
-        sb.AppendLine("                ws.HydrateEdge(src, edgeName, dst);");
+        sb.AppendLine("                sink.Edge(src, edgeName, dst);");
         sb.AppendLine("            }");
         sb.AppendLine("        }");
     }

@@ -34,6 +34,7 @@ internal static class PartialEmitter
 {
     private const string SessionType = "global::Disruptor.Surface.Runtime.SurrealSession";
     private const string EntityInterface = "global::Disruptor.Surface.Runtime.IEntity";
+    private const string HydrationSinkType = "global::Disruptor.Surface.Runtime.IHydrationSink";
     private const string SurrealArrayMetadata = "Disruptor.Surface.Runtime.SurrealArray`1";
 
     public static void Emit(SourceProductionContext spc, TableModel table, ModelGraph graph)
@@ -892,12 +893,14 @@ internal static class PartialEmitter
     /// <list type="bullet">
     ///   <item>[Id] → parses the record id string and sets the typed <c>_id</c> field.</item>
     ///   <item>scalar [Property] → reads the field value and sets the backing field.</item>
-    ///   <item>[Reference] → reads the record id, calls <c>session.HydrateReference</c>.</item>
-    ///   <item>[Parent] → reads the record id, calls <c>session.HydrateParent</c>.</item>
+    ///   <item>[Reference] → reads the record id, calls <c>sink.Reference</c>.</item>
+    ///   <item>[Parent] → reads the record id, calls <c>sink.Parent</c>.</item>
     /// </list>
     /// <c>SurrealArray</c> properties hydrate inline via <see cref="EmitHydrateSurrealArray"/>.
     /// Forward/inverse relation edges are loaded separately by the per-aggregate loader's
-    /// edge queries.
+    /// edge queries. The sink parameter routes through <see cref="IHydrationSink"/> instead
+    /// of taking the bare session — keeps the four hydration ops out of the user-facing
+    /// session surface.
     /// </summary>
     private static void EmitHydrate(StringBuilder builder, string indent, TableModel table, ModelGraph graph)
     {
@@ -905,7 +908,7 @@ internal static class PartialEmitter
             .Append(indent)
             .Append("void ")
             .Append(EntityInterface)
-            .AppendLine($".Hydrate(global::System.Text.Json.JsonElement json, {SessionType} session)")
+            .AppendLine($".Hydrate(global::System.Text.Json.JsonElement json, {HydrationSinkType} sink)")
             .Append(indent)
             .AppendLine("{");
 
@@ -949,7 +952,7 @@ internal static class PartialEmitter
 
         builder
             .Append(indent)
-            .AppendLine("    session.HydrateTrack(this);");
+            .AppendLine("    sink.Track(this);");
 
         foreach (var p in table.Properties)
         {
@@ -1117,7 +1120,7 @@ internal static class PartialEmitter
             .Append(typeArg)
             .Append(">(json, ")
             .Append(fieldLit)
-            .AppendLine(", this.Id, session);");
+            .AppendLine(", this.Id, sink);");
     }
 
     private static void EmitHydrateParent(StringBuilder builder, string indent, PropertyModel p)
@@ -1131,7 +1134,7 @@ internal static class PartialEmitter
             .Append(ToCamel(p.Name))
             .AppendLine("))")
             .Append(indent)
-            .Append("        session.HydrateParent(this.Id, __parent_")
+            .Append("        sink.Parent(this.Id, __parent_")
             .Append(ToCamel(p.Name))
             .AppendLine(");");
     }

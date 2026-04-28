@@ -10,7 +10,7 @@
     <IsPackable>false</IsPackable>
 
     <!-- Package metadata shared by every packable project in the solution. -->
-    <Version>0.1.0-preview.6</Version>
+    <Version>0.1.0-preview.7</Version>
     <Authors>Robert O'Donnell</Authors>
     <Copyright>Copyright (c) 2026 Robert O'Donnell</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

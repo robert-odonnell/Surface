@@ -44,7 +44,7 @@ public sealed class HydrationJsonTests
         using var doc = JsonDocument.Parse("""{ "details": "details:01" }""");
         var ownerId = new RecordId("designs", "x");
 
-        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", ownerId, session);
+        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", ownerId, (IHydrationSink)session);
 
         Assert.Equal(0, StubReferenceTarget.HydrationCount);
         // The reference link IS registered — Get<StubReferenceTarget> resolves only after
@@ -63,7 +63,7 @@ public sealed class HydrationJsonTests
         using var doc = JsonDocument.Parse("""{ "details": { "id": "details:01", "header": "h" } }""");
         var ownerId = new RecordId("designs", "x");
 
-        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", ownerId, session);
+        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", ownerId, (IHydrationSink)session);
 
         Assert.Equal(1, StubReferenceTarget.HydrationCount);
         // The constructed entity should be findable in the session.
@@ -83,8 +83,8 @@ public sealed class HydrationJsonTests
         var owner1 = new RecordId("designs", "a");
         var owner2 = new RecordId("constraints", "b");
 
-        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", owner1, session);
-        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", owner2, session);
+        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", owner1, (IHydrationSink)session);
+        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", owner2, (IHydrationSink)session);
 
         Assert.Equal(1, StubReferenceTarget.HydrationCount);
     }
@@ -98,7 +98,7 @@ public sealed class HydrationJsonTests
         using var doc = JsonDocument.Parse("""{ "details": null }""");
         var ownerId = new RecordId("designs", "x");
 
-        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", ownerId, session);
+        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", ownerId, (IHydrationSink)session);
 
         Assert.Equal(0, StubReferenceTarget.HydrationCount);
     }
@@ -112,7 +112,7 @@ public sealed class HydrationJsonTests
         using var doc = JsonDocument.Parse("""{ "other": "ignored" }""");
         var ownerId = new RecordId("designs", "x");
 
-        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", ownerId, session);
+        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", ownerId, (IHydrationSink)session);
 
         Assert.Equal(0, StubReferenceTarget.HydrationCount);
     }
@@ -131,14 +131,14 @@ public sealed class HydrationJsonTests
         public void Initialize(SurrealSession session) { }
         public void Flush(SurrealSession session) { }
 
-        public void Hydrate(JsonElement json, SurrealSession session)
+        public void Hydrate(JsonElement json, IHydrationSink sink)
         {
             HydrationCount++;
             if (json.TryGetProperty("id", out var idE))
             {
                 _id = HydrationJson.ReadRecordId(idE);
             }
-            session.HydrateTrack(this);
+            sink.Track(this);
         }
 
         public void OnDeleting() { }

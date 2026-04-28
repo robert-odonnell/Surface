@@ -63,7 +63,7 @@ public sealed class SurrealSessionTests
     {
         var session = new SurrealSession();
         var entity = new StubEntity(new RecordId("t", "1"));
-        session.HydrateTrack(entity);
+        ((IHydrationSink)session).Track(entity);
 
         await session.CommitAsync(new NullTransport());
 
@@ -124,9 +124,9 @@ public sealed class SurrealSessionTests
         var first = new StubEntity(id);
         var second = new StubEntity(id);
 
-        session.HydrateTrack(first);
+        ((IHydrationSink)session).Track(first);
 
-        Assert.Throws<InvalidOperationException>(() => session.HydrateTrack(second));
+        Assert.Throws<InvalidOperationException>(() => ((IHydrationSink)session).Track(second));
     }
 
     [Fact]
@@ -150,7 +150,7 @@ public sealed class SurrealSessionTests
         var entity = new StubEntity(new RecordId("designs", "x"));
 
         // Hydrate path: HydrateTrack marks the id as loaded-at-start AND binds the entity.
-        session.HydrateTrack(entity);
+        ((IHydrationSink)session).Track(entity);
         Assert.Equal(new[] { "Bind" }, entity.Calls.ToArray());
 
         // A subsequent explicit Track must not re-Initialize / re-Flush, must not record
@@ -199,7 +199,7 @@ public sealed class SurrealSessionTests
         var id = new RecordId("designs", "x");
         var entity = new StubEntity(id);
 
-        session.HydrateTrack(entity);
+        ((IHydrationSink)session).Track(entity);
 
         var resolved = session.Get<StubEntity>(id);
         Assert.Same(entity, resolved);
@@ -236,14 +236,14 @@ public sealed class SurrealSessionTests
         var tgt1 = new StubEntity(new RecordId("b", "1"));
         var tgt2 = new StubEntity(new RecordId("b", "2"));
 
-        session.HydrateTrack(src);
-        session.HydrateTrack(tgt1);
-        session.HydrateTrack(tgt2);
+        ((IHydrationSink)session).Track(src);
+        ((IHydrationSink)session).Track(tgt1);
+        ((IHydrationSink)session).Track(tgt2);
 
-        session.HydrateEdge(src.Id, "stub_edge", tgt1.Id);
-        session.HydrateEdge(src.Id, "stub_edge", tgt2.Id);
+        ((IHydrationSink)session).Edge(src.Id, "stub_edge", tgt1.Id);
+        ((IHydrationSink)session).Edge(src.Id, "stub_edge", tgt2.Id);
         // Reverse-direction edge that should NOT appear in src's outgoing query.
-        session.HydrateEdge(tgt1.Id, "stub_edge", src.Id);
+        ((IHydrationSink)session).Edge(tgt1.Id, "stub_edge", src.Id);
 
         var outgoing = session.QueryOutgoing<StubEntity>(src, "stub_edge");
         Assert.Equal(2, outgoing.Count);
@@ -259,14 +259,14 @@ public sealed class SurrealSessionTests
         var src2 = new StubEntity(new RecordId("a", "2"));
         var tgt = new StubEntity(new RecordId("b", "1"));
 
-        session.HydrateTrack(src1);
-        session.HydrateTrack(src2);
-        session.HydrateTrack(tgt);
+        ((IHydrationSink)session).Track(src1);
+        ((IHydrationSink)session).Track(src2);
+        ((IHydrationSink)session).Track(tgt);
 
-        session.HydrateEdge(src1.Id, "stub_edge", tgt.Id);
-        session.HydrateEdge(src2.Id, "stub_edge", tgt.Id);
+        ((IHydrationSink)session).Edge(src1.Id, "stub_edge", tgt.Id);
+        ((IHydrationSink)session).Edge(src2.Id, "stub_edge", tgt.Id);
         // Reverse-direction edge that should NOT appear in tgt's incoming query.
-        session.HydrateEdge(tgt.Id, "stub_edge", src1.Id);
+        ((IHydrationSink)session).Edge(tgt.Id, "stub_edge", src1.Id);
 
         var incoming = session.QueryIncoming<StubEntity>(tgt, "stub_edge");
         Assert.Equal(2, incoming.Count);
@@ -285,12 +285,12 @@ public sealed class SurrealSessionTests
         var b = new StubEntity(new RecordId("node", "b"));
         var c = new StubEntity(new RecordId("node", "c"));
 
-        session.HydrateTrack(a);
-        session.HydrateTrack(b);
-        session.HydrateTrack(c);
+        ((IHydrationSink)session).Track(a);
+        ((IHydrationSink)session).Track(b);
+        ((IHydrationSink)session).Track(c);
 
-        session.HydrateEdge(a.Id, "stub_edge", b.Id);   // a → b
-        session.HydrateEdge(c.Id, "stub_edge", a.Id);   // c → a
+        ((IHydrationSink)session).Edge(a.Id, "stub_edge", b.Id);   // a → b
+        ((IHydrationSink)session).Edge(c.Id, "stub_edge", a.Id);   // c → a
 
         var outgoing = session.QueryOutgoing<StubKind, StubEntity>(a);
         var incoming = session.QueryIncoming<StubKind, StubEntity>(a);
@@ -339,7 +339,7 @@ public sealed class SurrealSessionTests
 
         public void Initialize(SurrealSession session) => Calls.Add("Initialize");
         public void Flush(SurrealSession session)      => Calls.Add("Flush");
-        public void Hydrate(JsonElement json, SurrealSession session) => Calls.Add("Hydrate");
+        public void Hydrate(JsonElement json, IHydrationSink sink) => Calls.Add("Hydrate");
         public void OnDeleting()                       => Calls.Add("OnDeleting");
     }
 

@@ -21,6 +21,32 @@ public enum FieldKind
 }
 
 /// <summary>
+/// The hydration-time write surface a loader uses to populate session state. Implemented
+/// explicitly by <see cref="SurrealSession"/> so domain code with a session reference
+/// doesn't see <c>Track</c> / <c>Parent</c> / <c>Reference</c> / <c>Edge</c> in IntelliSense
+/// — getting at them requires a deliberate <c>(IHydrationSink)session</c> cast, which is
+/// loud enough that nobody calls them by accident. Loaders + <see cref="HydrationJson"/>
+/// are the legitimate callers.
+/// </summary>
+public interface IHydrationSink
+{
+    /// <summary>Marks an entity as loaded-at-start in the snapshot and binds it to the session on first sight.</summary>
+    void Track(IEntity entity);
+
+    /// <summary>Records a parent link from <paramref name="childId"/> to <paramref name="parentId"/>.</summary>
+    void Parent(RecordId childId, RecordId parentId);
+
+    /// <summary>Records a reference link <c>(owner, fieldName) → refId</c>, including the at-start snapshot used by the commit planner.</summary>
+    void Reference(RecordId ownerId, string fieldName, RecordId refId);
+
+    /// <summary>Records an edge <c>(source, edgeKind, target)</c> as already present in the DB at load time.</summary>
+    void Edge(RecordId source, string edgeKind, RecordId target);
+
+    /// <summary>True iff <paramref name="id"/> is already tracked in the session — used by hydration helpers to dedup multi-owner inline-reference expansions.</summary>
+    bool IsTracked(IRecordId id);
+}
+
+/// <summary>
 /// Common shape of every generated entity. The five session-side hooks (<see cref="Bind"/>,
 /// <see cref="Initialize"/>, <see cref="Flush"/>, <see cref="Hydrate"/>,
 /// <see cref="OnDeleting"/>) are explicit-interface implementations on every generated
@@ -63,10 +89,11 @@ public interface IEntity
 
     /// <summary>
     /// Loader-only entry point. Reads the row's JSON payload and writes the entity's
-    /// backing fields plus the corresponding session dicts (parent / reference). Edges
-    /// and children are loaded by the per-aggregate loader separately.
+    /// backing fields plus the corresponding session dicts (parent / reference) via the
+    /// supplied hydration sink. Edges and children are loaded by the per-aggregate loader
+    /// separately.
     /// </summary>
-    void Hydrate(JsonElement json, SurrealSession session);
+    void Hydrate(JsonElement json, IHydrationSink sink);
 
     /// <summary>
     /// SurrealSession calls this immediately before queueing the entity's own DELETE command,
@@ -100,7 +127,7 @@ public interface IEntity
 /// alongside the session and passes into <see cref="CommitAsync"/> for renewal.
 /// </para>
 /// </summary>
-public sealed class SurrealSession
+public sealed class SurrealSession : IHydrationSink
 {
     private readonly Dictionary<RecordId, IEntity> entities = new();
     private readonly Dictionary<RecordId, RecordId> parents = new();
@@ -602,8 +629,17 @@ public sealed class SurrealSession
     // methods are the intended callers (and live in the consumer assembly, hence public);
     // ordinary writes go through the Track/SetField/Relate surface.
 
-    public void HydrateTrack(IEntity entity)
+    // ──────────────────────────── IHydrationSink (explicit-interface) ──────
+    //
+    // Loader-side write surface. Explicit-interface so domain code with a SurrealSession
+    // reference doesn't see Track / Parent / Reference / Edge in IntelliSense — getting
+    // at them requires a deliberate `(IHydrationSink)session` cast. The four ops keep
+    // the lifecycle invariant: closed sessions reject hydration too, since hydration is
+    // load-time and a closed session shouldn't be receiving any more state.
+
+    void IHydrationSink.Track(IEntity entity)
     {
+        ThrowIfClosed();
         if (entities.TryGetValue(entity.Id, out var existing))
         {
             if (!ReferenceEquals(existing, entity))
@@ -620,19 +656,24 @@ public sealed class SurrealSession
         loadedAtStart.Add(entity.Id);
     }
 
-    public void HydrateParent(RecordId childId, RecordId parentId)
-        => parents[childId] = parentId;
-
-    public void HydrateReference(RecordId ownerId, string fieldName, RecordId refId)
+    void IHydrationSink.Parent(RecordId childId, RecordId parentId)
     {
+        ThrowIfClosed();
+        parents[childId] = parentId;
+    }
+
+    void IHydrationSink.Reference(RecordId ownerId, string fieldName, RecordId refId)
+    {
+        ThrowIfClosed();
         references[(ownerId, fieldName)] = refId;
         Pending.HydrateReference(ownerId, fieldName, refId);
     }
 
-    public void HydrateEdge(RecordId source, string edge, RecordId target)
+    void IHydrationSink.Edge(RecordId source, string edgeKind, RecordId target)
     {
-        edges[(source, edge, target)] = true;
-        relationsAtStart.Add((edge, source, target));
+        ThrowIfClosed();
+        edges[(source, edgeKind, target)] = true;
+        relationsAtStart.Add((edgeKind, source, target));
     }
 
     // ──────────────────────────── private helpers ───────────────────────────

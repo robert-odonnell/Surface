@@ -120,38 +120,31 @@ public static class HydrationJson
     }
 
     /// <summary>
-    /// Hydrates a <c>[Reference]</c> field. Always registers the link in
-    /// <see cref="SurrealSession.HydrateReference"/>; when the loader's projection
-    /// inline-expanded the referenced record (the <c>field.*</c> form, producing
+    /// Hydrates a <c>[Reference]</c> field. Always registers the link via
+    /// <see cref="IHydrationSink.Reference"/>; when the loader's projection inline-
+    /// expanded the referenced record (the <c>field.*</c> form, producing
     /// <c>{ id: "table:value", …content }</c>) we also construct a
     /// <typeparamref name="T"/> and run its <c>IEntity.Hydrate</c>, which in turn calls
-    /// <see cref="SurrealSession.HydrateTrack"/> so subsequent reads see a fully populated
-    /// entity. Without this, references would carry only an id and reads would resolve
-    /// to <c>null</c> because <see cref="SurrealSession.GetReferenceOrDefault{T}"/> joins
-    /// against the entities dict.
+    /// <see cref="IHydrationSink.Track"/> so subsequent reads see a fully populated
+    /// entity. The sink's <see cref="IHydrationSink.IsTracked"/> dedups multi-owner
+    /// inline expansion (only the first occurrence allocates + hydrates).
     /// </summary>
-    public static void HydrateReference<T>(JsonElement parent, string field, RecordId ownerId, SurrealSession session)
+    public static void HydrateReference<T>(JsonElement parent, string field, RecordId ownerId, IHydrationSink sink)
         where T : class, IEntity, new()
     {
         if (!parent.TryGetProperty(field, out var elem)) return;
         if (elem.ValueKind == JsonValueKind.Null) return;
 
         var refId = ReadRecordId(elem);
-        session.HydrateReference(ownerId, field, refId);
+        sink.Reference(ownerId, field, refId);
 
-        // Inline-record form — hydrate the linked record from the same payload. The
-        // RPC envelope `{ tb, id }` and the bare id-string form carry no content, so we
-        // skip them and rely on the loader having a separate row for that record.
-        // Also skip if the referenced id is already tracked: an inline expansion in two
-        // places (e.g. multiple constraints all referencing the same Details) would
-        // otherwise allocate, hydrate, and discard a duplicate instance per occurrence.
         if (elem.ValueKind == JsonValueKind.Object
             && elem.TryGetProperty("id", out var idE)
             && idE.ValueKind == JsonValueKind.String
-            && !session.IsTracked(refId))
+            && !sink.IsTracked(refId))
         {
             var entity = new T();
-            ((IEntity)entity).Hydrate(elem, session);
+            ((IEntity)entity).Hydrate(elem, sink);
         }
     }
 }
