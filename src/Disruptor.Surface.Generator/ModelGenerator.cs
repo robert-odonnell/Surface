@@ -263,6 +263,32 @@ public sealed class ModelGenerator : IIncrementalGenerator
                 valid = false;
             }
 
+            // CG024 — at most one role attribute per property. The five role attributes
+            // ([Id]/[Property]/[Parent]/[Children]/[Reference]) each select a distinct
+            // emit shape — scalar field, structural parent link, child collection, record
+            // reference, identity. Mixing two means the emitters silently disagree:
+            // PartialEmitter prioritises [Property] over [Reference] while SchemaEmitter
+            // prioritises [Reference] over [Property], so [Property][Reference] yields a
+            // scalar CLR setter writing into a record<>-typed schema column. Reject the
+            // combo at the model boundary instead of letting it ship.
+            foreach (var p in table.Properties)
+            {
+                var roleNames = new List<string>();
+                if (p.Kinds.HasFlag(PropertyKind.Id))        roleNames.Add("Id");
+                if (p.Kinds.HasFlag(PropertyKind.Property))  roleNames.Add("Property");
+                if (p.Kinds.HasFlag(PropertyKind.Parent))    roleNames.Add("Parent");
+                if (p.Kinds.HasFlag(PropertyKind.Children))  roleNames.Add("Children");
+                if (p.Kinds.HasFlag(PropertyKind.Reference)) roleNames.Add("Reference");
+                if (roleNames.Count <= 1) continue;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.ConflictingRoleAttributes,
+                    Location.None,
+                    table.FullName,
+                    p.Name,
+                    string.Join(" + ", roleNames)));
+                valid = false;
+            }
+
             foreach (var (memberName, memberType) in EnumerateReadSideTypes(table, PropertyKind.Children))
             {
                 var content = UnwrapTask(memberType);

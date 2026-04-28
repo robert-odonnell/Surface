@@ -62,6 +62,36 @@ public sealed class DiagnosticsTests
     }
 
     [Fact]
+    public void CG024_PropertyAndReference_OnSameMember_Conflict()
+    {
+        // The five role attributes each select a distinct emit shape; PartialEmitter
+        // and SchemaEmitter previously disagreed on precedence ([Property] before
+        // [Reference] in the CLR emit, [Reference] before [Property] in schema), so
+        // the combo silently produced a scalar CLR setter writing into a record<>
+        // schema column. CG024 rejects the combo at the model boundary.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            namespace M;
+
+            [Table] public partial class Owner {
+                [Id] public partial OwnerId Id { get; set; }
+                // Conflict: Property + Reference are mutually-exclusive role attributes.
+                [Property, Reference] public partial Target Both { get; }
+            }
+
+            [Table] public partial class Target {
+                [Id] public partial TargetId Id { get; set; }
+            }
+            """;
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.Contains(runDiags, d => d.Id == "CG024");
+        // The message names both offending attributes so the user knows which to drop.
+        var diag = runDiags.First(d => d.Id == "CG024");
+        Assert.Contains("Property", diag.GetMessage());
+        Assert.Contains("Reference", diag.GetMessage());
+    }
+
+    [Fact]
     public void CG022_AnnotatedMember_MustBePartial()
     {
         // The generator emits the implementation half of every annotated property

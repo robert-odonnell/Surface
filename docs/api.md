@@ -378,5 +378,6 @@ The generator emits diagnostics for invalid model shapes:
 | `CG020` | `[Children]` member has no `[Parent]` path back to the aggregate root. |
 | `CG021` | `[Reference]` crosses aggregate boundaries; use a relation instead. |
 | `CG022` | Annotated property (`[Id]/[Property]/[Parent]/[Reference]/[Children]`) must be declared `partial`. |
+| `CG024` | Property has multiple role attributes; the five role attributes are mutually exclusive. |
 
 Some older relation-method diagnostics remain in the codebase for retired shapes, but normal user-facing relation writes should go through `Session.Relate<TKind>` and related methods.

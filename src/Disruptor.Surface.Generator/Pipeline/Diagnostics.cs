@@ -154,4 +154,12 @@ internal static class Diagnostics
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor ConflictingRoleAttributes = new(
+        id: "CG024",
+        title: "Property has multiple role attributes",
+        messageFormat: "'{0}.{1}' carries multiple role attributes ({2}); a property's role IS its emit shape, and the five role attributes ([Id]/[Property]/[Parent]/[Children]/[Reference]) are mutually exclusive — pick one",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }
