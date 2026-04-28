@@ -94,7 +94,7 @@ var constraint = rw.Track(new Constraint
     Description = "no negatives",
     Details = new Details { Header = "rule" }
 });
-constraint.Restricts(someUserStory);  // user-defined one-liner: => Session.Relate<Restricts>(this, x)
+constraint.Restricts(someUserStory); // user-defined one-liner: => Session.Relate<Restricts>(this, x)
 
 await rw.CommitAsync(transport, lease);
 ```
