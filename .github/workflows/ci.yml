@@ -20,13 +20,13 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Restore
-        run: dotnet restore Surface.slnx
+        run: dotnet restore Disruptor.Surface.slnx
 
       - name: Build
-        run: dotnet build Surface.slnx --configuration Release --no-restore
+        run: dotnet build Disruptor.Surface.slnx --configuration Release --no-restore
 
-      # Surface.Sample's harness intentionally skipped — it round-trips against a live
+      # Disruptor.Surface.Sample's harness intentionally skipped — it round-trips against a live
       # SurrealDB which CI doesn't have. Build coverage above is enough to catch
       # generator + runtime regressions; the harness is the human smoke test.
       - name: Test
-        run: dotnet test tests/Surface.Tests/Surface.Tests.csproj --configuration Release --no-build --verbosity normal
+        run: dotnet test tests/Disruptor.Surface.Tests/Disruptor.Surface.Tests.csproj --configuration Release --no-build --verbosity normal

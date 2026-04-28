@@ -1,7 +1,7 @@
 name: Release
 
 # Triggered when a version tag is pushed. Builds in Release config, packs
-# Surface.Generator + Surface.Runtime, and pushes the .nupkg files to NuGet.org.
+# Disruptor.Surface.Generator + Disruptor.Surface.Runtime, and pushes the .nupkg files to NuGet.org.
 # Uses a long-lived API key stored in the NUGET_API_KEY repo secret.
 
 on:
@@ -23,16 +23,16 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Restore
-        run: dotnet restore Surface.slnx
+        run: dotnet restore Disruptor.Surface.slnx
 
       - name: Build (Release)
-        run: dotnet build Surface.slnx --configuration Release --no-restore
+        run: dotnet build Disruptor.Surface.slnx --configuration Release --no-restore
 
       - name: Test
-        run: dotnet test tests/Surface.Tests/Surface.Tests.csproj --configuration Release --no-build --verbosity normal
+        run: dotnet test tests/Disruptor.Surface.Tests/Disruptor.Surface.Tests.csproj --configuration Release --no-build --verbosity normal
 
       - name: Pack
-        run: dotnet pack Surface.slnx --configuration Release --no-build --output ./artifacts
+        run: dotnet pack Disruptor.Surface.slnx --configuration Release --no-build --output ./artifacts
 
       - name: Publish to NuGet
         run: |

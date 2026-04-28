@@ -1,4 +1,4 @@
-# Surface
+# Disruptor.Surface
 
 A C# Roslyn source generator that turns `[Table]`-annotated partial classes into a working
 SurrealDB persistence layer — typed ids, snapshot-isolated sessions, generated SurrealQL,
@@ -9,8 +9,8 @@ typed relation kinds, cross-process writer coordination.
 You write the model:
 
 ```csharp
-using Surface.Annotations;
-using Surface.Runtime;
+using Disruptor.Surface.Annotations;
+using Disruptor.Surface.Runtime;
 
 namespace MyApp.Model;
 
@@ -103,23 +103,23 @@ await rw.CommitAsync(transport, lease);
 
 ```
 src/
-  Surface.Generator/  — Roslyn source generator (netstandard2.0, analyzer)
-  Surface.Runtime/    — runtime library: SurrealSession, IEntity, IRelationKind, RecordId,
+  Disruptor.Surface.Generator/  — Roslyn source generator (netstandard2.0, analyzer)
+  Disruptor.Surface.Runtime/    — runtime library: SurrealSession, IEntity, IRelationKind, RecordId,
                         WriterLease, SurrealHttpClient, CommitPlanner, HydrationJson, …
-  Surface.Sample/     — console-app harness that exercises the full pipeline against
+  Disruptor.Surface.Sample/     — console-app harness that exercises the full pipeline against
                         a live SurrealDB; also the canonical worked example schema
 ```
 
-`Surface.Sample` references both the generator (as an analyzer, no runtime dep) and the
+`Disruptor.Surface.Sample` references both the generator (as an analyzer, no runtime dep) and the
 runtime library. Real consumer projects do the same.
 
 ## Building
 
 ```sh
-dotnet build Surface.slnx
+dotnet build Disruptor.Surface.slnx
 ```
 
-Generated files land in `src/Surface.Sample/obj/Debug/net10.0/generated/Surface.Generator/Surface.Generator.ModelGenerator/`
+Generated files land in `src/Disruptor.Surface.Sample/obj/Debug/net10.0/generated/Disruptor.Surface.Generator/Disruptor.Surface.Generator.ModelGenerator/`
 — inspect them to see what the generator emitted for a given `[Table]` class.
 
 ## Running the harness
@@ -135,7 +135,7 @@ surreal start --bind 127.0.0.1:8000 \
               --username root --password secret \
               rocksdb://path/to/db
 
-dotnet run --project src/Surface.Sample
+dotnet run --project src/Disruptor.Surface.Sample
 ```
 
 Connection parameters are hard-coded in `Program.cs` — adjust them if your Surreal
@@ -164,7 +164,7 @@ Plus aggregate / relation marker attributes:
 - `[AggregateRoot]` — marks the root entity. Aggregate membership is computed by
   walking `[Children]` reachability; entities reached from two roots produce CG011.
 - Forward / inverse relations are user-declared attribute pairs deriving from
-  `ForwardRelation` / `InverseRelation<TForward>` (see `Surface.Sample.Relations`).
+  `ForwardRelation` / `InverseRelation<TForward>` (see `Disruptor.Surface.Sample.Relations`).
   The generator emits a sibling marker class without the `Attribute` suffix
   (`Restricts : IRelationKind`) per forward kind. Within-aggregate relations expose
   `IReadOnlyCollection<IEntity>` reads; cross-aggregate relations expose
@@ -201,7 +201,7 @@ Plus aggregate / relation marker attributes:
   honest.
 - **Model-scoped runtime.** No process-global state. The user's `[CompositionRoot]`
   partial owns the model metadata (`Workspace.Schema`, `Workspace.ReferenceRegistry`),
-  and `Load*Async` constructs sessions with that registry. Multiple Surface-generated
+  and `Load*Async` constructs sessions with that registry. Multiple Disruptor.Surface-generated
   consumers can coexist in one process without trampling each other.
 - **Safe SQL formatting.** All record ids, identifiers, and string literals route through
   `SurrealFormatter` — bare `table:value` when safe, Surreal's `table:⟨value⟩` escape
@@ -223,11 +223,11 @@ multiple-aggregate ownership, reference-delete behavior validation, cascade cycl
 dangling-`Ignore` warnings, multiple `[CompositionRoot]` declarations, and
 non-partial `[CompositionRoot]`, and `[Children]` member without a `[Parent]` path
 back to the aggregate root. Full list in
-`src/Surface.Generator/Pipeline/Diagnostics.cs`.
+`src/Disruptor.Surface.Generator/Pipeline/Diagnostics.cs`.
 
 ## Status
 
-Functional first cut. The `Surface.Sample` harness round-trips Design aggregates
+Functional first cut. The `Disruptor.Surface.Sample` harness round-trips Design aggregates
 against a live SurrealDB instance — schema bootstrap, lease acquisition, commit,
 reload, in-memory reads — and is the validation harness for the SurrealQL paths.
 
@@ -247,6 +247,6 @@ or a wide range of edge cases.
 
 - `CLAUDE.md` — generator pipeline internals, equatability invariants, emit
   conventions, the same-pass type-resolution gotcha. Required reading before
-  changing anything in `src/Surface.Generator`.
+  changing anything in `src/Disruptor.Surface.Generator`.
 - Per-class XML doc on the runtime types (`SurrealSession`, `WriterLease`,
   `CommitPlanner`, `PendingState`, `IRelationKind`, `HydrationJson`).

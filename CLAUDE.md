@@ -4,27 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & run
 
-- Build the whole solution: `dotnet build Surface.slnx`
-- Build just the generator (no consumer): `dotnet build src/Surface.Generator/Surface.Generator.csproj`
-- Build just the runtime library: `dotnet build src/Surface.Runtime/Surface.Runtime.csproj`
-- Build the consumer (this triggers source generation): `dotnet build src/Surface.Sample/Surface.Sample.csproj`
-- Generated files land in `src/Surface.Sample/obj/Debug/net10.0/generated/Surface.Generator/Surface.Generator.ModelGenerator/` — inspect these to see what the generator actually emitted for a given `[Table]` class. `EmitCompilerGeneratedFiles=true` is set in `Surface.Sample.csproj` to make this directory authoritative.
+- Build the whole solution: `dotnet build Disruptor.Surface.slnx`
+- Build just the generator (no consumer): `dotnet build src/Disruptor.Surface.Generator/Disruptor.Surface.Generator.csproj`
+- Build just the runtime library: `dotnet build src/Disruptor.Surface.Runtime/Disruptor.Surface.Runtime.csproj`
+- Build the consumer (this triggers source generation): `dotnet build src/Disruptor.Surface.Sample/Disruptor.Surface.Sample.csproj`
+- Generated files land in `src/Disruptor.Surface.Sample/obj/Debug/net10.0/generated/Disruptor.Surface.Generator/Disruptor.Surface.Generator.ModelGenerator/` — inspect these to see what the generator actually emitted for a given `[Table]` class. `EmitCompilerGeneratedFiles=true` is set in `Disruptor.Surface.Sample.csproj` to make this directory authoritative.
 - Force a clean re-run of the generator: `dotnet build … --no-incremental`. The generator caches by record equality, so a stale `.g.cs` from a deleted source class lingers as an orphan in the generated dir until you wipe it manually.
-- Run the harness against a live Surreal: `dotnet run --project src/Surface.Sample` (see `## Running the harness` in `README.md`).
+- Run the harness against a live Surreal: `dotnet run --project src/Disruptor.Surface.Sample` (see `## Running the harness` in `README.md`).
 
 ## Project layout
 
-Three projects, dependencies fan out from `Surface.Sample`:
+Three projects, dependencies fan out from `Disruptor.Surface.Sample`:
 
-- `src/Surface.Generator` (`netstandard2.0`, `IsRoslynComponent=true`) — the incremental Roslyn source generator. Cannot reference `net10.0` types; everything in `Model/` is hand-rolled to be equatable so the incremental pipeline can dedupe. Bundles `Humanizer.Core` as an analyzer dep via the `GetDependencyTargetPaths` MSBuild trick (see `Surface.Generator.csproj`) — without that, the analyzer host can't load `Humanizer.dll`.
-- `src/Surface.Runtime` (`net10.0`) — the library half: every type generated code targets (`SurrealSession`, `IEntity`, `IRelationKind`, `RecordId`, `SurrealArray`, `WriterLease`, `CommitPlanner`, `PendingState`, `IReferenceRegistry`, `ReferenceFieldInfo`, `HydrationJson`, the Surreal HTTP transport). Namespace `Surface.Runtime`. Single package dep: `Ulid`. Consumers add a `ProjectReference` (or `PackageReference` once published).
-- `src/Surface.Sample` (`net10.0`) — the test bed: the schema modeled in `[Table]` classes, the `[CompositionRoot]`-tagged `Workspace` partial, and a console-app harness in `Program.cs`. `ProjectReference` to `Surface.Runtime`, plus `OutputItemType="Analyzer"` on the generator so it picks up `[Table]`-driven emission without taking a runtime dependency on the generator assembly.
+- `src/Disruptor.Surface.Generator` (`netstandard2.0`, `IsRoslynComponent=true`) — the incremental Roslyn source generator. Cannot reference `net10.0` types; everything in `Model/` is hand-rolled to be equatable so the incremental pipeline can dedupe. Bundles `Humanizer.Core` as an analyzer dep via the `GetDependencyTargetPaths` MSBuild trick (see `Disruptor.Surface.Generator.csproj`) — without that, the analyzer host can't load `Humanizer.dll`.
+- `src/Disruptor.Surface.Runtime` (`net10.0`) — the library half: every type generated code targets (`SurrealSession`, `IEntity`, `IRelationKind`, `RecordId`, `SurrealArray`, `WriterLease`, `CommitPlanner`, `PendingState`, `IReferenceRegistry`, `ReferenceFieldInfo`, `HydrationJson`, the Surreal HTTP transport). Namespace `Disruptor.Surface.Runtime`. Single package dep: `Ulid`. Consumers add a `ProjectReference` (or `PackageReference` once published).
+- `src/Disruptor.Surface.Sample` (`net10.0`) — the test bed: the schema modeled in `[Table]` classes, the `[CompositionRoot]`-tagged `Workspace` partial, and a console-app harness in `Program.cs`. `ProjectReference` to `Disruptor.Surface.Runtime`, plus `OutputItemType="Analyzer"` on the generator so it picks up `[Table]`-driven emission without taking a runtime dependency on the generator assembly.
 
-## Generator pipeline (read this before touching `Surface.Generator`)
+## Generator pipeline (read this before touching `Disruptor.Surface.Generator`)
 
 `ModelGenerator.Initialize` wires five `ForAttributeWithMetadataName` providers (tables, forward kinds, inverse kinds, the user's `[CompositionRoot]`, plus a compilation-level scan for `[RecordIdValue<T>]`) into a single `ModelGraph`. The data flow:
 
-1. **Annotation injection** — `AnnotationsSource` writes `Surface.Annotations.g.cs` into every consuming compilation via `RegisterPostInitializationOutput`. The user-facing attributes live there as a string constant: `[Table]`, `[AggregateRoot]`, `[CompositionRoot]`, `[Id]`, `[Property]`, `[Parent]`, `[Children]`, `[Reference]`, the four reference-delete behaviors `[Reject]` / `[Unset]` / `[Cascade]` / `[Ignore]`, the relation bases `RelationAttribute` / `ForwardRelation` / `InverseRelation<TForward>`, and `[RecordIdValue<T>]`. **`AnnotationsMetadata` and `AnnotationsSource.Source` must stay in lockstep** — the metadata-name constants are what the pipeline binds to, and they must match the FQNs of the generated source.
+1. **Annotation injection** — `AnnotationsSource` writes `Disruptor.Surface.Annotations.g.cs` into every consuming compilation via `RegisterPostInitializationOutput`. The user-facing attributes live there as a string constant: `[Table]`, `[AggregateRoot]`, `[CompositionRoot]`, `[Id]`, `[Property]`, `[Parent]`, `[Children]`, `[Reference]`, the four reference-delete behaviors `[Reject]` / `[Unset]` / `[Cascade]` / `[Ignore]`, the relation bases `RelationAttribute` / `ForwardRelation` / `InverseRelation<TForward>`, and `[RecordIdValue<T>]`. **`AnnotationsMetadata` and `AnnotationsSource.Source` must stay in lockstep** — the metadata-name constants are what the pipeline binds to, and they must match the FQNs of the generated source.
 2. **Per-symbol extractors** (`Pipeline/`) lower Roslyn symbols into pure-data records under `Model/`. They cannot resolve cross-table references yet — `TypeRef.IsTableType` is seeded from the immediately visible attributes and patched up later.
 3. **Linking** (`RelationLinker.Build`) takes the collected tables + relation kinds + composition roots and (a) rewrites every `TypeRef` so `IsTableType` is true wherever the underlying type was discovered to be a `[Table]`, (b) computes per-relation-kind `RelationUnion` sets — for each forward kind, the source set (forward attribute holders) and target set (inverse attribute holders), each becoming a marker interface when ≥2 members, (c) computes per-aggregate `AggregateModel` membership by walking `[Children]` from each `[AggregateRoot]` and detects entities reachable from 2+ roots as conflict descriptors, (d) detects cascade-only reference cycles for CG014.
 4. **Emit** (`Emit/`) — eight emitters fire per generation:
@@ -34,8 +34,8 @@ Three projects, dependencies fan out from `Surface.Sample`:
    - `RelationKindEmitter` — per forward relation attribute (e.g. `RestrictsAttribute`), emits a sibling marker class without the `Attribute` suffix (`Restricts : IRelationKind`) carrying the SurrealDB edge name as a static property. The class is the type witness used by `SurrealSession.Relate<Restricts>(src, tgt)` and friends. Inverse kinds get no marker — the edge is named after the forward.
    - `AggregateLoaderEmitter` — per `[AggregateRoot]`, an internal `{Root}AggregateLoader` static class with `PopulateAsync` that issues a single nested-`SELECT` query: root row with `*` plus `field.*` inline expansion for each `[Reference]`, then per-non-root-member subselects scoped via dotted parent paths back to the root (`WHERE feature.epic.design = $parent.id`), then per-relation-kind edge subselects (within-aggregate + cross-aggregate target-side). Hydration is delegated to the per-entity `IEntity.Hydrate` which also re-hydrates inline-expanded references.
    - `PartialEmitter` — partial implementations of every annotated property/method, plus the per-entity session-binding plumbing (`_session` field, `_pendingWrites` buffer, explicit `IEntity.Bind` / `IEntity.Flush` / `IEntity.Session`, `__WriteField` / `__ClearField` setter helpers, protected `Session` accessor that throws when unbound), plus `IEntity.Initialize` (mandatory-ref seeding via `session.Track(new T())`), `IEntity.Hydrate` (loader-driven row-to-entity population), and `IEntity.OnDeleting` dispatch. Relation collection property reads emit `Session.QueryRelated<TKind, TElement>(this)` / `QueryRelatedIds<TKind>(this)` / `QueryInverseRelatedIds<TKind>(this)`. **No** auto-emitted `Add{X}` / `Remove{X}` / `Clear{X}` — the typed `Session.Relate<TKind>(...)` is the canonical mutation surface, users write a one-line passthrough if they want a domain verb.
-   - `ReferenceRegistryEmitter` — sealed `IReferenceRegistry` impl in the consumer (`GeneratedReferenceRegistry`) PLUS a partial fragment of the user's `[CompositionRoot]` exposing the singleton via `public static IReferenceRegistry ReferenceRegistry`. No `[ModuleInitializer]`, no static facade — model-scoped so multiple Surface-generated assemblies can coexist in one process.
-   - `SchemaEmitter` — emits the chunked DDL via `{CompositionRoot}.Schema` (a partial fragment) backed by an internal `SurfaceSchema._chunks` array in the same namespace. `IReadOnlyList<string>` of DDL chunks: writer_lease + entity tables block + one chunk per `[Table]`'s fields + one chunk per relation kind. Idempotent via `DEFINE … IF NOT EXISTS`. Apply at boot via `foreach (var chunk in Workspace.Schema) await transport.ExecuteAsync(chunk);`. Skipped when no `[CompositionRoot]` exists.
+   - `ReferenceRegistryEmitter` — sealed `IReferenceRegistry` impl in the consumer (`GeneratedReferenceRegistry`) PLUS a partial fragment of the user's `[CompositionRoot]` exposing the singleton via `public static IReferenceRegistry ReferenceRegistry`. No `[ModuleInitializer]`, no static facade — model-scoped so multiple Disruptor.Surface-generated assemblies can coexist in one process.
+   - `SchemaEmitter` — emits the chunked DDL via `{CompositionRoot}.Schema` (a partial fragment) backed by an internal `Disruptor.SurfaceSchema._chunks` array in the same namespace. `IReadOnlyList<string>` of DDL chunks: writer_lease + entity tables block + one chunk per `[Table]`'s fields + one chunk per relation kind. Idempotent via `DEFINE … IF NOT EXISTS`. Apply at boot via `foreach (var chunk in Workspace.Schema) await transport.ExecuteAsync(chunk);`. Skipped when no `[CompositionRoot]` exists.
    - Diagnostics — CG001 through CG019 reported from the linker output.
 
 ### Equatability is the contract
@@ -49,7 +49,7 @@ When the user writes `partial IReadOnlyCollection<IRestrictedBy> Foo { get; }`, 
 ### Emit conventions
 
 - `IdEmitter.LiteralExpr` / `NewValueExpr` have hard-coded entries for `Ulid` (default), `Guid`, and `string`. A custom value type set via `[assembly: RecordIdValue<TCustom>]` falls through to a `NotImplementedException` body — extend `IdEmitter` if/when a real custom-value need surfaces (no translator-discovery infrastructure exists yet).
-- `PartialEmitter.SessionType`, `EntityInterface`, `SurrealArrayMetadata` (and the matching constants in the other emitters) pin the target namespace `Surface.Runtime`. If the runtime is renamed or split, every emitter that bakes a `global::Surface.Runtime.*` literal must change in lockstep.
+- `PartialEmitter.SessionType`, `EntityInterface`, `SurrealArrayMetadata` (and the matching constants in the other emitters) pin the target namespace `Disruptor.Surface.Runtime`. If the runtime is renamed or split, every emitter that bakes a `global::Disruptor.Surface.Runtime.*` literal must change in lockstep.
 - `RelationKindEmitter` strips the `Attribute` suffix to name the marker class. `RestrictsAttribute` (the user's attribute, used as `[Restricts]`) and `Restricts` (the marker, used as `Session.Relate<Restricts>(...)`) coexist in the same namespace because attribute-position resolution looks for `*Attribute` first and type-position resolution looks for the bare name.
 - `ReferenceRegistryEmitter` keeps the impl class internal to the consumer assembly and exposes the singleton via a partial fragment on `[CompositionRoot]`. Same pattern works for any per-model metadata — emit the impl as an internal class, attach a static accessor to the user's partial. Anything new the runtime needs at commit time gets passed into `SurrealSession`'s ctor; nothing reaches into a process-global facade any more.
 - **Method names carry no semantic meaning to the generator.** The generator no longer auto-emits relation Add/Remove/Clear methods, so there is no name-driven dispatch left. `MethodVerb` parsing remains for the user-declared partial relation method body emit (a tiny path that fills in `=> Session.Relate<TKind>(...)` for `partial void Restricts(...)` etc).
@@ -59,7 +59,7 @@ When the user writes `partial IReadOnlyCollection<IRestrictedBy> Foo { get; }`, 
 
 `Pipeline/Diagnostics.cs` defines the `CG001`–`CG019` descriptors. When adding a new validation, add the descriptor here and report it from `ModelGenerator.Emit` (or the appropriate extractor). `CG002` and `CG016` are intentionally unused. Selected highlights: CG001 (`[Table]` not partial), CG011 (entity reachable from multiple aggregate roots), CG014 (cascade-only reference cycle), CG018 (multiple `[CompositionRoot]` classes), CG019 (`[CompositionRoot]` class not partial).
 
-## Runtime model (Surface.Runtime)
+## Runtime model (Disruptor.Surface.Runtime)
 
 The generated partials are not standalone — they call into a small runtime that consumers must wire up:
 
@@ -82,7 +82,7 @@ The generated partials are not standalone — they call into a small runtime tha
 
 ## Authoring conventions for `[Table]` consumers
 
-When working in `Surface.Sample/Models` (or any consumer):
+When working in `Disruptor.Surface.Sample/Models` (or any consumer):
 
 - A `[Table]` class **must** be `partial` (CG001) and declare exactly **one** `[Id]` partial property (CG007/CG008). The id type is the generated `{Name}Id` struct.
 - Exactly one class **may** be tagged `[CompositionRoot]` and **must** be `partial` (CG018/CG019). The generator grafts `Load{Root}Async` instance methods onto it; you own the ctor, fields, transport wiring, etc. Without one, the load methods aren't emitted; you can still call `{Root}AggregateLoader.PopulateAsync` directly if you really want.
