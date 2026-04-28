@@ -18,10 +18,11 @@ public sealed class SurrealArrayTests
         // dirty batch hold a single live reference whose subsequent mutations are picked
         // up automatically at commit time without re-recording.
         var captures = new List<List<int>>();
-        var array = new SurrealArray<int>(initial: null, items => captures.Add(items));
-
-        array.Add(1);
-        array.Add(2);
+        _ = new SurrealArray<int>(initial: null, items => captures.Add(items))
+        {
+            1,
+            2
+        };
 
         Assert.Equal(2, captures.Count);
         Assert.Same(captures[0], captures[1]);
@@ -32,7 +33,7 @@ public sealed class SurrealArrayTests
     public void Initial_Items_Are_Loaded_Without_FiringWriter()
     {
         var fired = false;
-        var array = new SurrealArray<int>(initial: new[] { 1, 2, 3 }, _ => fired = true);
+        var array = new SurrealArray<int>(initial: [1, 2, 3], _ => fired = true);
 
         Assert.Equal(3, array.Count);
         Assert.False(fired);
@@ -47,18 +48,12 @@ public sealed class SurrealArrayTests
         var pendingWrites = new Dictionary<string, object?>();
         SurrealSession? boundSession = null;
 
-        // Writer captures into the buffer when unbound; routes to the session post-bind.
-        Action<List<int>> writer = items =>
+        _ = new SurrealArray<int>(initial: null, Writer)
         {
-            if (boundSession is null) pendingWrites["scenarios"] = items;
-            else boundSession.SetField(new RecordId("ac", "x"), "scenarios", items);
+            // Pre-bind mutations — the bug used to drop these on the floor.
+            1,
+            2
         };
-
-        var array = new SurrealArray<int>(initial: null, writer);
-
-        // Pre-bind mutations — the bug used to drop these on the floor.
-        array.Add(1);
-        array.Add(2);
 
         Assert.Single(pendingWrites);
         Assert.Equal(new[] { 1, 2 }, (List<int>)pendingWrites["scenarios"]!);
@@ -74,6 +69,14 @@ public sealed class SurrealArrayTests
         var setCmd = session.Log.Entries.Single(e => e.Op == CommandOp.Set);
         Assert.Equal("scenarios", setCmd.Key);
         Assert.IsAssignableFrom<List<int>>(setCmd.Value);
+        return;
+
+        // Writer captures into the buffer when unbound; routes to the session post-bind.
+        void Writer(List<int> items)
+        {
+            if (boundSession is null) pendingWrites["scenarios"] = items;
+            else boundSession.SetField(new RecordId("ac", "x"), "scenarios", items);
+        }
     }
 
     [Fact]
@@ -81,8 +84,8 @@ public sealed class SurrealArrayTests
     {
         var fireCount = 0;
         var array = new SurrealArray<string>(
-            initial: new[] { "a", "b", "c" },
-            items => fireCount++);
+            initial: ["a", "b", "c"],
+            _ => fireCount++);
 
         array.Move(2, 0);
 
@@ -95,7 +98,7 @@ public sealed class SurrealArrayTests
     {
         var fireCount = 0;
         var array = new SurrealArray<string>(
-            initial: new[] { "a", "b" },
+            initial: ["a", "b"],
             _ => fireCount++);
 
         array.Move(0, 0);

@@ -11,14 +11,14 @@ namespace Disruptor.Surface.Generator.Model;
 public readonly struct EquatableArray<T> : IEquatable<EquatableArray<T>>, IReadOnlyList<T>
     where T : IEquatable<T>
 {
-    public static readonly EquatableArray<T> Empty = new(ImmutableArray<T>.Empty);
+    public static readonly EquatableArray<T> Empty = new([]);
 
     private readonly ImmutableArray<T> items;
 
     public EquatableArray(ImmutableArray<T> items) => this.items = items;
     public EquatableArray(IEnumerable<T> items) => this.items = [..items];
 
-    public ImmutableArray<T> AsImmutableArray() => items.IsDefault ? ImmutableArray<T>.Empty : items;
+    public ImmutableArray<T> AsImmutableArray() => items.IsDefault ? [] : items;
 
     public int Count => items.IsDefault ? 0 : items.Length;
     public T this[int index] => items[index];

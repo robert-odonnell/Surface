@@ -8,8 +8,7 @@ public sealed class SurrealCommandEmitterTests
     [Fact]
     public void Create_EmitsBareCreateStatement()
     {
-        var (sql, parameters) = SurrealCommandEmitter.Emit(
-            new[] { Command.Create(new RecordId("designs", "x")) });
+        var (sql, parameters) = SurrealCommandEmitter.Emit([Command.Create(new RecordId("designs", "x"))]);
 
         Assert.Equal("CREATE designs:x;\n", sql);
         Assert.Empty(parameters);
@@ -21,8 +20,7 @@ public sealed class SurrealCommandEmitterTests
         var owner = new RecordId("designs", "d");
         var details = new RecordId("details", "x");
 
-        var (sql, parameters) = SurrealCommandEmitter.Emit(
-            new[] { Command.Set(owner, "details", details) });
+        var (sql, parameters) = SurrealCommandEmitter.Emit([Command.Set(owner, "details", details)]);
 
         // Record-id values get inlined as `table:value` literals so the SurrealQL
         // parser sees them as a record link, not a string. Scalars go through $params.
@@ -33,8 +31,9 @@ public sealed class SurrealCommandEmitterTests
     [Fact]
     public void Set_OnScalar_Value_AddsParameter()
     {
-        var (sql, parameters) = SurrealCommandEmitter.Emit(
-            new[] { Command.Set(new RecordId("designs", "d"), "description", "hello") });
+        var (sql, parameters) = SurrealCommandEmitter.Emit([Command.Set(new RecordId("designs", "d"), "description", "hello")
+            ]
+        );
 
         Assert.Contains("$p0", sql);
         Assert.Equal("hello", parameters["p0"]);
@@ -51,8 +50,7 @@ public sealed class SurrealCommandEmitterTests
             { "description", "hello" },
         };
 
-        var (sql, parameters) = SurrealCommandEmitter.Emit(
-            new[] { Command.Upsert(owner, content) });
+        var (sql, parameters) = SurrealCommandEmitter.Emit([Command.Upsert(owner, content)]);
 
         Assert.StartsWith("UPSERT designs:d CONTENT { ", sql);
         Assert.Contains("details: details:x", sql);
@@ -66,8 +64,7 @@ public sealed class SurrealCommandEmitterTests
         var src = new RecordId("constraints", "c");
         var tgt = new RecordId("user_stories", "u");
 
-        var (sql, _) = SurrealCommandEmitter.Emit(
-            new[] { Command.Relate(src, "restricts", tgt) });
+        var (sql, _) = SurrealCommandEmitter.Emit([Command.Relate(src, "restricts", tgt)]);
 
         Assert.Equal("RELATE constraints:c->restricts->user_stories:u;\n", sql);
     }
@@ -78,8 +75,7 @@ public sealed class SurrealCommandEmitterTests
         var src = new RecordId("constraints", "c");
         var tgt = new RecordId("user_stories", "u");
 
-        var (sql, _) = SurrealCommandEmitter.Emit(
-            new[] { Command.Unrelate(src, "restricts", tgt) });
+        var (sql, _) = SurrealCommandEmitter.Emit([Command.Unrelate(src, "restricts", tgt)]);
 
         Assert.Equal("DELETE restricts WHERE in = constraints:c AND out = user_stories:u;\n", sql);
     }
@@ -89,8 +85,7 @@ public sealed class SurrealCommandEmitterTests
     {
         // Polish-3: Upserted intent must always render as UPSERT, never CREATE — even
         // with no fields. CREATE errors when the row exists; UPSERT is create-or-update.
-        var (sql, _) = SurrealCommandEmitter.Emit(
-            new[] { Command.Upsert(new RecordId("designs", "x")) });
+        var (sql, _) = SurrealCommandEmitter.Emit([Command.Upsert(new RecordId("designs", "x"))]);
 
         Assert.Equal("UPSERT designs:x;\n", sql);
     }
@@ -98,8 +93,9 @@ public sealed class SurrealCommandEmitterTests
     [Fact]
     public void UnrelateAllFrom_RendersAsBulkDelete_WithInWhereClause()
     {
-        var (sql, _) = SurrealCommandEmitter.Emit(
-            new[] { Command.UnrelateAllFrom(new RecordId("constraints", "c"), "restricts") });
+        var (sql, _) = SurrealCommandEmitter.Emit([Command.UnrelateAllFrom(new RecordId("constraints", "c"), "restricts")
+            ]
+        );
 
         Assert.Equal("DELETE restricts WHERE in = constraints:c;\n", sql);
     }
@@ -107,8 +103,9 @@ public sealed class SurrealCommandEmitterTests
     [Fact]
     public void UnrelateAllTo_RendersAsBulkDelete_WithOutWhereClause()
     {
-        var (sql, _) = SurrealCommandEmitter.Emit(
-            new[] { Command.UnrelateAllTo(new RecordId("user_stories", "u"), "restricts") });
+        var (sql, _) = SurrealCommandEmitter.Emit([Command.UnrelateAllTo(new RecordId("user_stories", "u"), "restricts")
+            ]
+        );
 
         Assert.Equal("DELETE restricts WHERE out = user_stories:u;\n", sql);
     }
@@ -120,12 +117,12 @@ public sealed class SurrealCommandEmitterTests
         var b = new RecordId("constraints", "b");
 
         var (sql, _) = SurrealCommandEmitter.Emit(
-            new[]
-            {
-                Command.Create(a),
+        [
+            Command.Create(a),
                 Command.Create(b),
-                Command.Delete(b),
-            });
+                Command.Delete(b)
+        ]
+        );
 
         var lines = sql.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(3, lines.Length);

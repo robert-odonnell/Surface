@@ -4,6 +4,9 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
+  <Folder Name="/Solution Items/">
+    <File Path=".editorconfig" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/Disruptor.Surface.Generator/Disruptor.Surface.Generator.csproj" />
     <Project Path="src/Disruptor.Surface.Runtime/Disruptor.Surface.Runtime.csproj" />

@@ -16,20 +16,4 @@ public sealed record TableModel(
     string DeclaredAccessibility,
     EquatableArray<string> TypeParameters,
     EquatableArray<PropertyModel> Properties,
-    string FileHintName)
-{
-    public PropertyModel? IdProperty =>
-            Properties.FirstOrDefault(p => p.Kinds.HasFlag(PropertyKind.Id));
-
-    public PropertyModel? ParentProperty =>
-        Properties.FirstOrDefault(p => p.Kinds.HasFlag(PropertyKind.Parent));
-
-    public IEnumerable<PropertyModel> ChildrenProperties =>
-        Properties.Where(p => p.Kinds.HasFlag(PropertyKind.Children));
-
-    public IEnumerable<PropertyModel> ReferenceProperties =>
-        Properties.Where(p => p.Kinds.HasFlag(PropertyKind.Reference));
-
-    public IEnumerable<PropertyModel> RelationProperties =>
-        Properties.Where(p => p.RelationRole is RelationRole.ForwardRelation or RelationRole.InverseRelation);
-}
+    string FileHintName);

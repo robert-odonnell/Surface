@@ -1,5 +1,3 @@
-#nullable enable
-
 namespace Disruptor.Surface.Runtime;
 
 /// <summary>
@@ -14,8 +12,8 @@ public sealed class LifecycleSegment
     public bool Created;
     public bool Upserted;
     public bool Deleted;
-    public Dictionary<string, object?> Sets { get; } = new(StringComparer.Ordinal);
-    public HashSet<string> Unsets { get; } = new(StringComparer.Ordinal);
+    public Dictionary<string, object?> Sets { get; } = [];
+    public HashSet<string> Unsets { get; } = [];
 
     public bool ExistsAtSegmentEnd => (Created || Upserted) && !Deleted;
 }
@@ -32,7 +30,7 @@ public sealed class RecordPendingState
     public bool ExistedAtStart { get; }
     public List<LifecycleSegment> Segments { get; } = [];
 
-    public LifecycleSegment Current => Segments[Segments.Count - 1];
+    public LifecycleSegment Current => Segments[^1];
 
     /// <summary>
     /// True iff the record will exist in the database after the planner emits this
@@ -129,8 +127,8 @@ public sealed class RelationPendingState(string kind, RecordId source, RecordId 
     public RecordId Target { get; } = target;
     public bool ExistedAtStart { get; } = existedAtStart;
     public RelationFinalState State { get; set; } = RelationFinalState.Untouched;
-    public Dictionary<string, object?> PayloadSets { get; } = new(StringComparer.Ordinal);
-    public HashSet<string> PayloadUnsets { get; } = new(StringComparer.Ordinal);
+    public Dictionary<string, object?> PayloadSets { get; } = [];
+    public HashSet<string> PayloadUnsets { get; } = [];
 }
 
 /// <summary>
@@ -143,11 +141,11 @@ public sealed class PendingState(
     HashSet<RecordId> loadedAtStart,
     HashSet<(string Kind, RecordId Source, RecordId Target)> relationsAtStart)
 {
-    public Dictionary<RecordId, RecordPendingState> Records { get; } = new();
-    public Dictionary<(string Kind, RecordId Source, RecordId Target), RelationPendingState> Relations { get; } = new();
-    public Dictionary<(RecordId Owner, string Field), ReferenceTransition> References { get; } = new();
-    public HashSet<(string Kind, RecordId Source)> BulkUnrelateFrom { get; } = new();
-    public HashSet<(string Kind, RecordId Target)> BulkUnrelateTo { get; } = new();
+    public Dictionary<RecordId, RecordPendingState> Records { get; } = [];
+    public Dictionary<(string Kind, RecordId Source, RecordId Target), RelationPendingState> Relations { get; } = [];
+    public Dictionary<(RecordId Owner, string Field), ReferenceTransition> References { get; } = [];
+    public HashSet<(string Kind, RecordId Source)> BulkUnrelateFrom { get; } = [];
+    public HashSet<(string Kind, RecordId Target)> BulkUnrelateTo { get; } = [];
 
     public RecordPendingState GetOrCreateRecord(RecordId id)
     {

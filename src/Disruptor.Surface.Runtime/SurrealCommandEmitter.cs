@@ -181,7 +181,7 @@ public readonly record struct Command(
     public static Command UnrelateAllTo(RecordId target, string edgeTable) =>
         new(CommandOp.UnrelateAllTo, target, edgeTable);
 
-    private static IReadOnlyDictionary<string, object?>? Freeze(IEnumerable<KeyValuePair<string, object?>>? source) =>
+    private static Dictionary<string, object?>? Freeze(IEnumerable<KeyValuePair<string, object?>>? source) =>
         source is null ? null : new Dictionary<string, object?>(source, StringComparer.Ordinal);
 }
 

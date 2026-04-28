@@ -49,13 +49,13 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public async Task AbandonAsync_ClosesTheSession_AndIsIdempotent()
+    public void Abandon_ClosesTheSession_AndIsIdempotent()
     {
         var session = new SurrealSession();
-        await session.AbandonAsync();
+        session.Abandon();
         Assert.True(session.IsClosed);
         // Second call must not throw — idempotent close.
-        await session.AbandonAsync();
+        session.Abandon();
     }
 
     [Fact]
@@ -75,10 +75,10 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public async Task ClosedSession_Writes_Throw()
+    public void ClosedSession_Writes_Throw()
     {
         var session = new SurrealSession();
-        await session.AbandonAsync();
+        session.Abandon();
         var id = new RecordId("t", "1");
 
         Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(id)));

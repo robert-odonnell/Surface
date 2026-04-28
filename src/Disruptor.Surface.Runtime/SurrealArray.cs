@@ -17,22 +17,15 @@ namespace Disruptor.Surface.Runtime;
 /// mutations on the same list are automatically picked up at commit time.
 /// </para>
 /// </summary>
-public sealed class SurrealArray<T> : IList<T>, IReadOnlyList<T>
+/// <remarks>
+/// Construct a tracked list with a writer callback. Generator-emitted property getters
+/// call this with no initial items and a lambda that routes through the entity's
+/// <c>__WriteField</c>; the loader's <see cref="IEntity.Hydrate"/> path calls it with
+/// the hydrated payload (and the same writer).
+/// </remarks>
+public sealed class SurrealArray<T>(IEnumerable<T>? initial, Action<List<T>> writer) : IList<T>, IReadOnlyList<T>
 {
-    private readonly List<T> items;
-    private readonly Action<List<T>> writer;
-
-    /// <summary>
-    /// Construct a tracked list with a writer callback. Generator-emitted property getters
-    /// call this with no initial items and a lambda that routes through the entity's
-    /// <c>__WriteField</c>; the loader's <see cref="IEntity.Hydrate"/> path calls it with
-    /// the hydrated payload (and the same writer).
-    /// </summary>
-    public SurrealArray(IEnumerable<T>? initial, Action<List<T>> writer)
-    {
-        this.writer = writer;
-        items = initial is null ? [] : [..initial];
-    }
+    private readonly List<T> items = initial is null ? [] : [.. initial];
 
     public int Count => items.Count;
     public bool IsReadOnly => false;

@@ -274,12 +274,11 @@ internal static class AggregateLoaderEmitter
 
     private static List<TableModel> OrderedMembers(AggregateModel agg, Dictionary<string, TableModel> byFullName, Dictionary<string, string> pathToRoot)
     {
-        return agg.MemberFullNames
+        return [..agg.MemberFullNames
             .Where(byFullName.ContainsKey)
             .Select(m => byFullName[m])
             .OrderBy(t => HopCount(pathToRoot.TryGetValue(t.FullName, out var p) ? p : string.Empty))
-            .ThenBy(t => t.Name, StringComparer.Ordinal)
-            .ToList();
+            .ThenBy(t => t.Name, StringComparer.Ordinal)];
     }
 
     private static int HopCount(string path)

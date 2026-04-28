@@ -158,18 +158,9 @@ public static class SurrealResultReader
             : value;
     }
 
-    private static IReadOnlyList<T> DeserializeArray<T>(JsonElement array, JsonSerializerOptions json)
-    {
-        var list = new List<T>();
-
-        foreach (var item in array.EnumerateArray())
-        {
-            list.Add(DeserializeRequired<T>(item, json));
-        }
-
-        return list;
-    }
-
+    private static List<T> DeserializeArray<T>(JsonElement array, JsonSerializerOptions json) => [..array.EnumerateArray()
+        .Select(item => DeserializeRequired<T>(item, json))];
+        
     private static T DeserializeRequired<T>(JsonElement element, JsonSerializerOptions json)
     {
         var value = element.Deserialize<T>(json);

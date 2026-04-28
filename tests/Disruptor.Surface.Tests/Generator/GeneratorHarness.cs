@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using System.Reflection;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Disruptor.Surface.Generator;
@@ -30,12 +29,12 @@ internal static class GeneratorHarness
         var references = ReferenceAssemblies();
         return CSharpCompilation.Create(
             assemblyName: "GeneratorTestHost",
-            syntaxTrees: new[] { CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest)) },
+            syntaxTrees: [CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest))],
             references: references,
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
     }
 
-    private static IReadOnlyList<MetadataReference> ReferenceAssemblies()
+    private static List<MetadataReference> ReferenceAssemblies()
     {
         var refs = new List<MetadataReference>();
 
@@ -43,7 +42,7 @@ internal static class GeneratorHarness
         // already (it's a project ref of this test project), so we can grab it via reflection.
         var trustedPaths = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))?
             .Split(Path.PathSeparator)
-            ?? Array.Empty<string>();
+            ?? [];
         foreach (var path in trustedPaths)
         {
             // Cherry-pick: System.* / netstandard / mscorlib / System.Runtime / System.Text.Json /

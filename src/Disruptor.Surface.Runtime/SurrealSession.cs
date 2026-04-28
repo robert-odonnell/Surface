@@ -129,10 +129,10 @@ public interface IEntity
 /// </summary>
 public sealed class SurrealSession : IHydrationSink
 {
-    private readonly Dictionary<RecordId, IEntity> entities = new();
-    private readonly Dictionary<RecordId, RecordId> parents = new();
-    private readonly Dictionary<(RecordId Owner, string Field), RecordId> references = new();
-    private readonly Dictionary<(RecordId Source, string Edge, RecordId Target), bool> edges = new();
+    private readonly Dictionary<RecordId, IEntity> entities = [];
+    private readonly Dictionary<RecordId, RecordId> parents = [];
+    private readonly Dictionary<(RecordId Owner, string Field), RecordId> references = [];
+    private readonly Dictionary<(RecordId Source, string Edge, RecordId Target), bool> edges = [];
 
     // One-shot lifecycle invariant: a session represents one loaded snapshot plus one
     // pending mutation batch. Successful CommitAsync or AbandonAsync flips `_closed` to
@@ -149,7 +149,7 @@ public sealed class SurrealSession : IHydrationSink
         }
     }
 
-    /// <summary>True after <see cref="CommitAsync"/> or <see cref="AbandonAsync"/> has run; further reads or writes throw.</summary>
+    /// <summary>True after <see cref="CommitAsync"/> or <see cref="Abandon"/> has run; further reads or writes throw.</summary>
     public bool IsClosed => closed;
 
     // Filled by the loader's HydrateTrack / HydrateEdge — used by PendingState to
@@ -638,12 +638,11 @@ public sealed class SurrealSession : IHydrationSink
     }
 
     /// <summary>Drop pending writes without flushing. Closes the session — once abandoned, it's done.</summary>
-    public Task AbandonAsync(CancellationToken ct = default)
+    public void Abandon()
     {
         Log.Clear();
         Pending.Clear();
         closed = true;
-        return Task.CompletedTask;
     }
 
 
