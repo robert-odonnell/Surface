@@ -15,9 +15,6 @@ public sealed class CommitPlannerTests
     private static PendingState WithLoaded(params RecordId[] loaded) =>
         new(loadedAtStart: [..loaded], relationsAtStart: []);
 
-    private static IReadOnlyDictionary<(RecordId, string), RecordId> NoLiveRefs() =>
-        new Dictionary<(RecordId, string), RecordId>();
-
     [Fact]
     public void DeadWeight_FreshRecord_WithNoWritesAndNoReferences_IsElided()
     {
@@ -27,7 +24,7 @@ public sealed class CommitPlannerTests
         var ghost = new RecordId("designs", "ghost");
         pending.ApplyCommand(Command.Create(ghost));
 
-        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending);
 
         Assert.Empty(plan);
     }
@@ -45,7 +42,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.Create(design));
         pending.ApplyCommand(Command.Set(design, "details", details));
 
-        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending);
 
         Assert.Equal(2, plan.Count(c => c.Op is CommandOp.Create or CommandOp.Upsert));
     }
@@ -69,7 +66,7 @@ public sealed class CommitPlannerTests
         // Use the original Relate-bearing pending for ordering, but check the field-update
         // ordering with pending2 separately.
 
-        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending);
 
         // The plan should have creates first, then relations.
         var createIdx = IndexOfFirst(plan, c => c.Op is CommandOp.Create or CommandOp.Upsert);
@@ -77,7 +74,7 @@ public sealed class CommitPlannerTests
         Assert.True(createIdx < relateIdx, "creates must precede relations");
 
         // Field-update ordering against the loaded record:
-        var plan2 = CommitPlanner.Build(pending2, NoLiveRefs());
+        var plan2 = CommitPlanner.Build(pending2);
         var setIdx = IndexOfFirst(plan2, c => c.Op == CommandOp.Set);
         Assert.True(setIdx >= 0, "expected a Set command in the plan");
     }
@@ -91,7 +88,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.Delete(id));
         pending.ApplyCommand(Command.Create(id));
 
-        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending);
 
         // Two ops: a closed-segment DELETE followed by a CREATE/UPSERT for the new
         // segment — order matters because the schema would otherwise reject a duplicate.
@@ -111,7 +108,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.Set(id, "description", "edit"));
         pending.ApplyCommand(Command.Delete(id));
 
-        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending);
 
         // §16: final-segment deletes are the last phase. Field updates from before
         // the delete are dropped because the record is gone at commit.
@@ -134,7 +131,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.Set(id, "description", "edit"));
         pending.ApplyCommand(Command.Delete(id));
 
-        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending);
         Assert.Single(plan);
         Assert.Equal(CommandOp.Delete, plan[0].Op);
     }
@@ -155,7 +152,7 @@ public sealed class CommitPlannerTests
         pending2.ApplyCommand(Command.Unrelate(a, "restricts", c));
         pending2.ApplyCommand(Command.Relate(b, "restricts", c));
 
-        var plan = CommitPlanner.Build(pending2, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending2);
 
         var unrelIdx = IndexOfFirst(plan, x => x.Op == CommandOp.Unrelate);
         var relIdx   = IndexOfFirst(plan, x => x.Op == CommandOp.Relate);
@@ -173,7 +170,7 @@ public sealed class CommitPlannerTests
         pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
         pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
 
-        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending);
 
         var bulkIdx = IndexOfFirst(plan, c => c.Op == CommandOp.UnrelateAllFrom);
         var relateIdx = IndexOfFirst(plan, c => c.Op == CommandOp.Relate);
@@ -194,7 +191,7 @@ public sealed class CommitPlannerTests
 
         pending.ApplyCommand(Command.Upsert(id, new Dictionary<string, object?>()));
 
-        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending);
 
         Assert.Single(plan);
         Assert.Equal(CommandOp.Upsert, plan[0].Op);
@@ -210,7 +207,7 @@ public sealed class CommitPlannerTests
 
         pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
 
-        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending);
         Assert.Empty(plan);
     }
 
@@ -223,7 +220,7 @@ public sealed class CommitPlannerTests
 
         pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
 
-        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+        var plan = CommitPlanner.Build(pending);
         Assert.Empty(plan);
     }
 
@@ -237,14 +234,10 @@ public sealed class CommitPlannerTests
         var design = new RecordId("designs", "d");
         var constraint = new RecordId("constraints", "c");
         var pending = WithLoaded(design, constraint);
+        pending.HydrateReference(design, "constraint", constraint);
         pending.ApplyCommand(Command.Delete(constraint));
 
-        var liveRefs = new Dictionary<(RecordId, string), RecordId>
-        {
-            { (design, "constraint"), constraint }
-        };
-
-        var ex = Assert.Throws<CommitPlanRejectException>(() => CommitPlanner.Build(pending, liveRefs));
+        var ex = Assert.Throws<CommitPlanRejectException>(() => CommitPlanner.Build(pending));
         Assert.Contains(ex.Blockers, b => b.Contains("constraints:c") && b.Contains("designs:d"));
     }
 
@@ -257,18 +250,87 @@ public sealed class CommitPlannerTests
         var design = new RecordId("designs", "d");
         var constraint = new RecordId("constraints", "c");
         var pending = WithLoaded(design, constraint);
+        pending.HydrateReference(design, "constraint", constraint);
         pending.ApplyCommand(Command.Delete(constraint));
 
-        var liveRefs = new Dictionary<(RecordId, string), RecordId>
-        {
-            { (design, "constraint"), constraint }
-        };
-
-        var plan = CommitPlanner.Build(pending, liveRefs);
+        var plan = CommitPlanner.Build(pending);
 
         // The owner survives; the field gets Unset; the target gets Deleted.
         Assert.Contains(plan, c => c.Op == CommandOp.Unset && c.Target == design && c.Key == "constraint");
         Assert.Contains(plan, c => c.Op == CommandOp.Delete && c.Target == constraint);
+    }
+
+    [Fact]
+    public void Reject_DoesNotFire_WhenOwnerIsItself_CascadeDeleted_ViaAnotherEdge()
+    {
+        // Three-phase reject: A points at C with Reject. A also points at B with
+        // Cascade. B is deleted. Cascade phase deletes A. C's Reject scan should
+        // therefore NOT see A as a blocker for C, because A is gone.
+        ReferenceRegistry.Register(new StubRegistry(
+            ("a", "b_ref", "b", ReferenceDeleteBehavior.Cascade),
+            ("a", "c_ref", "c", ReferenceDeleteBehavior.Reject)));
+
+        var a = new RecordId("a", "1");
+        var b = new RecordId("b", "1");
+        var c = new RecordId("c", "1");
+
+        var pending = WithLoaded(a, b, c);
+        pending.HydrateReference(a, "b_ref", b);
+        pending.HydrateReference(a, "c_ref", c);
+        pending.ApplyCommand(Command.Delete(b));
+        pending.ApplyCommand(Command.Delete(c));
+
+        var plan = CommitPlanner.Build(pending);
+
+        Assert.Contains(plan, x => x.Op == CommandOp.Delete && x.Target == a);
+        Assert.Contains(plan, x => x.Op == CommandOp.Delete && x.Target == b);
+        Assert.Contains(plan, x => x.Op == CommandOp.Delete && x.Target == c);
+    }
+
+    [Fact]
+    public void Reject_FiresAfter_Cascade_LeavesAReachingOwnerInPlace()
+    {
+        // A points at C with Reject. C is deleted. A is NOT cascade-deleted via any
+        // other edge — A survives, so the Reject blocker is real.
+        ReferenceRegistry.Register(new StubRegistry(
+            ("a", "c_ref", "c", ReferenceDeleteBehavior.Reject)));
+
+        var a = new RecordId("a", "1");
+        var c = new RecordId("c", "1");
+
+        var pending = WithLoaded(a, c);
+        pending.HydrateReference(a, "c_ref", c);
+        pending.ApplyCommand(Command.Delete(c));
+
+        var ex = Assert.Throws<CommitPlanRejectException>(() => CommitPlanner.Build(pending));
+        Assert.Contains(ex.Blockers, b => b.Contains("c:1") && b.Contains("a:1"));
+    }
+
+    [Fact]
+    public void Reassign_ThenDelete_ClearsTheRejectBlocker()
+    {
+        // A loaded with A.ref = X. User reassigns A.ref = Y, then deletes X.
+        // The reject behavior is on the field, but at-end A no longer points at X,
+        // so X can be deleted cleanly.
+        ReferenceRegistry.Register(new StubRegistry(
+            ("a", "ref", "x", ReferenceDeleteBehavior.Reject)));
+
+        var a = new RecordId("a", "1");
+        var x = new RecordId("x", "1");
+        var y = new RecordId("x", "2");   // same table, different id — also a Reject target
+        var pending = WithLoaded(a, x, y);
+
+        // At-start: A.ref = X.
+        pending.HydrateReference(a, "ref", x);
+        // User reassigns to Y, then deletes X.
+        pending.SetReferenceTarget(a, "ref", y);
+        pending.ApplyCommand(Command.Set(a, "ref", y));
+        pending.ApplyCommand(Command.Delete(x));
+
+        // No reject — A's at-end target is Y, not X. (Y is not deleted, so its own
+        // Reject doesn't fire.)
+        var plan = CommitPlanner.Build(pending);
+        Assert.Contains(plan, c => c.Op == CommandOp.Delete && c.Target == x);
     }
 
     [Fact]
@@ -280,14 +342,10 @@ public sealed class CommitPlannerTests
         var design = new RecordId("designs", "d");
         var constraint = new RecordId("constraints", "c");
         var pending = WithLoaded(design, constraint);
+        pending.HydrateReference(design, "constraint", constraint);
         pending.ApplyCommand(Command.Delete(constraint));
 
-        var liveRefs = new Dictionary<(RecordId, string), RecordId>
-        {
-            { (design, "constraint"), constraint }
-        };
-
-        var plan = CommitPlanner.Build(pending, liveRefs);
+        var plan = CommitPlanner.Build(pending);
 
         Assert.Contains(plan, c => c.Op == CommandOp.Delete && c.Target == design);
         Assert.Contains(plan, c => c.Op == CommandOp.Delete && c.Target == constraint);

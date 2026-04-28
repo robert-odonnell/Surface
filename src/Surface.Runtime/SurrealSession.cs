@@ -334,7 +334,9 @@ public sealed class SurrealSession
                 parents[ownerId] = (RecordId)canonical!;
                 break;
             case FieldKind.Reference:
-                references[(ownerId, field)] = (RecordId)canonical!;
+                var refId = (RecordId)canonical!;
+                references[(ownerId, field)] = refId;
+                Pending.SetReferenceTarget(ownerId, field, refId);
                 break;
         }
 
@@ -352,6 +354,7 @@ public sealed class SurrealSession
                 break;
             case FieldKind.Reference:
                 references.Remove((ownerId, field));
+                Pending.UnsetReferenceTarget(ownerId, field);
                 break;
         }
 
@@ -486,7 +489,7 @@ public sealed class SurrealSession
     /// </summary>
     public (string Sql, IReadOnlyDictionary<string, object?> Parameters) RenderBatch()
     {
-        var plan = CommitPlanner.Build(Pending, references);
+        var plan = CommitPlanner.Build(Pending);
         return SurrealCommandEmitter.Emit(plan);
     }
 
@@ -552,7 +555,10 @@ public sealed class SurrealSession
         => parents[childId] = parentId;
 
     public void HydrateReference(RecordId ownerId, string fieldName, RecordId refId)
-        => references[(ownerId, fieldName)] = refId;
+    {
+        references[(ownerId, fieldName)] = refId;
+        Pending.HydrateReference(ownerId, fieldName, refId);
+    }
 
     public void HydrateEdge(RecordId source, string edge, RecordId target)
     {
@@ -589,10 +595,12 @@ public sealed class SurrealSession
             parents.Remove(k);
         }
 
-        foreach (var k in references.Where(kv => kv.Value == id).Select(kv => kv.Key).ToList())
-        {
-            references.Remove(k);
-        }
+        // NB: deliberately NOT mutating `references` here. The commit planner needs the
+        // incoming-reference graph intact to resolve [Reject] / [Unset] / [Cascade] —
+        // erasing inbound pointers to the deleted record at session-side made those
+        // decisions unreliable. Reads via GetReferenceOrDefault still resolve to null
+        // after the entity itself is gone (the dict lookup of `entities` misses), so
+        // user-facing reads stay sensible.
 
         foreach (var k in edges.Keys.Where(k => k.Source == id || k.Target == id).ToList())
         {

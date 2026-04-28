@@ -85,6 +85,31 @@ public sealed class RecordPendingState
     public void ApplyDelete() => Current.Deleted = true;
 }
 
+/// <summary>
+/// Two-snapshot state for a single <c>[Reference]</c> field. <see cref="TargetAtStart"/>
+/// captures what the loader saw; <see cref="TargetAtEnd"/> tracks what the user's writes
+/// will leave behind. The commit planner resolves reference-delete behavior against
+/// this snapshot — never against the session's mutable live <c>references</c> dict,
+/// which is a read-side cache and gets cleared by post-Delete cleanup. That decoupling
+/// is what makes <c>[Reject]</c>/<c>[Unset]</c>/<c>[Cascade]</c> reliable in the face
+/// of mid-packet deletes.
+/// </summary>
+public sealed class ReferenceTransition
+{
+    public RecordId Owner { get; }
+    public string Field { get; }
+    public RecordId? TargetAtStart { get; }
+    public RecordId? TargetAtEnd { get; set; }
+
+    public ReferenceTransition(RecordId owner, string field, RecordId? targetAtStart, RecordId? targetAtEnd)
+    {
+        Owner = owner;
+        Field = field;
+        TargetAtStart = targetAtStart;
+        TargetAtEnd = targetAtEnd;
+    }
+}
+
 /// <summary>Final intent for a relation across a unit of work — never both <see cref="Related"/> and <see cref="Unrelated"/>; later writes overwrite earlier ones.</summary>
 public enum RelationFinalState { Untouched, Related, Unrelated }
 
@@ -122,6 +147,7 @@ public sealed class PendingState
 {
     public Dictionary<RecordId, RecordPendingState> Records { get; } = new();
     public Dictionary<(string Kind, RecordId Source, RecordId Target), RelationPendingState> Relations { get; } = new();
+    public Dictionary<(RecordId Owner, string Field), ReferenceTransition> References { get; } = new();
     public HashSet<(string Kind, RecordId Source)> BulkUnrelateFrom { get; } = new();
     public HashSet<(string Kind, RecordId Target)> BulkUnrelateTo { get; } = new();
 
@@ -155,6 +181,44 @@ public sealed class PendingState
             Relations[key] = rel;
         }
         return rel;
+    }
+
+    /// <summary>Loader entry — records the at-start target. No-op if already known (loaders shouldn't double-emit).</summary>
+    public void HydrateReference(RecordId owner, string field, RecordId target)
+    {
+        var key = (owner, field);
+        if (!References.ContainsKey(key))
+        {
+            References[key] = new ReferenceTransition(owner, field, targetAtStart: target, targetAtEnd: target);
+        }
+    }
+
+    /// <summary>User-side write — updates the at-end target while preserving the at-start snapshot.</summary>
+    public void SetReferenceTarget(RecordId owner, string field, RecordId target)
+    {
+        var key = (owner, field);
+        if (References.TryGetValue(key, out var existing))
+        {
+            existing.TargetAtEnd = target;
+        }
+        else
+        {
+            References[key] = new ReferenceTransition(owner, field, targetAtStart: null, targetAtEnd: target);
+        }
+    }
+
+    /// <summary>User-side clear — at-end goes to null while at-start stays as it was.</summary>
+    public void UnsetReferenceTarget(RecordId owner, string field)
+    {
+        var key = (owner, field);
+        if (References.TryGetValue(key, out var existing))
+        {
+            existing.TargetAtEnd = null;
+        }
+        else
+        {
+            References[key] = new ReferenceTransition(owner, field, targetAtStart: null, targetAtEnd: null);
+        }
     }
 
     public void ApplyCommand(Command c)
@@ -241,6 +305,7 @@ public sealed class PendingState
     {
         Records.Clear();
         Relations.Clear();
+        References.Clear();
         BulkUnrelateFrom.Clear();
         BulkUnrelateTo.Clear();
     }

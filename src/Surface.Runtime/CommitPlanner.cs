@@ -20,11 +20,9 @@ namespace Surface.Runtime;
 /// </summary>
 public static class CommitPlanner
 {
-    public static IReadOnlyList<Command> Build(
-        PendingState pending,
-        IReadOnlyDictionary<(RecordId Owner, string Field), RecordId> liveReferences)
+    public static IReadOnlyList<Command> Build(PendingState pending)
     {
-        ResolveReferenceDeletes(pending, liveReferences);
+        ResolveReferenceDeletes(pending);
 
         var preDeletes        = new List<Command>(); // §16 phase 5
         var creates           = new List<Command>(); // §16 phase 6
@@ -70,44 +68,42 @@ public static class CommitPlanner
     }
 
     // ──────────────────────────── reference-delete resolution ────────────────
+    //
+    // Three phases (from the punch-list spec):
+    //   1. Explicit deletes are already in pending state — the user called Delete().
+    //   2. Apply Cascade + Unset to fixpoint (no Reject collection here — anything that
+    //      gets cascade-deleted in a later iteration shouldn't have produced a Reject
+    //      blocker in an earlier one).
+    //   3. After the graph stabilises, scan once more for surviving Reject blockers.
+    //   4. If any blockers, throw — otherwise the plan emits cleanly.
+    //
+    // Walks pending.References (the at-end snapshot) — never the session's mutable live
+    // dict. The live dict gets cleaned up as a read-side concern; the planner needs the
+    // immutable transition state to reason about the reference graph correctly.
 
-    private static void ResolveReferenceDeletes(
-        PendingState pending,
-        IReadOnlyDictionary<(RecordId Owner, string Field), RecordId> liveReferences)
+    private static void ResolveReferenceDeletes(PendingState pending)
     {
-        // Iterate to fixpoint — cascade deletes can introduce new deletions which in
-        // turn produce new incoming-reference resolutions.
+        // Phase 2: cascade + unset to fixpoint.
         var processed = new HashSet<RecordId>();
-        var blockers = new List<string>();
         bool madeProgress;
         do
         {
             madeProgress = false;
             foreach (var rec in pending.Records.Values.ToList())
             {
-                if (!IsEffectivelyDeleted(rec))
-                {
-                    continue;
-                }
+                if (!IsEffectivelyDeleted(rec)) continue;
+                if (!processed.Add(rec.Id)) continue;
 
-                if (!processed.Add(rec.Id))
-                {
-                    continue;
-                }
-
-                var incoming = EffectiveIncomingReferences(rec.Id, pending, liveReferences);
-                foreach (var (ownerId, fieldName, info) in incoming)
+                foreach (var (ownerId, fieldName, info) in EffectiveIncomingReferences(rec.Id, pending))
                 {
                     switch (info.Behavior)
                     {
-                        case ReferenceDeleteBehavior.Reject:
-                            blockers.Add($"Cannot delete {rec.Id}. Referenced by {ownerId} through field '{fieldName}'.");
-                            break;
-
                         case ReferenceDeleteBehavior.Unset:
-                            // Generated Unset folded back into pending state — preserves
-                            // normal compaction (multiple unsets on the same field collapse).
+                            // Generated Unset folded back into pending state. Mirror in
+                            // References so subsequent fixpoint iterations don't see the
+                            // owner as still pointing at the deleted target.
                             pending.GetOrCreateRecord(ownerId).ApplyUnset(fieldName);
+                            pending.UnsetReferenceTarget(ownerId, fieldName);
                             madeProgress = true;
                             break;
 
@@ -120,13 +116,27 @@ public static class CommitPlanner
                             }
                             break;
 
-                        case ReferenceDeleteBehavior.Ignore:
-                            // Intentional dangling reference — planner does nothing.
-                            break;
+                        // Reject deferred to phase 3; Ignore is by design a no-op.
                     }
                 }
             }
         } while (madeProgress);
+
+        // Phase 3: collect Reject blockers from the steady-state graph. Anything reached
+        // by Cascade in phase 2 is now Deleted itself and won't appear here.
+        var blockers = new List<string>();
+        foreach (var rec in pending.Records.Values)
+        {
+            if (!IsEffectivelyDeleted(rec)) continue;
+
+            foreach (var (ownerId, fieldName, info) in EffectiveIncomingReferences(rec.Id, pending))
+            {
+                if (info.Behavior == ReferenceDeleteBehavior.Reject)
+                {
+                    blockers.Add($"Cannot delete {rec.Id}. Referenced by {ownerId} through field '{fieldName}'.");
+                }
+            }
+        }
 
         if (blockers.Count > 0)
         {
@@ -142,50 +152,39 @@ public static class CommitPlanner
         return !rec.ExistsAtEnd;
     }
 
+    /// <summary>
+    /// Yields every <c>(owner, field, info)</c> whose at-end target is <paramref name="targetId"/>,
+    /// the owner is not itself effectively deleted, and the registry knows the field's
+    /// delete behavior. Walks the immutable <see cref="PendingState.References"/> snapshot.
+    /// </summary>
     private static IEnumerable<(RecordId Owner, string Field, ReferenceFieldInfo Info)> EffectiveIncomingReferences(
         RecordId targetId,
-        PendingState pending,
-        IReadOnlyDictionary<(RecordId Owner, string Field), RecordId> liveReferences)
+        PendingState pending)
     {
         var infos = ReferenceRegistry.IncomingReferencesTo(targetId.Table);
-        if (infos.Count == 0)
+        if (infos.Count == 0) yield break;
+
+        foreach (var transition in pending.References.Values)
         {
-            yield break;
-        }
+            if (transition.TargetAtEnd is not { } endTarget) continue;
+            if (!endTarget.Equals(targetId)) continue;
 
-        // Walk live references (those reflect both DB state and pending Set/Unset
-        // already applied by the session). For each (owner, field) → targetId match,
-        // look up the field's metadata to find the delete behavior. If the owner has
-        // been deleted in the same packet, skip — its reference is going away too.
-        foreach (var ((ownerId, fieldName), refTargetId) in liveReferences)
-        {
-            if (!refTargetId.Equals(targetId))
-            {
+            // Owner is itself going away — its outgoing reference doesn't matter.
+            if (pending.Records.TryGetValue(transition.Owner, out var ownerRec) && IsEffectivelyDeleted(ownerRec))
                 continue;
-            }
 
-            // If the owner is itself effectively deleted, no need to resolve its outgoing ref.
-            if (pending.Records.TryGetValue(ownerId, out var ownerRec) && IsEffectivelyDeleted(ownerRec))
-            {
-                continue;
-            }
-
-            // Field metadata lookup.
             ReferenceFieldInfo? match = null;
             foreach (var info in infos)
             {
-                if (info.ReferencerTable == ownerId.Table && info.FieldName == fieldName)
+                if (info.ReferencerTable == transition.Owner.Table && info.FieldName == transition.Field)
                 {
                     match = info;
                     break;
                 }
             }
-            if (match is null)
-            {
-                continue;
-            }
+            if (match is null) continue;
 
-            yield return (ownerId, fieldName, match);
+            yield return (transition.Owner, transition.Field, match);
         }
     }
 
