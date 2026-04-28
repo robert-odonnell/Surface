@@ -28,7 +28,6 @@ This is a user-facing API map for the generated surface and the runtime types mo
 | `[Ignore]` | with `[Reference]` | Leaves the reference unchanged when the target is deleted. |
 | `ForwardRelation` | base class | Base for user-defined forward relation attributes. |
 | `InverseRelation<TForward>` | base class | Base for user-defined inverse relation attributes. |
-| `[assembly: RecordIdValue<T>]` | assembly | Overrides generated id value type. Built-in support: `Ulid`, `Guid`, `string`. |
 
 ## Generated Entity API
 
@@ -86,17 +85,30 @@ partial void OnDeleting()
 Each table gets a typed id:
 
 ```csharp
-public readonly record struct DesignId(Ulid Value) : IRecordId
+public readonly record struct DesignId(string Value) : IRecordId
 {
+    public string Value { get; } = RecordIdFormat.Validate(Value);
+
     public string Table => "designs";
-    public string ToLiteral() => Value.ToString();
-    public static DesignId New() => new(Ulid.NewUlid());
-    public override string ToString() => Table + ":" + ToLiteral();
-    public static implicit operator RecordId(DesignId id) => new(id.Table, id.ToLiteral());
+    public string ToLiteral() => Value;
+    public static DesignId New() => new(Ulid.NewUlid().ToString());
+    public override string ToString() => Table + ":" + Value;
+    public static implicit operator RecordId(DesignId id) => new(id.Table, id.Value);
 }
 ```
 
-The value type defaults to `Ulid`. Use `[assembly: RecordIdValue<Guid>]` or `[assembly: RecordIdValue<string>]` to change it for the consuming assembly.
+`Value` is a `string` validated at construction by `RecordIdFormat.Validate`. Two and only two forms are accepted; anything else throws `FormatException`:
+
+- **Ulid stringification** — exactly 26 characters of `[A-Z0-9]` (Crockford Base32). What `New()` mints. The default for fresh records.
+- **Short lower_snake_case slug** — starts with `[a-z]`, followed by `[a-z0-9_]*`, max 32 characters. Opt-in for stable-named records (singletons, config rows, well-known references). Short on purpose: if you're reaching for a 30-char slug, you probably want a Ulid.
+
+```csharp
+var fresh   = DesignId.New();                        // 26-char Ulid
+var primary = new DesignId("primary");               // slug, OK
+var bad     = new DesignId("Some Mixed Case");       // throws FormatException
+```
+
+There is no assembly-level override — Ulid is the only mint type, and quoted-string ids are explicitly unsupported.
 
 ## Generated Composition Root API
 
@@ -264,6 +276,22 @@ Exceptions:
 
 - `WriterLeaseUnavailableException`: another non-expired holder owns the lease.
 - `WriterLeaseStolenException`: renewal found that the lease was stolen or removed.
+
+### `RecordIdFormat`
+
+Single-source-of-truth validator for typed-id `Value` strings:
+
+```csharp
+RecordIdFormat.Validate("primary");        // "primary"
+RecordIdFormat.Validate("01HXY...26chars"); // returns the Ulid string
+RecordIdFormat.Validate("Bad Value");      // throws FormatException
+
+RecordIdFormat.IsValid("primary");          // true
+RecordIdFormat.IsValid(null);               // false
+RecordIdFormat.MaxSlugLength;               // 32
+```
+
+The generator routes every `{Name}Id(string Value)` ctor through `Validate`, so user code can't construct an id with a malformed value — the throw happens at construction, not at commit time.
 
 ### `RecordId`
 

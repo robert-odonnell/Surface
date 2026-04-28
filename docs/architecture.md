@@ -43,7 +43,6 @@ The generator scans the compilation for:
 - `[CompositionRoot]` class.
 - Properties with `[Id]`, `[Property]`, `[Reference]`, `[Parent]`, `[Children]`, and relation attributes.
 - Relation attribute classes deriving from `ForwardRelation` or `InverseRelation<TForward>`.
-- Assembly-level `[RecordIdValue<T>]`.
 
 It builds a model graph containing tables, properties, aggregate membership, relation kinds, relation unions, and reference metadata. Diagnostics are reported before emission when the model shape cannot be generated safely.
 
@@ -266,6 +265,6 @@ Useful extension points for consumers:
 Useful extension points for maintainers:
 
 - Add scalar mappings in `SchemaEmitter`.
-- Add id value support in `IdEmitter` and `HydrationJson`.
+- Add accepted id value forms by extending `RecordIdFormat.Validate` (today: 26-char Ulid stringifications and ≤32-char lower_snake_case slugs only).
 - Extend relation marker classes when edge payload support is added.
 - Extend diagnostics before adding new emitted shapes.
