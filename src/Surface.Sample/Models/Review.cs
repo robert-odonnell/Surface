@@ -10,7 +10,7 @@ public partial class Review
 {
     [Id] public partial ReviewId Id { get; set; }
 
-    [Reference, Cascade] public partial Details? Details { get; set; }
+    [Reference, Cascade, Inline] public partial Details? Details { get; set; }
 
     [Property] public partial string Outcome { get; set; }
     [Property] public partial string Mode { get; set; }

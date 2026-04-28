@@ -79,6 +79,43 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
+    public void Loader_InlineExpands_OnlyInlineMarkedReferences()
+    {
+        var src = """
+            using Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Root {
+                [Id] public partial RootId Id { get; set; }
+                [Reference, Inline] public partial Owned? Owned { get; set; }
+                [Reference]         public partial Foreign? Foreign { get; set; }
+            }
+
+            [Table] public partial class Owned {
+                [Id] public partial OwnedId Id { get; set; }
+                [Property] public partial string Header { get; set; }
+            }
+
+            [Table] public partial class Foreign {
+                [Id] public partial ForeignId Id { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+        var (result, _, _, _) = GeneratorHarness.Run(src);
+        var loader = GeneratorHarness.FindGeneratedFile(result, "RootAggregateLoader");
+        Assert.NotNull(loader);
+
+        var loaderSrc = loader!.ToString();
+
+        // [Inline]-marked Owned gets `owned.*` projection in the loader query.
+        Assert.Contains("owned.*", loaderSrc);
+        // Plain [Reference] Foreign does NOT — caller resolves separately.
+        Assert.DoesNotContain("foreign.*", loaderSrc);
+    }
+
+    [Fact]
     public void Emits_AggregateLoader_PerRoot()
     {
         var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);

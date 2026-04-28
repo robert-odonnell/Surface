@@ -10,7 +10,7 @@ public partial class Design
 {
     [Id] public partial DesignId Id { get; set; }
 
-    [Reference, Cascade] public partial Details? Details { get; set; }
+    [Reference, Cascade, Inline] public partial Details? Details { get; set; }
 
     [Property] public partial string RepositoryRoot { get; set; }
     [Property] public partial string Description { get; set; }

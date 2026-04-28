@@ -58,4 +58,5 @@ public sealed record PropertyModel(
     bool IsPartial,
     bool IsStatic,
     string DeclaredAccessibility,
-    EquatableArray<InlineMember> InlineMembers);
+    EquatableArray<InlineMember> InlineMembers,
+    bool IsInline);

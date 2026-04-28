@@ -278,12 +278,20 @@ internal static class AggregateLoaderEmitter
         return dots + 1;
     }
 
+    /// <summary>
+    /// Field names whose <c>[Reference]</c> targets should be inline-expanded into the
+    /// loader query as <c>field.*</c>. Restricted to references explicitly tagged
+    /// <c>[Inline]</c> — the owned/compositional sidecar carve-out (see CLAUDE.md). Plain
+    /// <c>[Reference]</c> hydrates as an id only; the referenced record is treated as a
+    /// foreign pointer the caller resolves separately.
+    /// </summary>
     private static IEnumerable<string> InlineReferenceFieldNames(TableModel table)
     {
         foreach (var p in table.Properties)
         {
             if (!p.Kinds.HasFlag(PropertyKind.Reference)) continue;
             if (!p.Type.IsTableType) continue;
+            if (!p.IsInline) continue;
             yield return SurrealNaming.ToFieldName(p.Name);
         }
     }

@@ -9,7 +9,7 @@ public partial class DesignChange
 {
     [Id] public partial DesignChangeId Id { get; set; }
 
-    [Reference, Cascade] public partial Details? Details { get; set; }
+    [Reference, Cascade, Inline] public partial Details? Details { get; set; }
 
     [Parent] public partial Review Review { get; set; }
 

@@ -79,6 +79,7 @@ internal static class TableExtractor
         // members we still capture explicit-vs-default and multiplicity bits so CG015
         // (delete behavior on [Parent]) can fire.
         var (deletePolicy, hasExplicit, hasMultiple) = ResolveReferenceDelete(attrs);
+        var isInline = HasAttribute(attrs, AnnotationsMetadata.Inline);
 
         return new PropertyModel(
             Name: p.Name,
@@ -95,7 +96,17 @@ internal static class TableExtractor
             IsPartial: IsPartialMember(p),
             IsStatic: p.IsStatic,
             DeclaredAccessibility: p.DeclaredAccessibility.ToString(),
-            InlineMembers: ResolveInlineMembers(p.Type));
+            InlineMembers: ResolveInlineMembers(p.Type),
+            IsInline: isInline);
+    }
+
+    private static bool HasAttribute(ImmutableArray<AttributeData> attrs, string fullName)
+    {
+        foreach (var attr in attrs)
+        {
+            if (AttributeFullName(attr) == fullName) return true;
+        }
+        return false;
     }
 
     /// <summary>

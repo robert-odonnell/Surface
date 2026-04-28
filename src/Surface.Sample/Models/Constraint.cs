@@ -10,7 +10,7 @@ public partial class Constraint
 {
     [Id] public partial ConstraintId Id { get; set; }
 
-    [Reference, Cascade] public partial Details? Details { get; set; }
+    [Reference, Cascade, Inline] public partial Details? Details { get; set; }
 
     [Parent] public partial Design Design { get; set; }
 

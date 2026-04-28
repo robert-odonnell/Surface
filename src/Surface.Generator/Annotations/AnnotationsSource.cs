@@ -17,6 +17,7 @@ internal static class AnnotationsMetadata
     public const string Parent               = $"{Namespace}.ParentAttribute";
     public const string Children             = $"{Namespace}.ChildrenAttribute";
     public const string Reference            = $"{Namespace}.ReferenceAttribute";
+    public const string Inline               = $"{Namespace}.InlineAttribute";
     public const string Reject               = $"{Namespace}.RejectAttribute";
     public const string Unset                = $"{Namespace}.UnsetAttribute";
     public const string Cascade              = $"{Namespace}.CascadeAttribute";
@@ -73,6 +74,10 @@ public sealed class ChildrenAttribute : Attribute { }
 /// <summary>Marks a reference property — <c>partial T Name { get; }</c> for mandatory or <c>partial T? Name { get; set; }</c> for optional.</summary>
 [AttributeUsage(AttributeTargets.Property, AllowMultiple = true, Inherited = false)]
 public sealed class ReferenceAttribute : Attribute { }
+
+/// <summary>Pairs with <see cref=""ReferenceAttribute""/> to mark the reference as an owned/compositional sidecar (e.g. <c>Details</c>). The aggregate loader inline-expands the referenced record into the same query (<c>field.*</c> projection) and hydrates it alongside the owner. Plain <c>[Reference]</c> without <c>[Inline]</c> stores only the id — the referenced record is treated as a foreign pointer that the caller resolves separately.</summary>
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
+public sealed class InlineAttribute : Attribute { }
 
 /// <summary>Reference delete behavior — block deletion of the referenced record while this reference still points at it. The default for every <see cref=""ReferenceAttribute""/> when no other behavior is supplied.</summary>
 [AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
