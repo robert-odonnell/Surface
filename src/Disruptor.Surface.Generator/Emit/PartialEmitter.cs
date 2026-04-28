@@ -23,11 +23,11 @@ namespace Disruptor.Surface.Generator.Emit;
 ///   <item>[Parent] — sync property; setter calls <c>SetField</c> with
 ///         <c>FieldKind.Parent</c>.</item>
 ///   <item>[Children] — sync getter-only partial property over <c>QueryChildren</c>.</item>
-///   <item>Forward/inverse relation property — sync collection from <c>QueryRelated</c> /
-///         <c>QueryRelatedIds</c> / <c>QueryInverseRelatedIds</c>; default protected
-///         <c>Add/Remove/Clear</c> emit sync <c>void</c> writers that call
-///         <c>Session.Relate</c> / <c>Unrelate</c> / <c>UnrelateAllFrom</c> /
-///         <c>UnrelateAllTo</c>.</item>
+///   <item>Forward/inverse relation property — sync collection from directional
+///         <c>QueryOutgoing</c> / <c>QueryIncoming</c> for same-aggregate edges, or
+///         <c>QueryRelatedIds</c> / <c>QueryInverseRelatedIds</c> for cross-aggregate
+///         edges. Relation writes go through <c>Session.Relate</c>,
+///         <c>Unrelate</c>, <c>UnrelateAllFrom</c>, and <c>UnrelateAllTo</c>.</item>
 /// </list>
 /// </summary>
 internal static class PartialEmitter

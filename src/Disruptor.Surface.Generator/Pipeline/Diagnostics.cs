@@ -25,7 +25,7 @@ internal static class Diagnostics
     public static readonly DiagnosticDescriptor RelationKindMissingBase = new(
         id: "CG004",
         title: "Relation kind attribute has wrong base",
-        messageFormat: "'{0}' is marked as a relation kind but does not derive from ForwardRelationAttribute or InverseRelationAttribute<T>",
+        messageFormat: "'{0}' is marked as a relation kind but does not derive from ForwardRelation or InverseRelation<T>",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -33,7 +33,7 @@ internal static class Diagnostics
     public static readonly DiagnosticDescriptor InverseRelationMissingForward = new(
         id: "CG005",
         title: "Inverse relation kind missing forward pair",
-        messageFormat: "Inverse kind '{0}' references forward kind '{1}' which is not annotated with [ForwardRelationKind]",
+        messageFormat: "Inverse kind '{0}' references forward kind '{1}' which does not derive from ForwardRelation",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);

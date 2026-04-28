@@ -1,6 +1,6 @@
 namespace Disruptor.Surface.Annotations;
 
-/// <summary>Marker for a class that participates in the generated model. Classes must be declared partial and have exactly one <see cref="IdAttribute"/>-annotated property.</summary>
+/// <summary>Marker for a class that participates in the generated model. Classes must be declared partial and may declare at most one optional <see cref="IdAttribute"/>-annotated property.</summary>
 [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
 public sealed class TableAttribute : Attribute { }
 
@@ -40,11 +40,11 @@ public sealed class InlineAttribute : Attribute { }
 [AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
 public sealed class RejectAttribute : Attribute { }
 
-/// <summary>Reference delete behavior — clear this reference field when the referenced record is deleted. Requires a nullable reference (<c>T?</c>); SURF-R001 fires otherwise.</summary>
+/// <summary>Reference delete behavior — clear this reference field when the referenced record is deleted. Requires a nullable reference (<c>T?</c>); CG012 fires otherwise.</summary>
 [AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
 public sealed class UnsetAttribute : Attribute { }
 
-/// <summary>Reference delete behavior — delete the referencing record when the referenced record is deleted. Cascade-only cycles (SURF-R003) are rejected at compile time.</summary>
+/// <summary>Reference delete behavior — delete the referencing record when the referenced record is deleted. Cascade-only cycles (CG014) are rejected at compile time.</summary>
 [AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
 public sealed class CascadeAttribute : Attribute { }
 

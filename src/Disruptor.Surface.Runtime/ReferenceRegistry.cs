@@ -5,7 +5,7 @@ namespace Disruptor.Surface.Runtime;
 /// <summary>
 /// One <c>[Reference]</c> field's metadata: which referencing table holds it, the
 /// snake-cased field name, the table it references, the configured delete behavior,
-/// and whether the field is nullable in C# (matters for the SURF-R001 diagnostic
+/// and whether the field is nullable in C# (matters for the CG012 diagnostic
 /// validating <see cref="ReferenceDeleteBehavior.Unset"/> against nullable storage).
 /// </summary>
 public sealed record ReferenceFieldInfo(

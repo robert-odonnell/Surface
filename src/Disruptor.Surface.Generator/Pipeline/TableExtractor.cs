@@ -193,7 +193,7 @@ internal static class TableExtractor
 
     /// <summary>
     /// A property joins the relation side of the model when one of its attributes derives
-    /// from <c>ForwardRelationAttribute</c> or <c>InverseRelationAttribute&lt;T&gt;</c>.
+    /// from <c>ForwardRelation</c> or <c>InverseRelation&lt;T&gt;</c>.
     /// Returns the role plus the fully-qualified attribute name so the linker can pair
     /// forward/inverse kinds later.
     /// </summary>
