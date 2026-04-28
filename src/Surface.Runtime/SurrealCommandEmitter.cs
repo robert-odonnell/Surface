@@ -31,7 +31,7 @@ public static class SurrealCommandEmitter
 
                 case CommandOp.Set:
                     sb.Append("UPDATE ").Append(FormatId(c.Target))
-                      .Append(" SET ").Append(c.Key).Append(" = ");
+                      .Append(" SET ").Append(SurrealFormatter.Identifier(c.Key!)).Append(" = ");
                     if (c.Value is RecordId setRid)
                     {
                         sb.Append(FormatId(setRid));
@@ -45,7 +45,7 @@ public static class SurrealCommandEmitter
 
                 case CommandOp.Unset:
                     sb.Append("UPDATE ").Append(FormatId(c.Target))
-                      .Append(" UNSET ").Append(c.Key).Append(";\n");
+                      .Append(" UNSET ").Append(SurrealFormatter.Identifier(c.Key!)).Append(";\n");
                     break;
 
                 case CommandOp.Delete:
@@ -54,7 +54,7 @@ public static class SurrealCommandEmitter
 
                 case CommandOp.Relate:
                     sb.Append("RELATE ").Append(FormatId(c.Target))
-                      .Append("->").Append(c.Key).Append("->")
+                      .Append("->").Append(SurrealFormatter.Identifier(c.Key!)).Append("->")
                       .Append(FormatId((RecordId)c.Value!));
                     if (c.EdgeContent is { Count: > 0 } content)
                     {
@@ -65,20 +65,20 @@ public static class SurrealCommandEmitter
                     break;
 
                 case CommandOp.Unrelate:
-                    sb.Append("DELETE ").Append(c.Key)
+                    sb.Append("DELETE ").Append(SurrealFormatter.Identifier(c.Key!))
                       .Append(" WHERE in = ").Append(FormatId(c.Target))
                       .Append(" AND out = ").Append(FormatId((RecordId)c.Value!))
                       .Append(";\n");
                     break;
 
                 case CommandOp.UnrelateAllFrom:
-                    sb.Append("DELETE ").Append(c.Key)
+                    sb.Append("DELETE ").Append(SurrealFormatter.Identifier(c.Key!))
                       .Append(" WHERE in = ").Append(FormatId(c.Target))
                       .Append(";\n");
                     break;
 
                 case CommandOp.UnrelateAllTo:
-                    sb.Append("DELETE ").Append(c.Key)
+                    sb.Append("DELETE ").Append(SurrealFormatter.Identifier(c.Key!))
                       .Append(" WHERE out = ").Append(FormatId(c.Target))
                       .Append(";\n");
                     break;
@@ -105,7 +105,7 @@ public static class SurrealCommandEmitter
                 }
 
                 first = false;
-                sb.Append(k).Append(": ");
+                sb.Append(SurrealFormatter.Identifier(k)).Append(": ");
                 if (v is RecordId rid)
                 {
                     sb.Append(FormatId(rid));
@@ -119,7 +119,7 @@ public static class SurrealCommandEmitter
         }
     }
 
-    private static string FormatId(RecordId id) => $"{id.Table}:{id.Value}";
+    private static string FormatId(RecordId id) => SurrealFormatter.RecordId(id);
 }
 
 public enum CommandOp

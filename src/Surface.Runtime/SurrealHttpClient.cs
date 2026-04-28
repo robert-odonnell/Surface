@@ -288,26 +288,18 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
             float f => f.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
             double d => d.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
             decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            string s => $"\"{Escape(s)}\"",
-            RecordId rid => $"r\"{rid}\"",
-            Guid g => $"\"{g}\"",
-            Ulid u => $"\"{u}\"",
-            DateTime dt => $"\"{dt.ToUniversalTime():O}\"",
-            DateTimeOffset dto => $"\"{dto:O}\"",
-            Enum e => $"\"{Escape(e.ToString())}\"",
-            IEntity v => $"r\"{v.Id}\"",
+            string s => SurrealFormatter.StringLiteral(s),
+            RecordId rid => SurrealFormatter.RecordId(rid),
+            Guid g => SurrealFormatter.StringLiteral(g.ToString()),
+            Ulid u => SurrealFormatter.StringLiteral(u.ToString()),
+            DateTime dt => SurrealFormatter.StringLiteral(dt.ToUniversalTime().ToString("O")),
+            DateTimeOffset dto => SurrealFormatter.StringLiteral(dto.ToString("O")),
+            Enum e => SurrealFormatter.StringLiteral(e.ToString()),
+            IEntity v => SurrealFormatter.RecordId(v.Id),
             System.Collections.IEnumerable e => $"[{string.Join(", ", e.Cast<object?>().Select(RenderValue))}]",
             _ => JsonSerializer.Serialize(value, SurrealJson.SerializerOptions)
         };
     }
-
-
-    private static string Escape(string value) => value
-        .Replace("\\", "\\\\", StringComparison.Ordinal)
-        .Replace("\"", "\\\"", StringComparison.Ordinal)
-        .Replace("\r", "\\r", StringComparison.Ordinal)
-        .Replace("\n", "\\n", StringComparison.Ordinal)
-        .Replace("\t", "\\t", StringComparison.Ordinal);
 
     private static JsonElement NormalizeStatementResults(JsonElement root, int letCount)
     {

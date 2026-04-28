@@ -73,8 +73,11 @@ internal static class AggregateLoaderEmitter
           .Append(rootIdType).AppendLine(" rootId, CancellationToken ct = default)");
         sb.AppendLine("        {");
 
-        // Emit the SurrealQL as a raw string interpolation so {rootId.Value} is filled
-        // at runtime while $parent.id stays literal Surreal syntax.
+        // Emit the SurrealQL as a raw string interpolation. The root id literal is
+        // pre-computed via SurrealFormatter (validates table identifier, escapes
+        // unusual record values) and substituted as `{__rootLiteral}`; $parent.id stays
+        // literal Surreal syntax.
+        sb.AppendLine("            var __rootLiteral = global::Surface.Runtime.SurrealFormatter.RecordId(rootId);");
         sb.AppendLine("            var sql = $\"\"\"");
         foreach (var line in sql.Split('\n'))
         {
@@ -168,7 +171,11 @@ internal static class AggregateLoaderEmitter
         }
 
         sb.AppendLine();
-        sb.Append("FROM ").Append(rootTable).Append(":{rootId.Value};");
+        // Runtime substitution via $-string interpolation, but we route through a
+        // pre-computed local (`__rootLiteral`) instead of inlining the formatter call —
+        // C# raw-string interpolation parses `:` as a format-spec separator, which
+        // collides with the `global::` namespace qualifier on a direct call.
+        sb.Append("FROM {__rootLiteral};");
         return sb.ToString();
     }
 
