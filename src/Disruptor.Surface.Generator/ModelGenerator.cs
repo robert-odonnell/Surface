@@ -233,6 +233,36 @@ public sealed class ModelGenerator : IIncrementalGenerator
             IdEmitter.Emit(spc, table, graph);
 
             var valid = true;
+
+            // CG022 — every annotated property must be declared partial. Without it, the
+            // generator can't emit the implementation half (backing field, getter/setter,
+            // hydrate body all live in the partial fragment), so a non-partial member
+            // tagged [Property]/[Reference]/[Parent]/[Children]/[Id] would produce
+            // generated code referencing storage that was never emitted (CS0103). Catch
+            // it here so the diagnostic explains the cause; without it the user gets a
+            // confusing CS0103 in a .g.cs file they didn't write.
+            foreach (var p in table.Properties)
+            {
+                if (p.IsPartial) continue;
+                var attrName = p.Kinds switch
+                {
+                    var k when k.HasFlag(PropertyKind.Id)        => "Id",
+                    var k when k.HasFlag(PropertyKind.Property)  => "Property",
+                    var k when k.HasFlag(PropertyKind.Parent)    => "Parent",
+                    var k when k.HasFlag(PropertyKind.Children)  => "Children",
+                    var k when k.HasFlag(PropertyKind.Reference) => "Reference",
+                    _ => p.RelationRole != RelationRole.None ? "Relation" : null,
+                };
+                if (attrName is null) continue;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.AnnotatedMemberMustBePartial,
+                    Location.None,
+                    table.FullName,
+                    p.Name,
+                    attrName));
+                valid = false;
+            }
+
             foreach (var (memberName, memberType) in EnumerateReadSideTypes(table, PropertyKind.Children))
             {
                 var content = UnwrapTask(memberType);

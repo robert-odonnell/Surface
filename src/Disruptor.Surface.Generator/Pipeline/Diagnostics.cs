@@ -146,4 +146,12 @@ internal static class Diagnostics
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor AnnotatedMemberMustBePartial = new(
+        id: "CG022",
+        title: "Annotated property must be declared partial",
+        messageFormat: "'{0}.{1}' carries [{2}] but is not declared partial; the generator emits the implementation, so the user-side declaration must use the partial keyword",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }

@@ -62,6 +62,26 @@ public sealed class DiagnosticsTests
     }
 
     [Fact]
+    public void CG022_AnnotatedMember_MustBePartial()
+    {
+        // The generator emits the implementation half of every annotated property
+        // (backing field, getter/setter, hydrate body). A non-partial declaration
+        // means the user-side and generator-side can't combine, so EmitHydrate
+        // would write `_someField = ...` for storage that never got emitted (CS0103).
+        // CG022 catches this with a clear message before bad .g.cs is produced.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            namespace M;
+            [Table] public partial class HasNonPartialProperty {
+                [Id] public partial HasNonPartialPropertyId Id { get; set; }
+                [Property] public string Description { get; set; }
+            }
+            """;
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.Contains(runDiags, d => d.Id == "CG022");
+    }
+
+    [Fact]
     public void CG011_EntityReachable_FromTwoAggregateRoots()
     {
         var src = """

@@ -2,6 +2,9 @@
 [Bb]in/
 [Oo]bj/
 
+# Local .NET SDK / NuGet cache (e.g. when DOTNET_ROOT or NUGET_PACKAGES points here)
+.dotnet/
+
 # IDE state
 .vs/
 .idea/

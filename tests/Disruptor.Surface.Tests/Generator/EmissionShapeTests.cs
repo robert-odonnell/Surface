@@ -1,3 +1,4 @@
+using Microsoft.CodeAnalysis;
 using Xunit;
 
 namespace Disruptor.Surface.Tests.Generator;
@@ -128,6 +129,90 @@ public sealed class EmissionShapeTests
         Assert.Contains("owned.*", loaderSrc);
         // Plain [Reference] Foreign does NOT — caller resolves separately.
         Assert.DoesNotContain("foreign.*", loaderSrc);
+    }
+
+    [Fact]
+    public void Loader_EmitsEdgeSubselect_ForMultiSourceRelationKind()
+    {
+        // Bug regression: BuildEdgeWhere previously delegated to a FindSingleSourceTable
+        // helper that returned null on the second hit, which meant relation kinds with
+        // 2+ source tables (multi-source unions) silently lost their edge subselect in
+        // the loader and reads came back empty after reload. Fix enumerates ALL source
+        // tables in this aggregate and OR's their path equalities together.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            public sealed class RestrictsAttribute : ForwardRelation;
+            public sealed class RestrictedByAttribute : InverseRelation<RestrictsAttribute>;
+
+            [Table, AggregateRoot] public partial class Design {
+                [Id] public partial DesignId Id { get; set; }
+                [Children] public partial IReadOnlyCollection<Constraint> Constraints { get; }
+                [Children] public partial IReadOnlyCollection<Rule> Rules { get; }
+                [Children] public partial IReadOnlyCollection<UserStory> UserStories { get; }
+            }
+
+            // Two source tables for the [Restricts] kind — Constraint AND Rule.
+            // The generator emits an IRestrict source-side union for them; the loader
+            // must include the edge subselect with both source paths OR'd together.
+            [Table] public partial class Constraint {
+                [Id] public partial ConstraintId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [Restricts] public partial IReadOnlyCollection<UserStory> Restrictions { get; }
+            }
+
+            [Table] public partial class Rule {
+                [Id] public partial RuleId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [Restricts] public partial IReadOnlyCollection<UserStory> Restrictions { get; }
+            }
+
+            [Table] public partial class UserStory {
+                [Id] public partial UserStoryId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [RestrictedBy] public partial IReadOnlyCollection<global::Disruptor.Surface.Runtime.IEntity> Restrictions { get; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+        var (result, _, _, _) = GeneratorHarness.Run(src);
+        var loader = GeneratorHarness.FindGeneratedFile(result, "DesignAggregateLoader");
+        Assert.NotNull(loader);
+
+        var loaderSrc = loader!.ToString();
+        // The edge subselect must reference _restricts AND OR over both source paths
+        // (constraints' and rules' parent paths back to design — both empty paths here
+        // since both are direct children of Design root).
+        Assert.Contains("_restricts", loaderSrc);
+        Assert.Contains("HydrateEdges(rootRow.Value, \"_restricts\"", loaderSrc);
+    }
+
+    [Fact]
+    public void EmptyTable_GetsIEntityScaffolding_NoMembers()
+    {
+        // Lenient stance: a [Table] with no partial annotated members is still
+        // legal — the id anchor is unconditional, so the entity has IEntity hooks
+        // (Bind/Initialize/Hydrate/Flush/OnDeleting) and a Track-able identity.
+        // The previous behavior silently emitted nothing, leaving the type without
+        // IEntity at runtime.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            namespace M;
+            [Table] public partial class Marker { }
+            [CompositionRoot] public partial class Workspace { }
+            """;
+        var (result, _, runDiags, _) = GeneratorHarness.Run(src);
+        var partial = GeneratorHarness.FindGeneratedFile(result, "M.Marker.g.cs");
+        Assert.NotNull(partial);
+
+        var partialSrc = partial!.ToString();
+        Assert.Contains("partial class Marker", partialSrc);
+        Assert.Contains("global::Disruptor.Surface.Runtime.IEntity", partialSrc);
+        Assert.Contains(".Bind(", partialSrc);
+        Assert.Contains(".Hydrate(", partialSrc);
+        Assert.Empty(runDiags.Where(d => d.Severity == DiagnosticSeverity.Error));
     }
 
     [Fact]

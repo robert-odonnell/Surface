@@ -196,15 +196,28 @@ internal static class AggregateLoaderEmitter
     /// </summary>
     private static string? BuildEdgeWhere(ModelGraph graph, AggregateModel agg, RelationKindModel fwdKind, Dictionary<string, string> pathToRoot)
     {
-        var sourceTable = FindSingleSourceTable(graph, fwdKind.FullName);
-        if (sourceTable is not null && agg.MemberFullNames.Contains(sourceTable.FullName))
+        // Source side — any table in this aggregate that carries the forward attribute.
+        // Multi-source kinds (those with a source-side union) need an OR over distinct
+        // paths back to the root; single-source kinds collapse to a single equality.
+        var sourceTablesInAgg = graph.Tables
+            .Where(t => HasForwardAttribute(t, fwdKind.FullName))
+            .Where(t => agg.MemberFullNames.Contains(t.FullName))
+            .ToList();
+        if (sourceTablesInAgg.Count > 0)
         {
-            var sourcePath = pathToRoot[sourceTable.FullName];
-            return MakePathEquality("in", sourcePath);
+            var sourcePaths = sourceTablesInAgg
+                .Select(t => pathToRoot[t.FullName])
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(p => p, StringComparer.Ordinal)
+                .ToList();
+            var sourceClauses = sourcePaths.Select(p => MakePathEquality("in", p)).ToList();
+            return sourceClauses.Count == 1
+                ? sourceClauses[0]
+                : "(" + string.Join(" OR ", sourceClauses) + ")";
         }
 
-        // Source isn't in this aggregate — only relevant if it's cross-aggregate AND we
-        // hold the target side.
+        // No source in this aggregate — only relevant if the kind is cross-aggregate AND
+        // we hold the target side.
         if (!graph.IsCrossAggregate(fwdKind.FullName)) return null;
 
         var inverseKind = graph.RelationKinds.FirstOrDefault(k =>
@@ -384,20 +397,6 @@ internal static class AggregateLoaderEmitter
             }
         }
         return null;
-    }
-
-    private static TableModel? FindSingleSourceTable(ModelGraph graph, string forwardKindFullName)
-    {
-        TableModel? single = null;
-        foreach (var t in graph.Tables)
-        {
-            if (HasForwardAttribute(t, forwardKindFullName))
-            {
-                if (single is not null) return null;
-                single = t;
-            }
-        }
-        return single;
     }
 
     private static bool HasForwardAttribute(TableModel table, string forwardKindFullName)
