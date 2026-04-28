@@ -7,8 +7,6 @@ namespace Disruptor.Surface.Sample.Models;
 [Table]
 public partial class UserStory
 {
-    [Id] public partial UserStoryId Id { get; set; }
-
     [Reference, Cascade, Inline] public partial Details? Details { get; set; }
     [Reference, Unset] public partial Design? Design { get; set; }
 

@@ -9,8 +9,6 @@ public sealed record Scenario(string Kind, string Description);
 [Table]
 public partial class AcceptanceCriteria
 {
-    [Id] public partial AcceptanceCriteriaId Id { get; set; }
-
     [Reference, Cascade, Inline] public partial Details? Details { get; set; }
     [Reference, Unset] public partial Design? Design { get; set; }
 

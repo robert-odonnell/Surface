@@ -254,11 +254,11 @@ async Task ReloadAndPrintDesign(DesignId designId)
     Console.WriteLine($"  description:     '{design.Description}'");
     Console.WriteLine($"  repository_root: '{design.RepositoryRoot}'");
     Console.WriteLine(
-        $"  details:         {design.Details?.Id}  header='{design.Details?.Header}'");
+        $"  details:         header='{design.Details?.Header}'");
     Console.WriteLine($"  epics ({design.Epics.Count}):");
     foreach (var e in design.Epics)
     {
-        Console.WriteLine($"    - {e.Id}  '{e.Description}'");
+        Console.WriteLine($"    - '{e.Description}'");
     }
 
     Console.WriteLine($"  constraints ({design.Constraints.Count}):");
@@ -276,7 +276,7 @@ async Task ReloadAndPrintDesign(DesignId designId)
         .FirstOrDefault();
     if (firstAc is not null)
     {
-        Console.WriteLine($"  acceptance_criteria sample: {firstAc.Id}  scenarios.Count={firstAc.Scenarios.Count}");
+        Console.WriteLine($"  acceptance_criteria sample: scenarios.Count={firstAc.Scenarios.Count}");
         if (firstAc.Scenarios.Count > 0)
         {
             var s = firstAc.Scenarios[0];
@@ -296,7 +296,7 @@ async Task ReloadAndPrintReview(ReviewId reviewId)
                  ?? throw new InvalidOperationException($"Loader didn't hydrate {reviewId}.");
 
     Console.WriteLine($"  outcome: '{review.Outcome}'  mode: '{review.Mode}'  state: '{review.State}'");
-    Console.WriteLine($"  details: {review.Details?.Id}  header='{review.Details?.Header}'");
+    Console.WriteLine($"  details: header='{review.Details?.Header}'");
     Console.WriteLine($"  findings: {review.Findings.Count}, observations: {review.Observations.Count}, issues: {review.Issues.Count}, design_changes: {review.DesignChanges.Count}");
 
     Console.WriteLine($"  cross-agg → assesses ({review.Assessments.Count}):");

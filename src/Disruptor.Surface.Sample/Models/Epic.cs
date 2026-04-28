@@ -7,8 +7,6 @@ namespace Disruptor.Surface.Sample.Models;
 [Table]
 public partial class Epic
 {
-    [Id] public partial EpicId Id { get; set; }
-
     [Reference, Cascade, Inline] public partial Details? Details { get; set; }
 
     [Parent] public partial Design Design { get; set; }

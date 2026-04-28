@@ -9,8 +9,6 @@ public sealed record Fact(string Kind, string Arrange, string Act, string Assert
 [Table]
 public partial class Test
 {
-    [Id] public partial TestId Id { get; set; }
-
     [Reference, Cascade, Inline] public partial Details? Details { get; set; }
     [Reference, Unset] public partial Design? Design { get; set; }
 

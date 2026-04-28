@@ -6,8 +6,6 @@ namespace Disruptor.Surface.Sample.Models;
 [Table]
 public partial class Finding
 {
-    [Id] public partial FindingId Id { get; set; }
-
     [Reference, Cascade, Inline] public partial Details? Details { get; set; }
 
     [Parent] public partial Review Review { get; set; }
