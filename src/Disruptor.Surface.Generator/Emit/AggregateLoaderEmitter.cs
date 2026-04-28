@@ -405,11 +405,7 @@ internal static class AggregateLoaderEmitter
     {
         foreach (var p in table.Properties)
         {
-            if (p.RelationRole == MethodRole.ForwardRelation && p.RelationKindFullName == forwardKindFullName) return true;
-        }
-        foreach (var m in table.Methods)
-        {
-            if (m.Role == MethodRole.ForwardRelation && m.RelationKindFullName == forwardKindFullName) return true;
+            if (p.RelationRole == RelationRole.ForwardRelation && p.RelationKindFullName == forwardKindFullName) return true;
         }
         return false;
     }
@@ -418,11 +414,7 @@ internal static class AggregateLoaderEmitter
     {
         foreach (var p in table.Properties)
         {
-            if (p.RelationRole == MethodRole.InverseRelation && p.RelationKindFullName == inverseKindFullName) return true;
-        }
-        foreach (var m in table.Methods)
-        {
-            if (m.Role == MethodRole.InverseRelation && m.RelationKindFullName == inverseKindFullName) return true;
+            if (p.RelationRole == RelationRole.InverseRelation && p.RelationKindFullName == inverseKindFullName) return true;
         }
         return false;
     }

@@ -15,12 +15,10 @@ public sealed record TableModel(
     bool IsAggregateRoot,
     string DeclaredAccessibility,
     EquatableArray<string> TypeParameters,
-    //EquatableArray<TypeRef> BaseInterfaces,
     EquatableArray<PropertyModel> Properties,
-    EquatableArray<MethodModel> Methods,
     string FileHintName)
 {
-    public PropertyModel? IdProperty => 
+    public PropertyModel? IdProperty =>
             Properties.FirstOrDefault(p => p.Kinds.HasFlag(PropertyKind.Id));
 
     public PropertyModel? ParentProperty =>
@@ -33,5 +31,5 @@ public sealed record TableModel(
         Properties.Where(p => p.Kinds.HasFlag(PropertyKind.Reference));
 
     public IEnumerable<PropertyModel> RelationProperties =>
-        Properties.Where(p => p.RelationRole is MethodRole.ForwardRelation or MethodRole.InverseRelation);
+        Properties.Where(p => p.RelationRole is RelationRole.ForwardRelation or RelationRole.InverseRelation);
 }

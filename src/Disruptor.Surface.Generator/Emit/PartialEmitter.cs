@@ -45,8 +45,7 @@ internal static class PartialEmitter
         }
 
         var partialProps = table.Properties.Where(p => p.IsPartial).ToArray();
-        var partialMethods = table.Methods.Where(m => m.IsPartial).ToArray();
-        if (partialProps.Length == 0 && partialMethods.Length == 0)
+        if (partialProps.Length == 0)
         {
             return;
         }
@@ -122,12 +121,6 @@ internal static class PartialEmitter
             {
                 mandatoryRefs.Add(t);
             }
-        }
-
-        foreach (var t in partialMethods)
-        {
-            builder.AppendLine();
-            EmitMethod(builder, memberIndent, t, graph);
         }
 
         // Initialize hook always emitted, even when empty — IEntity demands it and a
@@ -244,7 +237,7 @@ internal static class PartialEmitter
 
     private static void EmitProperty(StringBuilder builder, string indent, PropertyModel p, ModelGraph graph)
     {
-        if (p.RelationRole is MethodRole.ForwardRelation or MethodRole.InverseRelation)
+        if (p.RelationRole is RelationRole.ForwardRelation or RelationRole.InverseRelation)
         {
             EmitRelationProperty(builder, indent, p, graph);
             return;
@@ -629,7 +622,7 @@ internal static class PartialEmitter
 
         if (crossAggregate)
         {
-            var method = p.RelationRole == MethodRole.ForwardRelation ? "QueryRelatedIds" : "QueryInverseRelatedIds";
+            var method = p.RelationRole == RelationRole.ForwardRelation ? "QueryRelatedIds" : "QueryInverseRelatedIds";
             builder
                 .Append(indent)
                 .Append(access)
@@ -650,7 +643,7 @@ internal static class PartialEmitter
             ? elementType.DisplayName
             : StripNullable(elementType.FullyQualifiedName);
 
-        var directionalMethod = p.RelationRole == MethodRole.ForwardRelation
+        var directionalMethod = p.RelationRole == RelationRole.ForwardRelation
             ? "QueryOutgoing"
             : "QueryIncoming";
 
@@ -702,14 +695,14 @@ internal static class PartialEmitter
     /// side. Forward-side members carry the forward kind directly; inverse-side members
     /// carry the inverse kind and we walk to the paired forward.
     /// </summary>
-    private static string? ForwardKindFullNameFor(string? memberKindFullName, MethodRole role, ModelGraph graph)
+    private static string? ForwardKindFullNameFor(string? memberKindFullName, RelationRole role, ModelGraph graph)
     {
         if (memberKindFullName is null)
         {
             return null;
         }
 
-        if (role == MethodRole.ForwardRelation)
+        if (role == RelationRole.ForwardRelation)
         {
             return memberKindFullName;
         }
@@ -730,20 +723,6 @@ internal static class PartialEmitter
             .Append(' ')
             .Append(p.Name)
             .AppendLine(" => throw new global::System.NotImplementedException();");
-    }
-
-    // ──────────────────────────── method emission ────────────────────────────
-
-    /// <summary>
-    /// All model annotations are property-targeted; methods are plain user code with no
-    /// generator-supplied bodies. A partial method declaration that the user leaves
-    /// unimplemented gets a NotImplementedException stub so the stale declaration
-    /// surfaces clearly instead of silently emitting nothing.
-    /// </summary>
-    private static void EmitMethod(StringBuilder builder, string indent, MethodModel m, ModelGraph graph)
-    {
-        WriteMethodSignature(builder, indent, m);
-        builder.AppendLine(" => throw new global::System.NotImplementedException();");
     }
 
     private static string ToCamel(string s) =>
@@ -1143,56 +1122,6 @@ internal static class PartialEmitter
 
     private static string Quote(string s) => $"\"{s.Replace("\"", "\\\"")}\"";
 
-    private static void WriteMethodSignature(StringBuilder builder, string indent, MethodModel m)
-    {
-        builder
-            .Append(indent)
-            .Append(FormatAccessibility(m.DeclaredAccessibility))
-            .Append(' ');
-        if (m.IsStatic)
-        {
-            builder.Append("static ");
-        }
-
-        builder
-            .Append("partial ")
-            .Append(m.ReturnsVoid ? "void" : m.ReturnType.FullyQualifiedName)
-            .Append(' ')
-            .Append(m.Name);
-
-        if (m.TypeParameters.Count > 0)
-        {
-            builder
-                .Append('<')
-                .Append(string.Join(", ", m.TypeParameters))
-                .Append('>');
-        }
-
-        builder.Append('(');
-        for (var i = 0; i < m.Parameters.Count; i++)
-        {
-            if (i > 0)
-            {
-                builder.Append(", ");
-            }
-
-            var param = m.Parameters[i];
-            var modifier = FormatRefKind(param.RefKind);
-            if (modifier.Length > 0)
-            {
-                builder
-                    .Append(modifier)
-                    .Append(' ');
-            }
-
-            builder
-                .Append(param.Type.FullyQualifiedName)
-                .Append(' ')
-                .Append(param.Name);
-        }
-        builder.Append(')');
-    }
-
     private static string StripNullable(string typeName)
         => typeName.EndsWith("?") ? typeName[..^1] : typeName;
 
@@ -1206,14 +1135,5 @@ internal static class PartialEmitter
         "ProtectedAndInternal" => "private protected",
         "NotApplicable" => string.Empty,
         _ => raw.ToLowerInvariant(),
-    };
-
-    private static string FormatRefKind(string raw) => raw switch
-    {
-        "Ref" => "ref",
-        "Out" => "out",
-        "In" => "in",
-        "RefReadOnlyParameter" => "ref readonly",
-        _ => string.Empty,
     };
 }

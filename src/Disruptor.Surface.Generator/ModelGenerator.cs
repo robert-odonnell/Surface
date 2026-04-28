@@ -384,12 +384,5 @@ public sealed class ModelGenerator : IIncrementalGenerator
                 yield return (prop.Name, prop.Type);
             }
         }
-        foreach (var method in table.Methods)
-        {
-            if (method.Kinds.HasFlag(kind) && method.Verb is MethodVerb.Get or MethodVerb.List)
-            {
-                yield return (method.Name, method.ReturnType);
-            }
-        }
     }
 }

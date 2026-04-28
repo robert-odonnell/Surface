@@ -190,7 +190,7 @@ internal static class SchemaEmitter
             // [Id] is implicit on every Surreal record. Relation properties (forward/
             // inverse collections) are edge-table reads, not entity columns.
             if (p.Kinds.HasFlag(PropertyKind.Id)) continue;
-            if (p.RelationRole != MethodRole.None) continue;
+            if (p.RelationRole != RelationRole.None) continue;
 
             if (!any)
             {
@@ -412,7 +412,7 @@ internal static class SchemaEmitter
         {
             foreach (var p in t.Properties)
             {
-                if (p.RelationRole == MethodRole.ForwardRelation && p.RelationKindFullName == fwdKindFullName)
+                if (p.RelationRole == RelationRole.ForwardRelation && p.RelationKindFullName == fwdKindFullName)
                 {
                     result.Add(t);
                     break;
@@ -433,7 +433,7 @@ internal static class SchemaEmitter
         {
             foreach (var p in t.Properties)
             {
-                if (p.RelationRole == MethodRole.InverseRelation && p.RelationKindFullName == inverseKind.FullName)
+                if (p.RelationRole == RelationRole.InverseRelation && p.RelationKindFullName == inverseKind.FullName)
                 {
                     result.Add(t);
                     break;

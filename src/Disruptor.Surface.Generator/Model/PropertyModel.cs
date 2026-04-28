@@ -30,13 +30,25 @@ public enum ReferenceDeletePolicy
 }
 
 /// <summary>
+/// Which side of a relation kind a property participates on. Set for properties carrying
+/// a <c>ForwardRelation</c>- or <c>InverseRelation&lt;T&gt;</c>-derived attribute; otherwise
+/// <see cref="None"/>. Properties are the only carrier — relation attrs are
+/// <c>AttributeTargets.Property</c> only.
+/// </summary>
+public enum RelationRole
+{
+    None,
+    ForwardRelation,
+    InverseRelation,
+}
+
+/// <summary>
 /// Equatable snapshot of a property declared on a <c>[Table]</c> type that carries at least
 /// one model annotation. Holds only strings/value-types so it survives incremental caching.
 /// </summary>
 /// <param name="RelationRole">
-/// Non-<see cref="MethodRole.None"/> when the property also carries a forward/inverse
+/// Non-<see cref="RelationRole.None"/> when the property also carries a forward/inverse
 /// relation attribute — e.g. <c>[RestrictedBy] IReadOnlyCollection&lt;Constraint&gt; Restrictions { get; }</c>.
-/// Implied verb for relation properties is always <c>List</c>.
 /// </param>
 /// <param name="InlineMembers">
 /// For <c>[Property] SurrealArray&lt;T&gt;</c> properties, the public instance members of
@@ -47,7 +59,7 @@ public sealed record PropertyModel(
     string Name,
     TypeRef Type,
     PropertyKind Kinds,
-    MethodRole RelationRole,
+    RelationRole RelationRole,
     string? RelationKindFullName,
     ReferenceDeletePolicy ReferenceDelete,
     bool HasExplicitDeleteBehavior,

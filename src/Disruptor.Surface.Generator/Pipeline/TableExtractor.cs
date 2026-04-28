@@ -28,20 +28,14 @@ internal static class TableExtractor
         var typeParameters = type.TypeParameters.Select(p => p.Name).ToEquatableArray();
 
         var propertiesBuilder = ImmutableArray.CreateBuilder<PropertyModel>();
-        var methodsBuilder = ImmutableArray.CreateBuilder<MethodModel>();
 
         foreach (var member in type.GetMembers())
         {
             ct.ThrowIfCancellationRequested();
 
-            switch (member)
+            if (member is IPropertySymbol p && TryBuildProperty(p) is { } pm)
             {
-                case IPropertySymbol p when TryBuildProperty(p) is { } pm:
-                    propertiesBuilder.Add(pm);
-                    break;
-                case IMethodSymbol m when m.MethodKind == MethodKind.Ordinary && TryBuildMethod(m) is { } mm:
-                    methodsBuilder.Add(mm);
-                    break;
+                propertiesBuilder.Add(pm);
             }
         }
 
@@ -60,7 +54,6 @@ internal static class TableExtractor
             DeclaredAccessibility: type.DeclaredAccessibility.ToString(),
             TypeParameters: typeParameters,
             Properties: propertiesBuilder.ToImmutable(),
-            Methods: methodsBuilder.ToImmutable(),
             FileHintName: hint);
     }
 
@@ -69,7 +62,7 @@ internal static class TableExtractor
         var attrs = p.GetAttributes();
         var kinds = ResolvePropertyKinds(attrs);
         var (role, kindFullName) = ResolveRelationRole(attrs);
-        if (kinds == PropertyKind.None && role == MethodRole.None)
+        if (kinds == PropertyKind.None && role == RelationRole.None)
         {
             return null;
         }
@@ -174,42 +167,6 @@ internal static class TableExtractor
         return (policy, found.Count > 0, found.Count > 1);
     }
 
-    private static MethodModel? TryBuildMethod(IMethodSymbol m)
-    {
-        var kinds = ResolvePropertyKinds(m.GetAttributes());
-        var (role, kindFullName) = ResolveRelationRole(m.GetAttributes());
-        if (kinds == PropertyKind.None && role == MethodRole.None)
-        {
-            return null;
-        }
-
-        var verb = ParseVerb(m.Name);
-
-        var parameters = m.Parameters
-            .Select(p => new ParameterModel(
-                Name: p.Name,
-                Type: TypeRefBuilder.Build(p.Type),
-                RefKind: p.RefKind.ToString(),
-                HasDefaultValue: p.HasExplicitDefaultValue))
-            .ToEquatableArray();
-
-        var typeParams = m.TypeParameters.Select(t => t.Name).ToEquatableArray();
-
-        return new MethodModel(
-            Name: m.Name,
-            Verb: verb,
-            Role: role,
-            Kinds: kinds,
-            RelationKindFullName: kindFullName,
-            ReturnType: TypeRefBuilder.Build(m.ReturnType),
-            Parameters: parameters,
-            TypeParameters: typeParams,
-            IsPartial: IsPartialMember(m),
-            IsStatic: m.IsStatic,
-            ReturnsVoid: m.ReturnsVoid,
-            DeclaredAccessibility: m.DeclaredAccessibility.ToString());
-    }
-
     private static PropertyKind ResolvePropertyKinds(ImmutableArray<AttributeData> attrs)
     {
         var kinds = PropertyKind.None;
@@ -235,12 +192,12 @@ internal static class TableExtractor
     }
 
     /// <summary>
-    /// A member (method or property) joins the relation side of the model when one of its
-    /// attributes derives from <c>ForwardRelationAttribute</c> or <c>InverseRelationAttribute&lt;T&gt;</c>.
+    /// A property joins the relation side of the model when one of its attributes derives
+    /// from <c>ForwardRelationAttribute</c> or <c>InverseRelationAttribute&lt;T&gt;</c>.
     /// Returns the role plus the fully-qualified attribute name so the linker can pair
     /// forward/inverse kinds later.
     /// </summary>
-    private static (MethodRole Role, string? KindFullName) ResolveRelationRole(ImmutableArray<AttributeData> attrs)
+    private static (RelationRole Role, string? KindFullName) ResolveRelationRole(ImmutableArray<AttributeData> attrs)
     {
         foreach (var attr in attrs)
         {
@@ -252,15 +209,15 @@ internal static class TableExtractor
 
             if (InheritsFromForwardRelation(cls))
             {
-                return (MethodRole.ForwardRelation, AttributeFullName(attr));
+                return (RelationRole.ForwardRelation, AttributeFullName(attr));
             }
 
             if (InheritsFromInverseRelation(cls))
             {
-                return (MethodRole.InverseRelation, AttributeFullName(attr));
+                return (RelationRole.InverseRelation, AttributeFullName(attr));
             }
         }
-        return (MethodRole.None, null);
+        return (RelationRole.None, null);
     }
 
     internal static bool InheritsFromForwardRelation(INamedTypeSymbol cls)
@@ -298,46 +255,6 @@ internal static class TableExtractor
         var ns = symbol.ContainingNamespace?.ToDisplayString() ?? string.Empty;
         var name = symbol.MetadataName;
         return string.IsNullOrEmpty(ns) ? name : $"{ns}.{name}";
-    }
-
-    private static MethodVerb ParseVerb(string name)
-    {
-        if (Starts(name, "Add"))
-        {
-            return MethodVerb.Add;
-        }
-
-        if (Starts(name, "Remove"))
-        {
-            return MethodVerb.Remove;
-        }
-
-        if (Starts(name, "Clear"))
-        {
-            return MethodVerb.Clear;
-        }
-
-        if (Starts(name, "Set"))
-        {
-            return MethodVerb.Set;
-        }
-
-        if (Starts(name, "List"))
-        {
-            return MethodVerb.List;
-        }
-
-        if (Starts(name, "Get"))
-        {
-            return MethodVerb.Get;
-        }
-
-        return MethodVerb.Unknown;
-
-        static bool Starts(string s, string prefix) =>
-            s.Length >= prefix.Length &&
-            s.StartsWith(prefix, StringComparison.Ordinal) &&
-            (s.Length == prefix.Length || char.IsUpper(s[prefix.Length]));
     }
 
     private static bool HasAttribute(INamedTypeSymbol type, string attributeFullMetadataName)
@@ -380,13 +297,11 @@ internal static class TableExtractor
     {
         foreach (var r in member.DeclaringSyntaxReferences)
         {
-            var node = r.GetSyntax();
-            var modifiers = node switch
+            if (r.GetSyntax() is not PropertyDeclarationSyntax pds)
             {
-                MethodDeclarationSyntax mds   => mds.Modifiers,
-                PropertyDeclarationSyntax pds => pds.Modifiers,
-                _                             => default,
-            };
+                continue;
+            }
+            var modifiers = pds.Modifiers;
             foreach (var modifier in modifiers)
             {
                 if (modifier.ValueText == "partial")

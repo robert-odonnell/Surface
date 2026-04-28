@@ -220,15 +220,6 @@ internal static class RelationLinker
 
             VisitTypeChildren(p.Type, byFullName, accumulator);
         }
-        foreach (var m in current.Methods)
-        {
-            if (!m.Kinds.HasFlag(PropertyKind.Children))
-            {
-                continue;
-            }
-
-            VisitTypeChildren(m.ReturnType, byFullName, accumulator);
-        }
     }
 
     private static void VisitTypeChildren(TypeRef type, Dictionary<string, TableModel> byFullName, SortedSet<string> accumulator)
@@ -270,26 +261,9 @@ internal static class RelationLinker
             props.Add(p with { Type = RewriteType(p.Type, tableFullNames) });
         }
 
-        var methods = ImmutableArray.CreateBuilder<MethodModel>(table.Methods.Count);
-        foreach (var m in table.Methods)
-        {
-            var parameters = ImmutableArray.CreateBuilder<ParameterModel>(m.Parameters.Count);
-            foreach (var pp in m.Parameters)
-            {
-                parameters.Add(pp with { Type = RewriteType(pp.Type, tableFullNames) });
-            }
-
-            methods.Add(m with
-            {
-                ReturnType = RewriteType(m.ReturnType, tableFullNames),
-                Parameters = parameters.ToImmutable(),
-            });
-        }
-
         return table with
         {
             Properties = props.ToImmutable(),
-            Methods = methods.ToImmutable(),
         };
     }
 
@@ -366,28 +340,14 @@ internal static class RelationLinker
             {
                 foreach (var p in table.Properties)
                 {
-                    if (p.RelationRole == MethodRole.ForwardRelation && p.RelationKindFullName == fwd.FullName)
+                    if (p.RelationRole == RelationRole.ForwardRelation && p.RelationKindFullName == fwd.FullName)
                     {
                         sources.Add(table.FullName);
                     }
-                    else if (p.RelationRole == MethodRole.InverseRelation
+                    else if (p.RelationRole == RelationRole.InverseRelation
                              && p.RelationKindFullName is { } pfn
                              && inverseByFull.TryGetValue(pfn, out var pInv)
                              && pInv.PairedForwardFullName == fwd.FullName)
-                    {
-                        targets.Add(table.FullName);
-                    }
-                }
-                foreach (var m in table.Methods)
-                {
-                    if (m.Role == MethodRole.ForwardRelation && m.RelationKindFullName == fwd.FullName)
-                    {
-                        sources.Add(table.FullName);
-                    }
-                    else if (m.Role == MethodRole.InverseRelation
-                             && m.RelationKindFullName is { } mfn
-                             && inverseByFull.TryGetValue(mfn, out var mInv)
-                             && mInv.PairedForwardFullName == fwd.FullName)
                     {
                         targets.Add(table.FullName);
                     }

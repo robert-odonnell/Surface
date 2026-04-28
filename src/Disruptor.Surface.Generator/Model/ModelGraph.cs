@@ -141,15 +141,7 @@ public sealed record ModelGraph(
     {
         foreach (var p in table.Properties)
         {
-            if (p.RelationRole == MethodRole.ForwardRelation && p.RelationKindFullName == forwardKindFullName)
-            {
-                return true;
-            }
-        }
-
-        foreach (var m in table.Methods)
-        {
-            if (m.Role == MethodRole.ForwardRelation && m.RelationKindFullName == forwardKindFullName)
+            if (p.RelationRole == RelationRole.ForwardRelation && p.RelationKindFullName == forwardKindFullName)
             {
                 return true;
             }
@@ -162,15 +154,7 @@ public sealed record ModelGraph(
     {
         foreach (var p in table.Properties)
         {
-            if (p.RelationRole == MethodRole.InverseRelation && p.RelationKindFullName == inverseKindFullName)
-            {
-                return true;
-            }
-        }
-
-        foreach (var m in table.Methods)
-        {
-            if (m.Role == MethodRole.InverseRelation && m.RelationKindFullName == inverseKindFullName)
+            if (p.RelationRole == RelationRole.InverseRelation && p.RelationKindFullName == inverseKindFullName)
             {
                 return true;
             }
