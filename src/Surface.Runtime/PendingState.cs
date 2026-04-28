@@ -114,13 +114,16 @@ public sealed class RelationPendingState
 
 /// <summary>
 /// Indexed write intent for a unit of work — record states keyed by id, relation states
-/// keyed by canonical edge key. Updated as commands arrive; consumed by
-/// <see cref="CommitPlanner"/> at commit time.
+/// keyed by canonical edge key, plus a deduped set of pending bulk-clear intents
+/// (<c>DELETE edge WHERE in = source</c> / <c>WHERE out = target</c>). Updated as
+/// commands arrive; consumed by <see cref="CommitPlanner"/> at commit time.
 /// </summary>
 public sealed class PendingState
 {
     public Dictionary<RecordId, RecordPendingState> Records { get; } = new();
     public Dictionary<(string Kind, RecordId Source, RecordId Target), RelationPendingState> Relations { get; } = new();
+    public HashSet<(string Kind, RecordId Source)> BulkUnrelateFrom { get; } = new();
+    public HashSet<(string Kind, RecordId Target)> BulkUnrelateTo { get; } = new();
 
     private readonly HashSet<RecordId> loadedAtStart;
     private readonly HashSet<(string Kind, RecordId Source, RecordId Target)> relationsAtStart;
@@ -205,6 +208,32 @@ public sealed class PendingState
                 rel.PayloadUnsets.Clear();
                 break;
             }
+            case CommandOp.UnrelateAllFrom:
+            {
+                // Bulk clear by source — drop any per-edge pending Relate entries that
+                // would otherwise be re-added after the DB-level DELETE WHERE.
+                var keysToRemove = Relations.Keys
+                    .Where(k => k.Kind == c.Key && k.Source == c.Target)
+                    .ToList();
+                foreach (var k in keysToRemove)
+                {
+                    Relations.Remove(k);
+                }
+                BulkUnrelateFrom.Add((c.Key!, c.Target));
+                break;
+            }
+            case CommandOp.UnrelateAllTo:
+            {
+                var keysToRemove = Relations.Keys
+                    .Where(k => k.Kind == c.Key && k.Target == c.Target)
+                    .ToList();
+                foreach (var k in keysToRemove)
+                {
+                    Relations.Remove(k);
+                }
+                BulkUnrelateTo.Add((c.Key!, c.Target));
+                break;
+            }
         }
     }
 
@@ -212,6 +241,8 @@ public sealed class PendingState
     {
         Records.Clear();
         Relations.Clear();
+        BulkUnrelateFrom.Clear();
+        BulkUnrelateTo.Clear();
     }
 }
 

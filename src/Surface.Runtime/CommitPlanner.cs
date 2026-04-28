@@ -47,6 +47,17 @@ public static class CommitPlanner
             EmitRelation(rel, relationRemovals, relationAdditions);
         }
 
+        // Bulk unrelates run in the removal phase so additions queued for the same
+        // (kind, source) / (kind, target) pair re-establish the edge after the DELETE.
+        foreach (var (kind, source) in pending.BulkUnrelateFrom)
+        {
+            relationRemovals.Add(Command.UnrelateAllFrom(source, kind));
+        }
+        foreach (var (kind, target) in pending.BulkUnrelateTo)
+        {
+            relationRemovals.Add(Command.UnrelateAllTo(target, kind));
+        }
+
         var plan = new List<Command>(preDeletes.Count + creates.Count + fieldUpdates.Count
                                      + relationRemovals.Count + relationAdditions.Count + finalDeletes.Count);
         plan.AddRange(preDeletes);
@@ -275,9 +286,10 @@ public static class CommitPlanner
 
         if (final.Upserted)
         {
-            creates.Add(final.Sets.Count > 0
-                ? Command.Upsert(rec.Id, final.Sets)
-                : Command.Create(rec.Id));
+            // Upserted intent always emits UPSERT — even with no fields. Downgrading to
+            // CREATE here would change semantics: CREATE errors if the record already
+            // exists, while UPSERT is create-or-update which is what the caller asked for.
+            creates.Add(Command.Upsert(rec.Id, final.Sets.Count > 0 ? final.Sets : null));
             foreach (var unsetField in final.Unsets)
             {
                 fieldUpdates.Add(Command.Unset(rec.Id, unsetField));

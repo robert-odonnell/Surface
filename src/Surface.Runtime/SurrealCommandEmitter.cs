@@ -20,8 +20,12 @@ public static class SurrealCommandEmitter
                     break;
 
                 case CommandOp.Upsert:
-                    sb.Append("UPSERT ").Append(FormatId(c.Target)).Append(" CONTENT ");
-                    AppendContent((IReadOnlyDictionary<string, object?>)c.Value!);
+                    sb.Append("UPSERT ").Append(FormatId(c.Target));
+                    if (c.Value is IReadOnlyDictionary<string, object?> { Count: > 0 } upsertContent)
+                    {
+                        sb.Append(" CONTENT ");
+                        AppendContent(upsertContent);
+                    }
                     sb.Append(";\n");
                     break;
 
@@ -66,6 +70,18 @@ public static class SurrealCommandEmitter
                       .Append(" AND out = ").Append(FormatId((RecordId)c.Value!))
                       .Append(";\n");
                     break;
+
+                case CommandOp.UnrelateAllFrom:
+                    sb.Append("DELETE ").Append(c.Key)
+                      .Append(" WHERE in = ").Append(FormatId(c.Target))
+                      .Append(";\n");
+                    break;
+
+                case CommandOp.UnrelateAllTo:
+                    sb.Append("DELETE ").Append(c.Key)
+                      .Append(" WHERE out = ").Append(FormatId(c.Target))
+                      .Append(";\n");
+                    break;
             }
         }
         return (sb.ToString(), parameters);
@@ -108,13 +124,15 @@ public static class SurrealCommandEmitter
 
 public enum CommandOp
 {
-    Create,   // CREATE record:id
-    Upsert,   // UPSERT record:id CONTENT { … }
-    Set,      // UPDATE record:id SET key = value
-    Unset,    // UPDATE record:id UNSET key    
-    Delete,   // DELETE record:id
-    Relate,   // RELATE source->edge->target
-    Unrelate  // DELETE edge WHERE in = source AND out = target
+    Create,            // CREATE record:id
+    Upsert,            // UPSERT record:id CONTENT { … }
+    Set,               // UPDATE record:id SET key = value
+    Unset,             // UPDATE record:id UNSET key
+    Delete,            // DELETE record:id
+    Relate,            // RELATE source->edge->target
+    Unrelate,          // DELETE edge WHERE in = source AND out = target
+    UnrelateAllFrom,   // DELETE edge WHERE in = source         — bulk; persisted edges too
+    UnrelateAllTo      // DELETE edge WHERE out = target        — bulk; persisted edges too
 }
 
 /// <summary>
@@ -140,8 +158,8 @@ public readonly record struct Command(
     public static Command Create(RecordId target) =>
         new(CommandOp.Create, target);
 
-    public static Command Upsert(RecordId target, IDictionary<string, object?> content) =>
-        new(CommandOp.Upsert, target, Value: Freeze(content));
+    public static Command Upsert(RecordId target, IDictionary<string, object?>? content = null) =>
+        new(CommandOp.Upsert, target, Value: content is null ? null : Freeze(content));
 
     public static Command Set(RecordId target, string key, object? value) =>
         new(CommandOp.Set, target, key, value);
@@ -157,6 +175,12 @@ public readonly record struct Command(
 
     public static Command Unrelate(RecordId source, string edgeTable, RecordId target) =>
         new(CommandOp.Unrelate, source, edgeTable, target);
+
+    public static Command UnrelateAllFrom(RecordId source, string edgeTable) =>
+        new(CommandOp.UnrelateAllFrom, source, edgeTable);
+
+    public static Command UnrelateAllTo(RecordId target, string edgeTable) =>
+        new(CommandOp.UnrelateAllTo, target, edgeTable);
 
     private static IReadOnlyDictionary<string, object?>? Freeze(IEnumerable<KeyValuePair<string, object?>>? source) =>
         source is null ? null : new Dictionary<string, object?>(source, StringComparer.Ordinal);

@@ -130,6 +130,54 @@ public sealed class PendingStateTests
     }
 
     [Fact]
+    public void UnrelateAllFrom_DropsPriorRelateEntries_ForSameSourceAndKind()
+    {
+        var pending = Empty();
+        var src = new RecordId("constraints", "c");
+        var t1 = new RecordId("user_stories", "u1");
+        var t2 = new RecordId("user_stories", "u2");
+
+        pending.ApplyCommand(Command.Relate(src, "restricts", t1));
+        pending.ApplyCommand(Command.Relate(src, "restricts", t2));
+        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
+
+        // Per-edge entries are gone — the bulk DELETE WHERE in=src will clear them at
+        // the DB. The bulk intent is recorded once, deduped via HashSet semantics.
+        Assert.Empty(pending.Relations);
+        Assert.Single(pending.BulkUnrelateFrom);
+        Assert.Contains(("restricts", src), pending.BulkUnrelateFrom);
+    }
+
+    [Fact]
+    public void UnrelateAllFrom_ThenRelate_KeepsTheLaterRelate()
+    {
+        var pending = Empty();
+        var src = new RecordId("constraints", "c");
+        var tgt = new RecordId("user_stories", "u");
+
+        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
+        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+
+        // The bulk-clear is recorded; the subsequent Relate adds a per-edge entry the
+        // planner emits AFTER the bulk DELETE — so the final state has just (src→tgt).
+        Assert.Single(pending.Relations);
+        Assert.Single(pending.BulkUnrelateFrom);
+    }
+
+    [Fact]
+    public void UnrelateAllFrom_IsDeduped()
+    {
+        var pending = Empty();
+        var src = new RecordId("constraints", "c");
+
+        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
+        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
+        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
+
+        Assert.Single(pending.BulkUnrelateFrom);
+    }
+
+    [Fact]
     public void Unrelate_FollowedByRelate_LandsOnRelated()
     {
         var pending = Empty();

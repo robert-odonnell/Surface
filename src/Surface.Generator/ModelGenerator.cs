@@ -191,7 +191,34 @@ public sealed class ModelGenerator : IIncrementalGenerator
             CompositionRootEmitter.Emit(spc, graph);
         }
         RelationKindEmitter.Emit(spc, graph);
-        AggregateLoaderEmitter.Emit(spc, graph);
+
+        // CG020 — every member of an aggregate must be reachable from the root via
+        // [Parent] links so the loader's dotted-path WHERE clauses can scope each row
+        // by parent. Aggregate membership is decided by [Children] reachability, so a
+        // mismatch (Children says yes, [Parent] BFS says no) leaves the member silently
+        // unloadable.
+        var loaderValid = true;
+        var byFullName = graph.Tables.ToDictionary(t => t.FullName);
+        foreach (var agg in graph.Aggregates)
+        {
+            var reachable = ReachableViaParentLinks(agg, byFullName);
+            foreach (var memberFullName in agg.MemberFullNames)
+            {
+                if (!reachable.Contains(memberFullName))
+                {
+                    spc.ReportDiagnostic(Diagnostic.Create(
+                        Diagnostics.ChildMissingParentPath,
+                        Location.None,
+                        memberFullName,
+                        agg.RootFullName));
+                    loaderValid = false;
+                }
+            }
+        }
+        if (loaderValid)
+        {
+            AggregateLoaderEmitter.Emit(spc, graph);
+        }
         ReferenceRegistryEmitter.Emit(spc, graph);
         SchemaEmitter.Emit(spc, graph);
 
@@ -272,6 +299,40 @@ public sealed class ModelGenerator : IIncrementalGenerator
         }
 
         return t;
+    }
+
+    /// <summary>
+    /// BFS from the aggregate root through <c>[Parent]</c>-pointing tables, collecting
+    /// every member of <paramref name="agg"/> that the loader can reach. The aggregate
+    /// loader's dotted WHERE clauses depend on this exact set; anything in
+    /// <c>agg.MemberFullNames</c> not in the result triggers CG020.
+    /// </summary>
+    private static HashSet<string> ReachableViaParentLinks(AggregateModel agg, Dictionary<string, TableModel> byFullName)
+    {
+        var reached = new HashSet<string>(StringComparer.Ordinal) { agg.RootFullName };
+        bool added;
+        do
+        {
+            added = false;
+            foreach (var memberFullName in agg.MemberFullNames)
+            {
+                if (reached.Contains(memberFullName)) continue;
+                if (!byFullName.TryGetValue(memberFullName, out var member)) continue;
+
+                foreach (var p in member.Properties)
+                {
+                    if (!p.Kinds.HasFlag(PropertyKind.Parent)) continue;
+                    var parentFqn = StripGlobalAndNullable(p.Type.FullyQualifiedName);
+                    if (reached.Contains(parentFqn))
+                    {
+                        reached.Add(memberFullName);
+                        added = true;
+                        break;
+                    }
+                }
+            }
+        } while (added);
+        return reached;
     }
 
     private static string StripGlobalAndNullable(string fqn)

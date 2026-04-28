@@ -164,6 +164,43 @@ public sealed class CommitPlannerTests
     }
 
     [Fact]
+    public void BulkUnrelateFrom_IsEmittedInRemovalPhase_BeforeRelationAdditions()
+    {
+        var pending = Empty();
+        var src = new RecordId("constraints", "c");
+        var tgt = new RecordId("user_stories", "u");
+
+        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
+        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+
+        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+
+        var bulkIdx = IndexOfFirst(plan, c => c.Op == CommandOp.UnrelateAllFrom);
+        var relateIdx = IndexOfFirst(plan, c => c.Op == CommandOp.Relate);
+
+        Assert.True(bulkIdx >= 0, "expected bulk unrelate command in plan");
+        Assert.True(relateIdx >= 0, "expected relate in plan");
+        Assert.True(bulkIdx < relateIdx,
+            "bulk unrelate must run before subsequent relate so the new edge survives");
+    }
+
+    [Fact]
+    public void Upsert_WithEmptyContent_RemainsUpsert_NeverDowngrades_ToCreate()
+    {
+        // Polish-3 regression: Upserted intent with empty pending sets must NOT collapse
+        // to a CREATE command. The planner used to do that and it changed semantics.
+        var pending = Empty();
+        var id = new RecordId("designs", "x");
+
+        pending.ApplyCommand(Command.Upsert(id, new Dictionary<string, object?>()));
+
+        var plan = CommitPlanner.Build(pending, NoLiveRefs());
+
+        Assert.Single(plan);
+        Assert.Equal(CommandOp.Upsert, plan[0].Op);
+    }
+
+    [Fact]
     public void Relate_OnExistingRelation_WithNoPayload_IsNoOp()
     {
         var src = new RecordId("constraints", "c");

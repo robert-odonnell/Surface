@@ -112,6 +112,30 @@ public sealed class DiagnosticsTests
     }
 
     [Fact]
+    public void CG020_Children_Without_MatchingParent_Path()
+    {
+        // `Lonely` is listed as Design's Children member but has no [Parent] back to
+        // Design — the loader's $parent.id-scoped query has nothing to anchor on.
+        var src = """
+            using Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Design {
+                [Id] public partial DesignId Id { get; set; }
+                [Children] public partial IReadOnlyCollection<Lonely> Lonelies { get; }
+            }
+
+            [Table] public partial class Lonely {
+                [Id] public partial LonelyId Id { get; set; }
+                // No [Parent] property pointing at Design.
+            }
+            """;
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.Contains(runDiags, d => d.Id == "CG020");
+    }
+
+    [Fact]
     public void HappyPath_ProducesNoDiagnostics()
     {
         var src = """

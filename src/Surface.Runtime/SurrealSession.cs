@@ -274,11 +274,21 @@ public sealed class SurrealSession
     /// </summary>
     public T Track<T>(T entity) where T : class, IEntity
     {
-        if (!entities.TryAdd(entity.Id, entity))
+        if (entities.TryGetValue(entity.Id, out var existing))
         {
-            return entity; // already tracked — Bind / Initialize / Flush already happened.
+            // Same instance — idempotent Track call, just return.
+            if (ReferenceEquals(existing, entity))
+            {
+                return entity;
+            }
+
+            // Different instance with the same id is identity-map poison: the rest of the
+            // session would refer to one instance while user code holds another.
+            throw new InvalidOperationException(
+                $"Cannot track {entity.Id}: a different entity instance is already tracked under this id.");
         }
 
+        entities[entity.Id] = entity;
         if (loadedAtStart.Contains(entity.Id))
         {
             return entity; // hydrated row — no Create, no Initialize re-run.
@@ -290,6 +300,9 @@ public sealed class SurrealSession
         entity.Flush(this);
         return entity;
     }
+
+    /// <summary>True iff <paramref name="id"/> is currently tracked (loaded or freshly minted) in this session.</summary>
+    public bool IsTracked(IRecordId id) => entities.ContainsKey(RecordId.From(id));
 
     /// <summary>
     /// Single-field write. <paramref name="value"/> may be any scalar, an
@@ -368,7 +381,12 @@ public sealed class SurrealSession
         Record(Command.Unrelate(src, edgeKind, tgt));
     }
 
-    /// <summary>Removes every edge of <paramref name="edgeKind"/> originating at <paramref name="source"/>.</summary>
+    /// <summary>
+    /// Removes every edge of <paramref name="edgeKind"/> originating at <paramref name="source"/>,
+    /// loaded or not. Renders as <c>DELETE edgeKind WHERE in = source</c> at commit
+    /// time, so persisted edges that weren't hydrated into this session are cleared too.
+    /// Drops matching loaded edges from the in-memory snapshot so reads stay accurate.
+    /// </summary>
     public void UnrelateAllFrom(IRecordId source, string edgeKind)
     {
         var src = RecordId.From(source);
@@ -377,12 +395,15 @@ public sealed class SurrealSession
             if (key.Source == src && key.Edge == edgeKind)
             {
                 edges.Remove(key);
-                Record(Command.Unrelate(key.Source, key.Edge, key.Target));
             }
         }
+        Record(Command.UnrelateAllFrom(src, edgeKind));
     }
 
-    /// <summary>Removes every edge of <paramref name="edgeKind"/> landing on <paramref name="target"/>.</summary>
+    /// <summary>
+    /// Removes every edge of <paramref name="edgeKind"/> landing on <paramref name="target"/>,
+    /// loaded or not. Renders as <c>DELETE edgeKind WHERE out = target</c> at commit time.
+    /// </summary>
     public void UnrelateAllTo(IRecordId target, string edgeKind)
     {
         var tgt = RecordId.From(target);
@@ -391,9 +412,9 @@ public sealed class SurrealSession
             if (key.Target == tgt && key.Edge == edgeKind)
             {
                 edges.Remove(key);
-                Record(Command.Unrelate(key.Source, key.Edge, key.Target));
             }
         }
+        Record(Command.UnrelateAllTo(tgt, edgeKind));
     }
 
     // Entity-typed convenience overloads — generator-emitted within-aggregate code calls
@@ -511,8 +532,17 @@ public sealed class SurrealSession
 
     public void HydrateTrack(IEntity entity)
     {
-        if (entities.TryAdd(entity.Id, entity))
+        if (entities.TryGetValue(entity.Id, out var existing))
         {
+            if (!ReferenceEquals(existing, entity))
+            {
+                throw new InvalidOperationException(
+                    $"Cannot hydrate {entity.Id}: a different entity instance is already tracked under this id.");
+            }
+        }
+        else
+        {
+            entities[entity.Id] = entity;
             entity.Bind(this);
         }
         loadedAtStart.Add(entity.Id);

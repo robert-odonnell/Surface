@@ -37,6 +37,35 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
+    public void Track_DifferentInstance_SameId_Throws()
+    {
+        var session = new SurrealSession();
+        var id = new RecordId("designs", "x");
+        var first = new StubEntity(id);
+        var second = new StubEntity(id);
+
+        session.Track(first);
+
+        // Identity-map poison: the rest of the session would refer to `first` while
+        // user code holds `second`. Throw, don't silently bind the wrong instance.
+        var ex = Assert.Throws<InvalidOperationException>(() => session.Track(second));
+        Assert.Contains("designs:x", ex.Message);
+    }
+
+    [Fact]
+    public void HydrateTrack_DifferentInstance_SameId_Throws()
+    {
+        var session = new SurrealSession();
+        var id = new RecordId("details", "d");
+        var first = new StubEntity(id);
+        var second = new StubEntity(id);
+
+        session.HydrateTrack(first);
+
+        Assert.Throws<InvalidOperationException>(() => session.HydrateTrack(second));
+    }
+
+    [Fact]
     public void Track_IsIdempotent_OnRepeatCalls()
     {
         var session = new SurrealSession();
@@ -136,7 +165,7 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public void UnrelateAllFrom_TypedKind_RemovesEveryEdgeFromSource()
+    public void UnrelateAllFrom_TypedKind_EmitsSingle_BulkCommand()
     {
         var session = new SurrealSession();
         var src = new RecordId("constraints", "c");
@@ -147,11 +176,12 @@ public sealed class SurrealSessionTests
         session.Relate<StubKind>(src, t2);
         session.UnrelateAllFrom<StubKind>(src);
 
-        // Two Relate + two Unrelate (cleanup walks the in-memory edge index).
-        var relates   = session.Log.Entries.Count(e => e.Op == CommandOp.Relate);
-        var unrelates = session.Log.Entries.Count(e => e.Op == CommandOp.Unrelate);
-        Assert.Equal(2, relates);
-        Assert.Equal(2, unrelates);
+        // The bulk-clear is a single command — it renders as `DELETE edge WHERE in =
+        // source` at commit time so persisted edges (not just loaded ones) get cleared.
+        var bulks = session.Log.Entries.Count(e => e.Op == CommandOp.UnrelateAllFrom);
+        Assert.Equal(1, bulks);
+        // Per-edge Unrelate is not emitted — that path was for loaded-only enumeration.
+        Assert.Equal(0, session.Log.Entries.Count(e => e.Op == CommandOp.Unrelate));
     }
 
     /// <summary>Test-only entity that records the order of session-side hook calls.</summary>

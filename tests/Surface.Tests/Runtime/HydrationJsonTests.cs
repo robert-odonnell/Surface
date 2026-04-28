@@ -71,6 +71,25 @@ public sealed class HydrationJsonTests
     }
 
     [Fact]
+    public void HydrateReference_OnInlineRecord_SkipsConstruction_WhenAlreadyTracked()
+    {
+        // Polish-2: the same Details record can be inline-expanded under multiple
+        // owners. Constructing+hydrating each time only to discard the duplicate is
+        // wasteful — first occurrence wins, subsequent ones just register the link.
+        StubReferenceTarget.HydrationCount = 0;
+
+        var session = new SurrealSession();
+        using var doc = JsonDocument.Parse("""{ "details": { "id": "details:01", "header": "h" } }""");
+        var owner1 = new RecordId("designs", "a");
+        var owner2 = new RecordId("constraints", "b");
+
+        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", owner1, session);
+        HydrationJson.HydrateReference<StubReferenceTarget>(doc.RootElement, "details", owner2, session);
+
+        Assert.Equal(1, StubReferenceTarget.HydrationCount);
+    }
+
+    [Fact]
     public void HydrateReference_OnNullField_IsNoOp()
     {
         StubReferenceTarget.HydrationCount = 0;

@@ -142,9 +142,13 @@ public static class HydrationJson
         // Inline-record form — hydrate the linked record from the same payload. The
         // RPC envelope `{ tb, id }` and the bare id-string form carry no content, so we
         // skip them and rely on the loader having a separate row for that record.
+        // Also skip if the referenced id is already tracked: an inline expansion in two
+        // places (e.g. multiple constraints all referencing the same Details) would
+        // otherwise allocate, hydrate, and discard a duplicate instance per occurrence.
         if (elem.ValueKind == JsonValueKind.Object
             && elem.TryGetProperty("id", out var idE)
-            && idE.ValueKind == JsonValueKind.String)
+            && idE.ValueKind == JsonValueKind.String
+            && !session.IsTracked(refId))
         {
             var entity = new T();
             ((IEntity)entity).Hydrate(elem, session);

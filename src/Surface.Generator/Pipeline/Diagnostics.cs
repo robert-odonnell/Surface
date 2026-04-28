@@ -141,4 +141,12 @@ internal static class Diagnostics
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor ChildMissingParentPath = new(
+        id: "CG020",
+        title: "[Children] member requires a [Parent] path back to the aggregate root",
+        messageFormat: "'{0}' is reachable from aggregate root '{1}' via [Children] but does not declare a [Parent] property linking back into the chain. Add a [Parent] {1} or [Parent] {{intermediate}} property so the loader can scope the row by parent path.",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }

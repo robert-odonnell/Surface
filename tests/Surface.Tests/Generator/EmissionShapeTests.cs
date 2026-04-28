@@ -116,8 +116,10 @@ public sealed class EmissionShapeTests
         var allSrc = GeneratorHarness.AllGeneratedSource(result);
 
         // The ambient `Session.Current` shape is gone; entities hold their own session
-        // through IEntity.Bind / explicit-impl Session.
-        Assert.Contains("void global::Surface.Runtime.IEntity.Bind(global::Surface.Runtime.SurrealSession session) => _session = session;", allSrc);
+        // through IEntity.Bind / explicit-impl Session. Bind is one-shot — re-binding to
+        // a different session throws.
+        Assert.Contains("void global::Surface.Runtime.IEntity.Bind(global::Surface.Runtime.SurrealSession session)", allSrc);
+        Assert.Contains("Entity is already bound to a different session.", allSrc);
         Assert.Contains("private global::Surface.Runtime.SurrealSession? _session;", allSrc);
         Assert.DoesNotContain(".Current", allSrc);
     }

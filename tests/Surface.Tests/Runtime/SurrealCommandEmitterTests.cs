@@ -85,6 +85,35 @@ public sealed class SurrealCommandEmitterTests
     }
 
     [Fact]
+    public void Upsert_WithNullContent_EmitsBareUpsert_NoContentClause()
+    {
+        // Polish-3: Upserted intent must always render as UPSERT, never CREATE — even
+        // with no fields. CREATE errors when the row exists; UPSERT is create-or-update.
+        var (sql, _) = SurrealCommandEmitter.Emit(
+            new[] { Command.Upsert(new RecordId("designs", "x")) });
+
+        Assert.Equal("UPSERT designs:x;\n", sql);
+    }
+
+    [Fact]
+    public void UnrelateAllFrom_RendersAsBulkDelete_WithInWhereClause()
+    {
+        var (sql, _) = SurrealCommandEmitter.Emit(
+            new[] { Command.UnrelateAllFrom(new RecordId("constraints", "c"), "restricts") });
+
+        Assert.Equal("DELETE restricts WHERE in = constraints:c;\n", sql);
+    }
+
+    [Fact]
+    public void UnrelateAllTo_RendersAsBulkDelete_WithOutWhereClause()
+    {
+        var (sql, _) = SurrealCommandEmitter.Emit(
+            new[] { Command.UnrelateAllTo(new RecordId("user_stories", "u"), "restricts") });
+
+        Assert.Equal("DELETE restricts WHERE out = user_stories:u;\n", sql);
+    }
+
+    [Fact]
     public void Multiple_Commands_AreEmitted_InOrder_AsSemicolonTerminatedStatements()
     {
         var a = new RecordId("designs", "a");

@@ -295,7 +295,7 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
             DateTime dt => $"\"{dt.ToUniversalTime():O}\"",
             DateTimeOffset dto => $"\"{dto:O}\"",
             Enum e => $"\"{Escape(e.ToString())}\"",
-            IEntity v => $"r\"{v}\"",
+            IEntity v => $"r\"{v.Id}\"",
             System.Collections.IEnumerable e => $"[{string.Join(", ", e.Cast<object?>().Select(RenderValue))}]",
             _ => JsonSerializer.Serialize(value, SurrealJson.SerializerOptions)
         };
