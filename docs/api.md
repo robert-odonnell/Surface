@@ -257,25 +257,37 @@ After `CommitAsync` or `AbandonAsync`, `IsClosed` is `true` and public reads/wri
 
 ### `WriterLease`
 
-`WriterLease` coordinates cross-process writers through a `writer_lease` table:
+`WriterLease` coordinates cross-process writers through a `writer_lease:<aggregate>`
+record per aggregate, using optimistic concurrency on a monotonic `seq` counter:
 
 ```csharp
-await using var lease = await WriterLease.AcquireAsync(transport, "design");
+var lease = await WriterLease.AcquireAsync(transport, "design");
 await session.CommitAsync(transport, lease);
 ```
 
+Protocol: `AcquireAsync` reads the current `seq` (defaulting to 0 if no row exists) and
+captures it on the lease. `CommitAsync` splices a `BEGIN TRANSACTION; IF seq_on_db !=
+captured THEN THROW … END; UPSERT seq + 1;` fragment around the data writes — atomic
+with the data, throws `WriterLeaseStolenException` if another writer advanced `seq`
+first. The aggregate name is validated as a lower_snake_case slug via `RecordIdFormat`,
+so `"design"` works but `"Design 1"` is rejected at the call site.
+
+No TTL, no holder id, no clock skew, no theft-recovery timer. Crashed writers are
+forgotten — the next acquirer reads the current `seq` fresh and proceeds. `DisposeAsync`
+is a no-op.
+
 Key members:
 
-- `AcquireAsync(transport, aggregateName, ttl, ct)`.
-- `RenewAsync(ct)`.
-- `ReleaseAsync(ct)`.
-- `DefaultTtl`: five minutes.
+- `AcquireAsync(transport, aggregateName, ct)`.
+- `ExpectedSequence`: the seq value this lease captured (or last successfully committed).
+- `AggregateName`: the slug-validated aggregate name.
 - `SchemaScript`: DDL for the runtime lease table. Generated schema includes it.
 
-Exceptions:
+Exception:
 
-- `WriterLeaseUnavailableException`: another non-expired holder owns the lease.
-- `WriterLeaseStolenException`: renewal found that the lease was stolen or removed.
+- `WriterLeaseStolenException`: another writer's commit advanced `seq` past what this
+  lease captured. The caller should abandon the in-flight writes, reload the aggregate,
+  and retry from the fresh snapshot.
 
 ### `RecordIdFormat`
 

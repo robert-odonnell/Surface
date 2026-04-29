@@ -595,16 +595,18 @@ public sealed class SurrealSession : IHydrationSink
     /// <summary>
     /// Flushes pending writes as a single SurrealQL script. The session is closed on
     /// return regardless of outcome — the one-shot invariant is "load → mutate →
-    /// commit (or fail), then loop." If <paramref name="lease"/> is supplied, it's
-    /// renewed before the flush so a stolen lease aborts the commit cleanly via
-    /// <see cref="WriterLeaseStolenException"/>. The session doesn't own the lease —
-    /// the caller manages its lifetime separately.
+    /// commit (or fail), then loop." If <paramref name="lease"/> is supplied, the
+    /// lease's CAS clause (BEGIN TRANSACTION / seq-check / UPSERT seq+1) is spliced
+    /// around the data writes so the commit either lands atomically with a sequence
+    /// advance or — if another writer beat us to it — aborts the whole transaction
+    /// with <see cref="WriterLeaseStolenException"/>. The session doesn't own the
+    /// lease; the caller manages its lifetime separately.
     /// <para>
     /// Single exception boundary for the whole session: any exception thrown during
-    /// commit (RenderBatch, lease renewal, or the transport call) marks the session
-    /// closed and propagates to the caller. The domain decides whether to reload-and-
-    /// retry or give up; the session itself never recovers — there is no half-committed
-    /// state to reason about. Nothing else in the runtime catches exceptions; everything
+    /// commit (RenderBatch or the transport call) marks the session closed and
+    /// propagates to the caller. The domain decides whether to reload-and-retry or
+    /// give up; the session itself never recovers — there is no half-committed state
+    /// to reason about. Nothing else in the runtime catches exceptions; everything
     /// else is allowed to throw freely and lands here.
     /// </para>
     /// </summary>
@@ -614,14 +616,23 @@ public sealed class SurrealSession : IHydrationSink
         try
         {
             var (sql, parameters) = RenderBatch();
-            if (!string.IsNullOrEmpty(sql))
+            var hasWork = !string.IsNullOrEmpty(sql) || lease is not null;
+            if (hasWork)
             {
-                if (lease is not null)
+                var fullSql = lease is not null
+                    ? lease.RenderPreCommitFragment() + sql + WriterLease.PostCommitFragment
+                    : sql;
+
+                try
                 {
-                    await lease.RenewAsync(ct);
+                    await transport.ExecuteAsync(fullSql, parameters, ct);
+                }
+                catch (Exception ex) when (lease is not null && WriterLease.IsStolen(ex))
+                {
+                    throw new WriterLeaseStolenException(lease.AggregateName, lease.ExpectedSequence);
                 }
 
-                await transport.ExecuteAsync(sql, parameters, ct);
+                lease?.OnCommitSucceeded();
             }
         }
         catch

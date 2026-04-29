@@ -335,13 +335,14 @@ async Task DemoLeaseTheft(DesignId designId, SurrealHttpClient db)
     var beforeReload = design.Description;
     Console.WriteLine($"  loaded; current description: '{beforeReload}'");
 
-    // Simulate another writer stealing the lease — direct DELETE wipes the lock row
-    // out from under us. Real life would be a TTL expiring + another acquirer claiming.
-    await db.ExecuteAsync("DELETE writer_lease;");
-    Console.WriteLine("  simulated lease theft (DELETE writer_lease;)");
+    // Simulate another writer winning the race — direct UPSERT advances the seq past
+    // the value our lease captured, so our CAS check at commit time will fail. Real
+    // life: another process completed an Acquire+CommitAsync cycle in this gap.
+    await db.ExecuteAsync($"UPSERT writer_lease:{designAggregate} CONTENT {{ seq: {lease.ExpectedSequence + 99} }};");
+    Console.WriteLine($"  simulated theft: another writer advanced seq past {lease.ExpectedSequence}");
 
-    // The (now-invalid) writer attempts to commit. RenewAsync runs first inside
-    // CommitAsync; it should detect the missing/stolen row and throw.
+    // The (now-stale) writer attempts to commit. The CAS check spliced into the
+    // commit script detects the seq mismatch and aborts the whole transaction.
     var rwSession = new SurrealSession(Workspace.ReferenceRegistry);
     rwSession.Track(new Design { Id = designId, Description = beforeReload + " [edit]" });
     try

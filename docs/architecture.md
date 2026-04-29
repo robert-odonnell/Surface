@@ -195,12 +195,12 @@ The planned phases are:
 
 ## Writer Coordination
 
-`WriterLease` is optional but intended for cross-process write coordination. A lease is a row in `writer_lease` keyed by aggregate name, such as `writer_lease:design`.
+`WriterLease` is optional but intended for cross-process write coordination. The protocol is **optimistic concurrency on a monotonic sequence**: each aggregate has one `writer_lease:<slug>` record holding a single `seq: int`. The aggregate name is validated as a lower_snake_case slug via `RecordIdFormat` at acquire time.
 
 The typical write flow is:
 
 ```csharp
-await using var lease = await WriterLease.AcquireAsync(transport, "design");
+var lease = await WriterLease.AcquireAsync(transport, "design");
 var session = await workspace.LoadDesignAsync(transport, id);
 
 // mutate
@@ -208,9 +208,11 @@ var session = await workspace.LoadDesignAsync(transport, id);
 await session.CommitAsync(transport, lease);
 ```
 
-`CommitAsync` renews the lease before executing SQL. If renewal fails because another holder took the lease or the row disappeared, `WriterLeaseStolenException` is thrown and the session closes. The caller should reload and retry from a fresh snapshot if appropriate.
+`AcquireAsync` reads the current `seq` for the aggregate (defaulting to 0 if no row exists) and captures it on the lease. `CommitAsync` splices a transactional CAS clause around the data writes — `BEGIN TRANSACTION; IF current_seq != captured THEN THROW … END; UPSERT seq + 1;` — so the commit lands atomically with a sequence advance, or aborts entirely on mismatch and the caller sees `WriterLeaseStolenException`. The session closes either way.
 
-The default TTL is five minutes. Expired leases can be stolen, which bounds crash recovery time.
+There is no TTL, no holder id, no theft-recovery timer. Crashed writers are forgotten on the spot — they leave their captured seq in memory only, which is invisible to everyone else; the next acquirer just reads the current seq fresh and proceeds. `DisposeAsync` is a no-op.
+
+This is optimistic concurrency, not pessimistic locking. Two writers can both `AcquireAsync` the same aggregate and both mutate locally; only the first to commit wins, the second gets `WriterLeaseStolenException` at commit time and must reload-and-retry. Suits the library's one-shot session character: load → mutate → commit happens fast enough that races are rare and retries are cheap.
 
 ## Transport Boundary
 
