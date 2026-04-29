@@ -487,6 +487,104 @@ public sealed class CommitPlannerTests
         Assert.Contains(plan, c => c.Op == CommandOp.Delete && c.Target == constraint);
     }
 
+    [Fact]
+    public void IgnoreReference_ToDeletedTarget_LeavesOwnerUntouched()
+    {
+        // [Ignore] is the fourth delete behavior — leave the owner unchanged when the
+        // target is deleted. The reference becomes dangling at the DB level; the model
+        // accepts that explicitly. No cascade, no unset, no reject.
+        var registry = new StubRegistry(
+            ("designs", "external", "externals", ReferenceDeleteBehavior.Ignore));
+
+        var design = new RecordId("designs", "d");
+        var external = new RecordId("externals", "x");
+        var pending = WithLoaded(design, external);
+        pending.HydrateReference(design, "external", external);
+        pending.ApplyCommand(Command.Delete(external));
+
+        var plan = CommitPlanner.Build(pending, registry);
+
+        // The target gets deleted; the owner stays put with no field touch.
+        Assert.Contains(plan, c => c.Op == CommandOp.Delete && c.Target == external);
+        Assert.DoesNotContain(plan, c => c.Op == CommandOp.Delete && c.Target == design);
+        Assert.DoesNotContain(plan, c => c.Op == CommandOp.Unset && c.Target == design);
+    }
+
+    [Fact]
+    public void Cascade_Chains_ToFixpoint_AcrossMultipleHops()
+    {
+        // Cascade is computed to a fixpoint: A→B→C all cascade, deleting C must ripple
+        // through B back to A. Tests the iterative resolver, not just the one-hop case.
+        var registry = new StubRegistry(
+            ("a", "b_ref", "b", ReferenceDeleteBehavior.Cascade),
+            ("b", "c_ref", "c", ReferenceDeleteBehavior.Cascade));
+
+        var a = new RecordId("a", "1");
+        var b = new RecordId("b", "1");
+        var c = new RecordId("c", "1");
+
+        var pending = WithLoaded(a, b, c);
+        pending.HydrateReference(a, "b_ref", b);
+        pending.HydrateReference(b, "c_ref", c);
+        pending.ApplyCommand(Command.Delete(c));
+
+        var plan = CommitPlanner.Build(pending, registry);
+
+        Assert.Contains(plan, x => x.Op == CommandOp.Delete && x.Target == a);
+        Assert.Contains(plan, x => x.Op == CommandOp.Delete && x.Target == b);
+        Assert.Contains(plan, x => x.Op == CommandOp.Delete && x.Target == c);
+    }
+
+    [Fact]
+    public void Cascade_AndUnset_OnSameDeletedTarget_BothFire()
+    {
+        // Mixed-behavior fan-in: target T has two incoming references — one Cascade
+        // (CascadeOwner), one Unset (UnsetOwner). Deleting T cascades the first owner
+        // out and unsets the second's field. Both effects come from the same delete.
+        var registry = new StubRegistry(
+            ("cascade_owners", "t_ref", "targets", ReferenceDeleteBehavior.Cascade),
+            ("unset_owners",  "t_ref", "targets", ReferenceDeleteBehavior.Unset));
+
+        var cascadeOwner = new RecordId("cascade_owners", "co");
+        var unsetOwner   = new RecordId("unset_owners",   "uo");
+        var target       = new RecordId("targets",        "t");
+        var pending = WithLoaded(cascadeOwner, unsetOwner, target);
+        pending.HydrateReference(cascadeOwner, "t_ref", target);
+        pending.HydrateReference(unsetOwner,   "t_ref", target);
+        pending.ApplyCommand(Command.Delete(target));
+
+        var plan = CommitPlanner.Build(pending, registry);
+
+        Assert.Contains(plan, x => x.Op == CommandOp.Delete && x.Target == cascadeOwner);
+        Assert.Contains(plan, x => x.Op == CommandOp.Unset  && x.Target == unsetOwner && x.Key == "t_ref");
+        Assert.Contains(plan, x => x.Op == CommandOp.Delete && x.Target == target);
+        // The unset-owner survives — it's not cascaded.
+        Assert.DoesNotContain(plan, x => x.Op == CommandOp.Delete && x.Target == unsetOwner);
+    }
+
+    [Fact]
+    public void Reject_ListsAllBlockers_NotJustTheFirst()
+    {
+        // Multi-blocker: two distinct owners both Reject the deletion of T. The thrown
+        // exception names both, not just the first one found — useful diagnostic for the
+        // user choosing which to reassign first.
+        var registry = new StubRegistry(
+            ("owner_a", "t_ref", "targets", ReferenceDeleteBehavior.Reject),
+            ("owner_b", "t_ref", "targets", ReferenceDeleteBehavior.Reject));
+
+        var ownerA = new RecordId("owner_a", "a");
+        var ownerB = new RecordId("owner_b", "b");
+        var target = new RecordId("targets", "t");
+        var pending = WithLoaded(ownerA, ownerB, target);
+        pending.HydrateReference(ownerA, "t_ref", target);
+        pending.HydrateReference(ownerB, "t_ref", target);
+        pending.ApplyCommand(Command.Delete(target));
+
+        var ex = Assert.Throws<CommitPlanRejectException>(() => CommitPlanner.Build(pending, registry));
+        Assert.Contains(ex.Blockers, b => b.Contains("owner_a:a"));
+        Assert.Contains(ex.Blockers, b => b.Contains("owner_b:b"));
+    }
+
     private static int IndexOfFirst<T>(IReadOnlyList<T> list, Func<T, bool> pred)
     {
         for (var i = 0; i < list.Count; i++)
