@@ -82,13 +82,13 @@ public static class HydrationJson
     /// (snake_case naming for record types). Returns <c>default</c> when the field is
     /// missing or null; caller handles fallback.
     /// </summary>
-    public static T? ReadOrDefault<T>(JsonElement parent, string field)
+    public static T ReadOrDefault<T>(JsonElement parent, string field)
     {
         if (!parent.TryGetProperty(field, out var elem) || elem.ValueKind == JsonValueKind.Null)
         {
-            return default;
+            return default!;
         }
-        return elem.Deserialize<T>(SurrealJson.SerializerOptions);
+        return elem.Deserialize<T>(SurrealJson.SerializerOptions) ?? default!;
     }
 
     public static bool TryReadRecordId(JsonElement parent, string field, out RecordId value)

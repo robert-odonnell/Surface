@@ -1008,9 +1008,10 @@ internal static class PartialEmitter
             return;
         }
 
-        // ReadOrDefault<T> always returns T? — `?? default!` lands in the non-nullable
-        // backing field for both value types (int, bool, …) and reference types (where
-        // null! matches the existing `_field = default!` initialisation).
+        // ReadOrDefault<T> returns the (possibly default!) T directly — assign without
+        // coalescing. Works for value types (returns default(T) when missing) and
+        // reference types (returns null! → matches the existing `_field = default!`
+        // initialisation).
         var deserialiseAs = StripNullable(typeFqn);
         builder
             .Append(indent)
@@ -1020,7 +1021,7 @@ internal static class PartialEmitter
             .Append(deserialiseAs)
             .Append(">(json, ")
             .Append(fieldLit)
-            .AppendLine(") ?? default!;");
+            .AppendLine(");");
     }
 
     /// <summary>
