@@ -223,6 +223,7 @@ public sealed class WriterLeaseTests
         public void Initialize(SurrealSession session) { }
         public void Flush(SurrealSession session) { }
         public void Hydrate(JsonElement json, IHydrationSink sink) { }
+        public void HydratePartial(JsonElement json, IHydrationSink sink) { }
         public void OnDeleting() { }
         public void MarkAllSlicesLoaded(IHydrationSink sink) { }
     }

@@ -137,6 +137,12 @@ internal static class PartialEmitter
         builder.AppendLine();
         EmitHydrate(builder, memberIndent, table);
 
+        // HydratePartial — called by SurrealSession.FetchAsync<T> when a row arrives for
+        // an entity that's already tracked. Same per-field reads, gated on
+        // !sink.HasPendingWrite so the caller's uncommitted mutations survive a top-up.
+        builder.AppendLine();
+        EmitHydratePartial(builder, memberIndent, table);
+
         // OnDeleting hook — invoked by Session.Delete(IEntity) before the entity's own
         // delete command is queued. User can implement the simple-form partial method to
         // queue child deletes / clears.
@@ -961,12 +967,26 @@ internal static class PartialEmitter
     /// session surface.
     /// </summary>
     private static void EmitHydrate(StringBuilder builder, string indent, TableModel table)
+        => EmitHydrateBody(builder, indent, table, gated: false, methodName: "Hydrate");
+
+    private static void EmitHydratePartial(StringBuilder builder, string indent, TableModel table)
+        => EmitHydrateBody(builder, indent, table, gated: true, methodName: "HydratePartial");
+
+    /// <summary>
+    /// Emits the body of either <c>IEntity.Hydrate</c> or <c>IEntity.HydratePartial</c>.
+    /// When <paramref name="gated"/> is true, every per-field write is wrapped in a
+    /// <c>!sink.HasPendingWrite(__id, "field")</c> guard so a partial-merge Fetch never
+    /// clobbers user mutations made since the original load. The id read and the
+    /// <c>sink.Track</c> call are unconditional in both modes — id is immutable after
+    /// bind, and Track is idempotent for the same instance.
+    /// </summary>
+    private static void EmitHydrateBody(StringBuilder builder, string indent, TableModel table, bool gated, string methodName)
     {
         builder
             .Append(indent)
             .Append("void ")
             .Append(EntityInterface)
-            .AppendLine($".Hydrate(global::System.Text.Json.JsonElement json, {HydrationSinkType} sink)")
+            .Append('.').Append(methodName).AppendLine($"(global::System.Text.Json.JsonElement json, {HydrationSinkType} sink)")
             .Append(indent)
             .AppendLine("{");
 
@@ -987,26 +1007,35 @@ internal static class PartialEmitter
             .Append(indent)
             .AppendLine("    sink.Track(this);");
 
+        if (gated)
+        {
+            // Cache the canonical id once for the gating helper — avoids repeating the
+            // ((IEntity)this).Id cast in every per-field guard.
+            builder
+                .Append(indent)
+                .Append("    var __id = ((").Append(EntityInterface).AppendLine(")this).Id;");
+        }
+
         foreach (var p in table.Properties)
         {
             if (p.Kinds.HasFlag(PropertyKind.Property))
             {
                 if (p.Type.MetadataName == SurrealArrayMetadata)
                 {
-                    EmitHydrateSurrealArray(builder, indent, p);
+                    EmitHydrateSurrealArray(builder, indent, p, gated);
                 }
                 else
                 {
-                    EmitHydrateValueProperty(builder, indent, p);
+                    EmitHydrateValueProperty(builder, indent, p, gated);
                 }
             }
             else if (p.Kinds.HasFlag(PropertyKind.Reference))
             {
-                EmitHydrateReference(builder, indent, p);
+                EmitHydrateReference(builder, indent, p, gated);
             }
             else if (p.Kinds.HasFlag(PropertyKind.Parent))
             {
-                EmitHydrateParent(builder, indent, p);
+                EmitHydrateParent(builder, indent, p, gated);
             }
             // [Children] is computed via parentByChild reverse lookup — nothing to read here.
             // Forward/inverse relation properties are populated by the per-aggregate loader's
@@ -1019,44 +1048,69 @@ internal static class PartialEmitter
     }
 
     /// <summary>
+    /// Emits the open of a <c>HasPendingWrite</c> gate when <paramref name="gated"/> is
+    /// true; no-op otherwise. Returns the indent the gated body should use (4 spaces of
+    /// extra indent inside the guard, otherwise the existing indent).
+    /// </summary>
+    private static string OpenGate(StringBuilder builder, string indent, bool gated, string fieldLit)
+    {
+        if (!gated) return indent;
+        builder
+            .Append(indent).Append("    if (!sink.HasPendingWrite(__id, ").Append(fieldLit).AppendLine("))")
+            .Append(indent).AppendLine("    {");
+        return indent + "    ";
+    }
+
+    private static void CloseGate(StringBuilder builder, string indent, bool gated)
+    {
+        if (!gated) return;
+        builder.Append(indent).AppendLine("    }");
+    }
+
+    /// <summary>
     /// Hydrates any non-<c>SurrealArray</c> [Property] — scalar (int, bool, DateTime, …),
     /// array (<c>int[]</c>, <c>List&lt;T&gt;</c>), record, dictionary, anything
     /// <see cref="System.Text.Json.JsonSerializer"/> understands. String stays special-cased
     /// so its empty-string fallback matches the schema's <c>DEFAULT ""</c> clause without
     /// a round-trip through the serializer.
     /// </summary>
-    private static void EmitHydrateValueProperty(StringBuilder builder, string indent, PropertyModel p)
+    private static void EmitHydrateValueProperty(StringBuilder builder, string indent, PropertyModel p, bool gated)
     {
         var backing = $"_{ToCamel(p.Name)}";
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
         var typeFqn = p.Type.FullyQualifiedName;
 
+        var inner = OpenGate(builder, indent, gated, fieldLit);
+
         if (typeFqn is "string" or "global::System.String" or "string?" or "global::System.String?")
         {
             builder
-                .Append(indent)
+                .Append(inner)
                 .Append("    ")
                 .Append(backing)
                 .Append(" = global::Disruptor.Surface.Runtime.HydrationJson.ReadString(json, ")
                 .Append(fieldLit)
                 .AppendLine(");");
-            return;
+        }
+        else
+        {
+            // ReadOrDefault<T> returns the (possibly default!) T directly — assign without
+            // coalescing. Works for value types (returns default(T) when missing) and
+            // reference types (returns null! → matches the existing `_field = default!`
+            // initialisation).
+            var deserialiseAs = StripNullable(typeFqn);
+            builder
+                .Append(inner)
+                .Append("    ")
+                .Append(backing)
+                .Append(" = global::Disruptor.Surface.Runtime.HydrationJson.ReadOrDefault<")
+                .Append(deserialiseAs)
+                .Append(">(json, ")
+                .Append(fieldLit)
+                .AppendLine(");");
         }
 
-        // ReadOrDefault<T> returns the (possibly default!) T directly — assign without
-        // coalescing. Works for value types (returns default(T) when missing) and
-        // reference types (returns null! → matches the existing `_field = default!`
-        // initialisation).
-        var deserialiseAs = StripNullable(typeFqn);
-        builder
-            .Append(indent)
-            .Append("    ")
-            .Append(backing)
-            .Append(" = global::Disruptor.Surface.Runtime.HydrationJson.ReadOrDefault<")
-            .Append(deserialiseAs)
-            .Append(">(json, ")
-            .Append(fieldLit)
-            .AppendLine(");");
+        CloseGate(builder, indent, gated);
     }
 
     /// <summary>
@@ -1070,7 +1124,7 @@ internal static class PartialEmitter
     /// initialised from the loaded items. Skips silently when the field is missing or the
     /// value isn't an array — first read will then return an empty wrapper.
     /// </summary>
-    private static void EmitHydrateSurrealArray(StringBuilder builder, string indent, PropertyModel p)
+    private static void EmitHydrateSurrealArray(StringBuilder builder, string indent, PropertyModel p, bool gated)
     {
         var backing = $"_{ToCamel(p.Name)}";
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
@@ -1093,7 +1147,9 @@ internal static class PartialEmitter
         var localItems = $"__{ToCamel(p.Name)}Items";
         var localElem = $"__{ToCamel(p.Name)}Elem";
 
-        builder.Append(indent)
+        var inner = OpenGate(builder, indent, gated, fieldLit);
+
+        builder.Append(inner)
             .Append("    if (json.TryGetProperty(")
             .Append(fieldLit)
             .Append(", out var ")
@@ -1101,9 +1157,9 @@ internal static class PartialEmitter
             .Append(") && ")
             .Append(localElem)
             .AppendLine(".ValueKind == global::System.Text.Json.JsonValueKind.Array)")
-            .Append(indent)
+            .Append(inner)
             .AppendLine("    {")
-            .Append(indent)
+            .Append(inner)
             .Append("        var ")
             .Append(localItems)
             .Append(" = new global::System.Collections.Generic.List<")
@@ -1111,23 +1167,23 @@ internal static class PartialEmitter
             .Append(">(")
             .Append(localElem)
             .AppendLine(".GetArrayLength());")
-            .Append(indent)
+            .Append(inner)
             .Append("        foreach (var __row in ")
             .Append(localElem)
             .AppendLine(".EnumerateArray())")
-            .Append(indent)
+            .Append(inner)
             .AppendLine("        {")
-            .Append(indent)
+            .Append(inner)
             .Append("            var __decoded = global::System.Text.Json.JsonSerializer.Deserialize<")
             .Append(elementType)
             .AppendLine(">(__row, global::Disruptor.Surface.Runtime.SurrealJson.SerializerOptions);")
-            .Append(indent)
+            .Append(inner)
             .Append("            if (__decoded is not null) ")
             .Append(localItems)
             .AppendLine(".Add(__decoded);")
-            .Append(indent)
+            .Append(inner)
             .AppendLine("        }")
-            .Append(indent)
+            .Append(inner)
             .Append("        ")
             .Append(backing)
             .Append(" = new ")
@@ -1137,40 +1193,52 @@ internal static class PartialEmitter
             .Append(", __items => __WriteField(")
             .Append(fieldLit)
             .AppendLine(", __items));")
-            .Append(indent)
+            .Append(inner)
             .AppendLine("    }");
+
+        CloseGate(builder, indent, gated);
     }
 
-    private static void EmitHydrateReference(StringBuilder builder, string indent, PropertyModel p)
+    private static void EmitHydrateReference(StringBuilder builder, string indent, PropertyModel p, bool gated)
     {
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
         var typeArg = StripNullable(p.Type.FullyQualifiedName);
+
+        var inner = OpenGate(builder, indent, gated, fieldLit);
+
         // HydrationJson.HydrateReference<T> handles both the id-only and inline-record
         // shapes — for the inline form (`field.*` projection) it constructs and hydrates
         // the referenced entity from the same payload so reads can resolve it.
         builder
-            .Append(indent)
+            .Append(inner)
             .Append("    global::Disruptor.Surface.Runtime.HydrationJson.HydrateReference<")
             .Append(typeArg)
             .Append(">(json, ")
             .Append(fieldLit)
             .AppendLine($", (({EntityInterface})this).Id, sink);");
+
+        CloseGate(builder, indent, gated);
     }
 
-    private static void EmitHydrateParent(StringBuilder builder, string indent, PropertyModel p)
+    private static void EmitHydrateParent(StringBuilder builder, string indent, PropertyModel p, bool gated)
     {
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
+
+        var inner = OpenGate(builder, indent, gated, fieldLit);
+
         builder
-            .Append(indent)
+            .Append(inner)
             .Append("    if (global::Disruptor.Surface.Runtime.HydrationJson.TryReadRecordId(json, ")
             .Append(fieldLit)
             .Append(", out var __parent_")
             .Append(ToCamel(p.Name))
             .AppendLine("))")
-            .Append(indent)
+            .Append(inner)
             .Append($"        sink.Parent((({EntityInterface})this).Id, __parent_")
             .Append(ToCamel(p.Name))
             .AppendLine(");");
+
+        CloseGate(builder, indent, gated);
     }
 
     // ──────────────────────────── helpers ────────────────────────────────────

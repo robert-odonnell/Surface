@@ -171,6 +171,7 @@ public sealed class QueryExecutionTests
         public void Flush(SurrealSession session) { }
         public void OnDeleting() { }
         public void MarkAllSlicesLoaded(IHydrationSink sink) { }
+        public void HydratePartial(JsonElement json, IHydrationSink sink) => Hydrate(json, sink);
 
         public void Hydrate(JsonElement json, IHydrationSink sink)
         {

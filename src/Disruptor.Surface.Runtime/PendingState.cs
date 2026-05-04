@@ -192,6 +192,26 @@ public sealed class PendingState(
         }
     }
 
+    /// <summary>
+    /// True iff a Set / Unset command is pending for <paramref name="field"/> on
+    /// <paramref name="owner"/>'s current lifecycle segment. Used by the partial-merge
+    /// hydrator (<see cref="SurrealSession.FetchAsync{T}"/>) to skip overwriting fields
+    /// the user has already mutated since load. Covers <c>[Property]</c>, <c>[Parent]</c>,
+    /// and <c>[Reference]</c> field writes — all three flow through the same record-side
+    /// <c>Sets</c>/<c>Unsets</c> dicts (the reference-targets dict is a parallel cache,
+    /// not the source of truth for "did the user write anything?").
+    /// </summary>
+    public bool HasPendingWrite(RecordId owner, string field)
+    {
+        if (!Records.TryGetValue(owner, out var rec))
+        {
+            return false;
+        }
+
+        var current = rec.Current;
+        return current.Sets.ContainsKey(field) || current.Unsets.Contains(field);
+    }
+
     /// <summary>User-side clear — at-end goes to null while at-start stays as it was.</summary>
     public void UnsetReferenceTarget(RecordId owner, string field)
     {

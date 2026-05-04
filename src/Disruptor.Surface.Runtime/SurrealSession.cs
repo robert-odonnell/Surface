@@ -54,6 +54,14 @@ public interface IHydrationSink
     /// marks only what the user explicitly Included.
     /// </summary>
     void MarkSliceLoaded(RecordId ownerId, string fieldName);
+
+    /// <summary>
+    /// True iff the user has a pending Set/Unset on <paramref name="ownerId"/>.<paramref name="field"/>.
+    /// The partial-merge hydrator path (<see cref="SurrealSession.FetchAsync{T}"/>) consults
+    /// this before overwriting backing fields — pending writes always win, since clobbering
+    /// uncommitted user state during a top-up Fetch would be very surprising.
+    /// </summary>
+    bool HasPendingWrite(RecordId ownerId, string field);
 }
 
 /// <summary>
@@ -104,6 +112,17 @@ public interface IEntity
     /// separately.
     /// </summary>
     void Hydrate(JsonElement json, IHydrationSink sink);
+
+    /// <summary>
+    /// Partial-merge variant of <see cref="Hydrate"/> for the
+    /// <see cref="SurrealSession.FetchAsync{T}"/> path. Same per-field reads, but each
+    /// scalar / parent / reference write is gated on
+    /// <see cref="IHydrationSink.HasPendingWrite"/> — fields the user has already written
+    /// to since the original load are preserved (uncommitted writes win), so a top-up
+    /// Fetch never clobbers in-flight changes. The id, sink.Track call, and inline-record
+    /// hydration recursion (which constructs new sub-entities) are unconditional.
+    /// </summary>
+    void HydratePartial(JsonElement json, IHydrationSink sink);
 
     /// <summary>
     /// SurrealSession calls this immediately before queueing the entity's own DELETE command,
@@ -427,17 +446,118 @@ public sealed class SurrealSession : IHydrationSink
            && set.Contains(fieldName);
 
     /// <summary>
-    /// Stub for the strict-with-escape extension query landing in PR8. Throws
-    /// <see cref="NotImplementedException"/> for now — the typed
-    /// <see cref="LoadShapeViolationException"/> raised by unloaded property reads
-    /// points users at this method. PR8 will run <paramref name="query"/> through the
-    /// transport, hydrate the response into <c>this</c> session via a partial-merge
-    /// sink, and mark the newly-loaded slices.
+    /// Strict-with-escape extension query: runs <paramref name="query"/> through the
+    /// transport and hydrates rows back into <c>this</c> session, top-up style. Already-
+    /// tracked entities receive <see cref="IEntity.HydratePartial"/> (skips fields the
+    /// user has mutated since the original load); brand-new entities receive the full
+    /// <see cref="IEntity.Hydrate"/>. Slices listed in <see cref="Query{T}.Includes"/>
+    /// are marked loaded on their owners — subsequent reads against those slices stop
+    /// throwing <see cref="LoadShapeViolationException"/>.
+    /// <para>
+    /// Typical usage: a property read raises a <see cref="LoadShapeViolationException"/>;
+    /// catch it (or pre-empt it) and call <c>session.FetchAsync(Workspace.Query.{Root}.WithId(id).Include*(...))</c>
+    /// to extend the load shape. The query must root at the same entity whose slice you
+    /// want to top up — Fetch never invents new aggregate roots.
+    /// </para>
     /// </summary>
-    public Task FetchAsync<T>(Query.Query<T> query, ISurrealTransport transport, CancellationToken ct = default)
+    public async Task FetchAsync<T>(Query.Query<T> query, ISurrealTransport transport, CancellationToken ct = default)
         where T : class, IEntity, new()
-        => throw new NotImplementedException(
-            "SurrealSession.FetchAsync is not implemented yet (PR8). For now, design the load shape up-front via Workspace.Query.{Root}.WithId(id).Include*(...).LoadAsync(...).");
+    {
+        ThrowIfClosed();
+
+        var (sql, bindings) = query.Compile();
+        using var doc = await transport.ExecuteAsync(sql, bindings, ct);
+        var rs = new SurrealResultSet(doc.RootElement);
+        var rows = rs.ResultAt(0);
+
+        IHydrationSink sink = this;
+
+        switch (rows.ValueKind)
+        {
+            case System.Text.Json.JsonValueKind.Array:
+                foreach (var row in rows.EnumerateArray())
+                {
+                    HydrateMergingRoot<T>(row, sink, query.Includes);
+                }
+                break;
+            case System.Text.Json.JsonValueKind.Object:
+                HydrateMergingRoot<T>(rows, sink, query.Includes);
+                break;
+            // Null / Undefined / scalar — nothing to merge.
+        }
+    }
+
+    /// <summary>
+    /// Hydrate one root row, then recurse through <paramref name="includes"/>. Existing
+    /// entities receive HydratePartial (uncommitted writes preserved); new entities get
+    /// the full Hydrate via <c>new T()</c>.
+    /// </summary>
+    private void HydrateMergingRoot<T>(System.Text.Json.JsonElement row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes)
+        where T : class, IEntity, new()
+    {
+        if (!HydrationJson.TryReadRecordId(row, "id", out var id)) return;
+
+        if (entities.TryGetValue(id, out var existing))
+        {
+            existing.HydratePartial(row, sink);
+        }
+        else
+        {
+            var entity = new T();
+            ((IEntity)entity).Hydrate(row, sink);
+        }
+
+        HydrateMergingNested(row, includes, sink);
+    }
+
+    /// <summary>
+    /// Recursively hydrate nested includes for the partial-merge path. Like
+    /// <c>Query&lt;T&gt;.HydrateNested</c> but with dedup-on-tracked: child rows whose id
+    /// is already in <see cref="entities"/> get <see cref="IEntity.HydratePartial"/>
+    /// instead of the include's full-hydrate <see cref="IncludeChildrenNode.Hydrator"/>
+    /// callback. Slice marking is identical to the read-mode path.
+    /// </summary>
+    private void HydrateMergingNested(System.Text.Json.JsonElement row, IReadOnlyList<Query.IIncludeNode> nodes, IHydrationSink sink)
+    {
+        var hasOwnerId = HydrationJson.TryReadRecordId(row, "id", out var ownerId);
+
+        foreach (var node in nodes)
+        {
+            switch (node)
+            {
+                case Query.IncludeInlineRefNode inlineRef:
+                    if (hasOwnerId)
+                    {
+                        sink.MarkSliceLoaded(ownerId, inlineRef.Field);
+                    }
+                    break;
+
+                case Query.IncludeChildrenNode children:
+                    if (hasOwnerId && children.ParentSliceKey is { } sliceKey)
+                    {
+                        sink.MarkSliceLoaded(ownerId, sliceKey);
+                    }
+                    if (!row.TryGetProperty(children.ChildTable, out var arr)) continue;
+                    if (arr.ValueKind != System.Text.Json.JsonValueKind.Array) continue;
+
+                    foreach (var childRow in arr.EnumerateArray())
+                    {
+                        if (childRow.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+                        if (HydrationJson.TryReadRecordId(childRow, "id", out var childId)
+                            && entities.TryGetValue(childId, out var existingChild))
+                        {
+                            existingChild.HydratePartial(childRow, sink);
+                        }
+                        else
+                        {
+                            children.Hydrator?.Invoke(childRow, sink);
+                        }
+                        HydrateMergingNested(childRow, children.Nested, sink);
+                    }
+                    break;
+            }
+        }
+    }
 
     /// <summary>
     /// Single-field write. <paramref name="value"/> may be any scalar, an
@@ -778,6 +898,9 @@ public sealed class SurrealSession : IHydrationSink
         }
         set.Add(fieldName);
     }
+
+    bool IHydrationSink.HasPendingWrite(RecordId ownerId, string field)
+        => Pending.HasPendingWrite(ownerId, field);
 
     // ──────────────────────────── private helpers ───────────────────────────
 

@@ -379,34 +379,244 @@ public sealed class EmissionRoundTripTests
     }
 
     [Fact]
-    public void FetchAsync_ThrowsNotImplementedException()
+    public async Task FetchAsync_HydratesNotYetLoadedSlice_AndMarksItLoaded()
     {
-        // PR7 stub for the strict-with-escape exit. PR8 wires the partial-merge hydrator;
-        // for now reads that hit the throw point at this method by name.
+        // PR8 happy path: a top-up Fetch into an existing session hydrates the requested
+        // slice and marks it loaded so subsequent reads of that slice stop throwing.
+        const string twoSliceFixture = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Design {
+                [Id] public partial DesignId Id { get; set; }
+                [Property] public partial string Description { get; set; }
+                [Children] public partial IReadOnlyCollection<Constraint> Constraints { get; }
+                [Children] public partial IReadOnlyCollection<Note> Notes { get; }
+            }
+
+            [Table] public partial class Constraint {
+                [Id] public partial ConstraintId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [Property] public partial string Description { get; set; }
+            }
+
+            [Table] public partial class Note {
+                [Id] public partial NoteId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [Property] public partial string Body { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+        var assembly = GeneratorHarness.CompileAndLoad(twoSliceFixture);
+        var (session, designUlid, design) = await BuildSessionWithIncludedConstraints(assembly);
+
+        // Reading Notes throws because the slice wasn't loaded yet.
+        var notesProp = design.GetType().GetProperty("Notes")!;
+        Assert.Throws<LoadShapeViolationException>(() =>
+        {
+            try { _ = notesProp.GetValue(design); }
+            catch (TargetInvocationException tie) when (tie.InnerException is not null) { throw tie.InnerException; }
+        });
+
+        // Top-up: fetch a query rooted at Design including Notes.
+        var queryRoot = assembly.GetType("M.Workspace")!
+            .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
+        var topUpQuery = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
+        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor(new[] { typeof(string) })!;
+        topUpQuery = topUpQuery.GetType().GetMethod("WithId")!.Invoke(topUpQuery, new[] { designIdCtor.Invoke(new object?[] { designUlid }) })!;
+        var includeNotes = assembly.GetType("M.DesignQueryIncludes")!.GetMethod("IncludeNotes")!;
+        var configureType = includeNotes.GetParameters()[1].ParameterType;
+        topUpQuery = includeNotes.Invoke(null, new[] { topUpQuery, MakeConfigure(configureType, _ => { }) })!;
+
+        var noteUlid = Ulid.NewUlid().ToString();
+        var fetchTransport = new ScriptedTransport($$"""
+            [{"result":[
+                {
+                    "id":"designs:{{designUlid}}",
+                    "description":"d",
+                    "notes":[
+                        {
+                            "id":"notes:{{noteUlid}}",
+                            "body":"hello",
+                            "design":"designs:{{designUlid}}"
+                        }
+                    ]
+                }
+            ],"status":"OK"}]
+            """);
+
+        var fetchMethod = typeof(SurrealSession).GetMethods()
+            .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
+            .MakeGenericMethod(assembly.GetType("M.Design")!);
+        var task = (Task)fetchMethod.Invoke(session, new object?[] { topUpQuery, fetchTransport, default(CancellationToken) })!;
+        await task;
+
+        // After Fetch, Notes is loaded.
+        var notes = ((System.Collections.IEnumerable)notesProp.GetValue(design)!).Cast<object>().ToList();
+        Assert.Single(notes);
+        Assert.Equal("hello", notes[0].GetType().GetProperty("Body")!.GetValue(notes[0]));
+    }
+
+    [Fact]
+    public async Task FetchAsync_PreservesPendingUserWrites_OnAlreadyLoadedField()
+    {
+        // The HasPendingWrite guard: if the user has already mutated Description on a
+        // tracked entity, a subsequent Fetch that re-hydrates the same row must NOT
+        // overwrite the user's pending value. The guard is the whole reason Fetch needs
+        // a partial-merge variant of Hydrate.
+        const string fixture = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Design {
+                [Id] public partial DesignId Id { get; set; }
+                [Property] public partial string Description { get; set; }
+                [Children] public partial IReadOnlyCollection<Note> Notes { get; }
+            }
+
+            [Table] public partial class Note {
+                [Id] public partial NoteId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [Property] public partial string Body { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+        var assembly = GeneratorHarness.CompileAndLoad(fixture);
+        var designUlid = Ulid.NewUlid().ToString();
+
+        // Initial load — no Includes, so legacy aggregate loader runs and marks all slices.
+        var queryRoot = assembly.GetType("M.Workspace")!
+            .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
+        var loadQuery = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
+        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor(new[] { typeof(string) })!;
+        var designId = designIdCtor.Invoke(new object?[] { designUlid });
+        loadQuery = loadQuery.GetType().GetMethod("WithId")!.Invoke(loadQuery, new[] { designId })!;
+
+        var loadTransport = new RecordingLoadTransport($$"""
+            [{"result":[
+                {
+                    "id":"designs:{{designUlid}}",
+                    "description":"original"
+                }
+            ],"status":"OK"}]
+            """);
+        var lease = await WriterLease.AcquireAsync(loadTransport, "design", default);
+        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
+        var loadTask = (Task)loadAsync.Invoke(null, new object?[] { loadQuery, loadTransport, lease, default(CancellationToken) })!;
+        await loadTask;
+        var session = (SurrealSession)loadTask.GetType().GetProperty("Result")!.GetValue(loadTask)!;
+
+        var design = typeof(SurrealSession).GetMethods()
+            .First(m => m.Name == "Get" && m.IsGenericMethod && m.GetParameters().Length == 1)
+            .MakeGenericMethod(assembly.GetType("M.Design")!)
+            .Invoke(session, new[] { designId })!;
+
+        // User mutates Description.
+        design.GetType().GetProperty("Description")!.SetValue(design, "user-edited");
+
+        // Top-up Fetch returns a "fresh" Description from the DB. The guard must skip
+        // overwriting the user's value.
+        var fetchTransport = new ScriptedTransport($$"""
+            [{"result":[
+                {
+                    "id":"designs:{{designUlid}}",
+                    "description":"db-changed",
+                    "notes":[]
+                }
+            ],"status":"OK"}]
+            """);
+        var fetchQuery = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
+        fetchQuery = fetchQuery.GetType().GetMethod("WithId")!.Invoke(fetchQuery, new[] { designId })!;
+        var includeNotes = assembly.GetType("M.DesignQueryIncludes")!.GetMethod("IncludeNotes")!;
+        var configureType = includeNotes.GetParameters()[1].ParameterType;
+        fetchQuery = includeNotes.Invoke(null, new[] { fetchQuery, MakeConfigure(configureType, _ => { }) })!;
+
+        var fetchMethod = typeof(SurrealSession).GetMethods()
+            .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
+            .MakeGenericMethod(assembly.GetType("M.Design")!);
+        var fetchTask = (Task)fetchMethod.Invoke(session, new object?[] { fetchQuery, fetchTransport, default(CancellationToken) })!;
+        await fetchTask;
+
+        // Description STILL reflects the user's pending write — Fetch did not clobber it.
+        var description = (string)design.GetType().GetProperty("Description")!.GetValue(design)!;
+        Assert.Equal("user-edited", description);
+    }
+
+    [Fact]
+    public async Task FetchAsync_OnClosedSession_Throws()
+    {
+        // Closed sessions reject Fetch — same invariant as every other state-mutating
+        // entry point. ThrowIfClosed runs before any transport call.
         var assembly = GeneratorHarness.CompileAndLoad(LoadFixture);
         var session = new SurrealSession();
 
-        // Build a Query<Design> via reflection to feed FetchAsync's typed parameter.
-        var workspaceType = assembly.GetType("M.Workspace")!;
-        var queryRoot = workspaceType.GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
+        // Close the session by committing.
+        await session.CommitAsync(new RecordingLoadTransport("[{\"result\":null,\"status\":\"OK\"}]"), null, default);
+
+        var queryRoot = assembly.GetType("M.Workspace")!
+            .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
         var query = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
 
         var fetchMethod = typeof(SurrealSession).GetMethods()
             .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
             .MakeGenericMethod(assembly.GetType("M.Design")!);
 
-        var ex = Assert.Throws<NotImplementedException>(() =>
+        // Async-method exceptions get captured into the returned Task, not thrown by
+        // Invoke itself — await the task to surface them.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            try
-            {
-                fetchMethod.Invoke(session, new object?[] { query, null!, default(CancellationToken) });
-            }
-            catch (TargetInvocationException tie) when (tie.InnerException is not null)
-            {
-                throw tie.InnerException;
-            }
+            var task = (Task)fetchMethod.Invoke(session, new object?[] { query, new RecordingLoadTransport("[]"), default(CancellationToken) })!;
+            await task;
         });
-        Assert.Contains("PR8", ex.Message);
+        Assert.Contains("closed", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Helper for Fetch tests: load Design with IncludeConstraints (so Notes stays
+    /// unloaded), return the session, the design's ulid, and the design entity.
+    /// </summary>
+    private static async Task<(SurrealSession Session, string DesignUlid, object Design)> BuildSessionWithIncludedConstraints(Assembly assembly)
+    {
+        var designUlid = Ulid.NewUlid().ToString();
+
+        var queryRoot = assembly.GetType("M.Workspace")!
+            .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
+        var query = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
+        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor(new[] { typeof(string) })!;
+        var designId = designIdCtor.Invoke(new object?[] { designUlid });
+        query = query.GetType().GetMethod("WithId")!.Invoke(query, new[] { designId })!;
+
+        var includeConstraints = assembly.GetType("M.DesignQueryIncludes")!.GetMethod("IncludeConstraints")!;
+        var configureType = includeConstraints.GetParameters()[1].ParameterType;
+        query = includeConstraints.Invoke(null, new[] { query, MakeConfigure(configureType, _ => { }) })!;
+
+        var loadTransport = new RecordingLoadTransport($$"""
+            [{"result":[
+                {
+                    "id":"designs:{{designUlid}}",
+                    "description":"d",
+                    "constraints":[]
+                }
+            ],"status":"OK"}]
+            """);
+        var lease = await WriterLease.AcquireAsync(loadTransport, "design", default);
+        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
+        var task = (Task)loadAsync.Invoke(null, new object?[] { query, loadTransport, lease, default(CancellationToken) })!;
+        await task;
+        var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
+
+        var design = typeof(SurrealSession).GetMethods()
+            .First(m => m.Name == "Get" && m.IsGenericMethod && m.GetParameters().Length == 1)
+            .MakeGenericMethod(assembly.GetType("M.Design")!)
+            .Invoke(session, new[] { designId })!;
+
+        return (session, designUlid, design);
     }
 
     [Fact]

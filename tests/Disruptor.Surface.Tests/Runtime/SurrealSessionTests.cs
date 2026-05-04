@@ -444,6 +444,7 @@ public sealed class SurrealSessionTests
         public void Initialize(SurrealSession session) => Calls.Add("Initialize");
         public void Flush(SurrealSession session)      => Calls.Add("Flush");
         public void Hydrate(JsonElement json, IHydrationSink sink) => Calls.Add("Hydrate");
+        public void HydratePartial(JsonElement json, IHydrationSink sink) => Calls.Add("HydratePartial");
         public void OnDeleting()                       => Calls.Add("OnDeleting");
         public void MarkAllSlicesLoaded(IHydrationSink sink) => Calls.Add("MarkAllSlicesLoaded");
     }

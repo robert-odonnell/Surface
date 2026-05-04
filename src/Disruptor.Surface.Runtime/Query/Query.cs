@@ -86,6 +86,14 @@ public sealed class Query<T>
         => ExecuteIntoSessionAsync(new SurrealSession(), transport, ct);
 
     /// <summary>
+    /// Compile this query to SurrealQL + parameter bindings without executing. Used by
+    /// <see cref="SurrealSession.FetchAsync{T}"/> and any other caller that wants to
+    /// inspect or splice the rendered query before sending.
+    /// </summary>
+    public (string Sql, IReadOnlyDictionary<string, object?>? Bindings) Compile()
+        => QueryCompiler.Compile(Table, Filter, PinnedId, Includes);
+
+    /// <summary>
     /// Compile, execute, and hydrate the query against a caller-supplied
     /// <see cref="SurrealSession"/>. The session receives every traversed slice
     /// (root rows, inline-ref expansions, nested children) through
