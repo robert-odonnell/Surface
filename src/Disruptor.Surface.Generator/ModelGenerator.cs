@@ -204,6 +204,7 @@ public sealed class ModelGenerator : IIncrementalGenerator
         ReferenceRegistryEmitter.Emit(spc, graph);
         SchemaEmitter.Emit(spc, graph);
         QueryRootEmitter.Emit(spc, graph);
+        EdgeQueryRootEmitter.Emit(spc, graph);
 
         foreach (var table in graph.Tables)
         {
@@ -233,6 +234,7 @@ public sealed class ModelGenerator : IIncrementalGenerator
 
             IdEmitter.Emit(spc, table, graph);
             PredicateFactoryEmitter.Emit(spc, table);
+            TraversalBuilderEmitter.Emit(spc, table, graph);
 
             var valid = true;
 

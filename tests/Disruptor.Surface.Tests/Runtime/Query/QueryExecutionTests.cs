@@ -81,8 +81,68 @@ public sealed class QueryExecutionTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_DetachedEntities_HaveNoSession()
+    public async Task ExecuteAsync_WithChildrenInclude_EmitsNestedSubselect()
     {
+        var transport = new RecordingTransport().ScriptResponse(EmptyResultEnvelope);
+
+        var children = new IncludeChildrenNode(
+            ChildTable: "constraints",
+            ParentField: "design",
+            Filter: new EqPredicate("description", "x"),
+            Nested: Array.Empty<IIncludeNode>());
+
+        await new Query<TestEntity>("designs")
+            .WithInclude(children)
+            .ExecuteAsync(transport);
+
+        Assert.Equal(
+            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = $p0) AS constraints FROM designs;",
+            transport.SqlSeen[0]);
+
+        var bindings = (IReadOnlyDictionary<string, object?>)transport.VarsSeen[0]!;
+        Assert.Equal("x", bindings["p0"]);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WithInlineRefInclude_AddsFieldDotStarToRootProjection()
+    {
+        var transport = new RecordingTransport().ScriptResponse(EmptyResultEnvelope);
+
+        await new Query<TestEntity>("designs")
+            .WithInclude(new IncludeInlineRefNode("details"))
+            .ExecuteAsync(transport);
+
+        Assert.Equal("SELECT *, details.* FROM designs;", transport.SqlSeen[0]);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WithPinnedIdAndChildren_AndsRootClauseWithChildScoping()
+    {
+        var transport = new RecordingTransport().ScriptResponse(EmptyResultEnvelope);
+        var pin = new RecordId("designs", "01HX7AF5");
+
+        var children = new IncludeChildrenNode(
+            "constraints", "design", Filter: null, Nested: Array.Empty<IIncludeNode>());
+
+        await new Query<TestEntity>("designs")
+            .WithId(pin)
+            .WithInclude(children)
+            .ExecuteAsync(transport);
+
+        // The root pinning binds first ($p0); no extra params for children since the
+        // nested SELECT only carries the static "design = $parent.id" link.
+        Assert.Equal(
+            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id) AS constraints FROM designs WHERE id = $p0;",
+            transport.SqlSeen[0]);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_BindsEntitiesToInternalSession()
+    {
+        // PR4 evolution: ExecuteAsync now hydrates into an internal SurrealSession so
+        // traversed slices are navigable through the entity API. The session itself is
+        // never exposed; the user gets an IReadOnlyList<T> they can read freely (and
+        // navigate iff the slice was loaded via WithInclude).
         var rowsJson = """
             [{"result":[{"id":"test_entities:01HX7AF5","description":"x"}],"status":"OK"}]
             """;
@@ -92,7 +152,7 @@ public sealed class QueryExecutionTests
             .ExecuteAsync(transport);
 
         var entity = Assert.Single(results);
-        Assert.Null(((IEntity)entity).Session);
+        Assert.NotNull(((IEntity)entity).Session);
     }
 
     private const string EmptyResultEnvelope = "[{\"result\":[],\"status\":\"OK\"}]";
@@ -101,11 +161,12 @@ public sealed class QueryExecutionTests
     public sealed class TestEntity : IEntity
     {
         private RecordId _id;
+        private SurrealSession? _session;
         public string? Description { get; private set; }
 
         public RecordId Id => _id;
-        public SurrealSession? Session => null;
-        public void Bind(SurrealSession session) { }
+        public SurrealSession? Session => _session;
+        public void Bind(SurrealSession session) => _session = session;
         public void Initialize(SurrealSession session) { }
         public void Flush(SurrealSession session) { }
         public void OnDeleting() { }
@@ -118,6 +179,9 @@ public sealed class QueryExecutionTests
                 _id = rid;
             }
             Description = HydrationJson.ReadString(json, "description");
+            // Match the real generator-emitted Hydrate: register with the sink so the
+            // session's identity map (and entity.Session) is populated.
+            sink.Track(this);
         }
     }
 

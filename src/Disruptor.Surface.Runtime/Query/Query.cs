@@ -5,14 +5,15 @@ namespace Disruptor.Surface.Runtime.Query;
 /// <summary>
 /// Read-mode query against a single SurrealDB table. Constructed by the generator's
 /// <c>Workspace.Query.{Table}</c> partial fragment; chained via <see cref="Where"/> /
-/// <see cref="WithId"/>; terminated by <see cref="ExecuteAsync"/> which returns a list of
-/// detached entity instances populated through <c>IEntity.Hydrate</c> with a no-op sink.
+/// <see cref="WithId"/> / <see cref="WithInclude"/>; terminated by <see cref="ExecuteAsync"/>
+/// which returns root-level entities populated through <c>IEntity.Hydrate</c>.
 /// <para>
-/// <b>Detached entities</b>: <c>ExecuteAsync</c> never binds the returned entities to a
-/// session, so reads of <c>[Property]</c> / <c>[Id]</c> resolve from in-memory backing
-/// fields and reads of <c>[Reference]</c> / <c>[Parent]</c> / <c>[Children]</c> /
-/// relations throw via the generated <c>Session</c> accessor. Read mode is for projection
-/// only — to navigate a graph, load the aggregate (<c>Workspace.LoadXAsync</c>).
+/// <b>Hydration model</b>: entities returned by <see cref="ExecuteAsync"/> are tracked in
+/// an internal, never-committed <see cref="SurrealSession"/>. Reads against
+/// <c>[Property]</c> / <c>[Id]</c> work directly off the entity's backing fields; reads
+/// against <c>[Children]</c> / <c>[Reference]</c> / <c>[Parent]</c> / relations work iff
+/// the relevant slice was pulled in via <see cref="WithInclude"/>. Slices that weren't
+/// loaded throw at access time — same shape as load mode (PR7) will surface.
 /// </para>
 /// </summary>
 public sealed class Query<T>
@@ -21,15 +22,17 @@ public sealed class Query<T>
     private readonly string table;
     private readonly IPredicate? filter;
     private readonly RecordId? pinnedId;
+    private readonly IReadOnlyList<IIncludeNode> includes;
 
     /// <summary>Generator entry point. <paramref name="table"/> is the snake-cased SurrealDB table name.</summary>
-    public Query(string table) : this(table, filter: null, pinnedId: null) { }
+    public Query(string table) : this(table, filter: null, pinnedId: null, includes: Array.Empty<IIncludeNode>()) { }
 
-    private Query(string table, IPredicate? filter, RecordId? pinnedId)
+    private Query(string table, IPredicate? filter, RecordId? pinnedId, IReadOnlyList<IIncludeNode> includes)
     {
         this.table = table;
         this.filter = filter;
         this.pinnedId = pinnedId;
+        this.includes = includes;
     }
 
     /// <summary>
@@ -40,7 +43,7 @@ public sealed class Query<T>
     public Query<T> Where(IPredicate predicate)
     {
         var combined = filter is null ? predicate : Predicate.And(filter, predicate);
-        return new Query<T>(table, combined, pinnedId);
+        return new Query<T>(table, combined, pinnedId, includes);
     }
 
     /// <summary>
@@ -48,19 +51,39 @@ public sealed class Query<T>
     /// apply, AND-merged with the id pin.
     /// </summary>
     public Query<T> WithId(IRecordId id)
-        => new(table, filter, RecordId.From(id));
+        => new(table, filter, RecordId.From(id), includes);
+
+    /// <summary>
+    /// Adds a traversal node to the query. The generated <c>Include*</c> extension
+    /// methods on <see cref="Query{T}"/> are the ergonomic surface — this is the
+    /// underlying primitive they call into.
+    /// </summary>
+    public Query<T> WithInclude(IIncludeNode node)
+    {
+        var next = new IIncludeNode[includes.Count + 1];
+        for (var i = 0; i < includes.Count; i++)
+        {
+            next[i] = includes[i];
+        }
+        next[includes.Count] = node;
+        return new Query<T>(table, filter, pinnedId, next);
+    }
 
     /// <summary>
     /// Compiles the AST to SurrealQL, executes via <paramref name="transport"/>, and
-    /// hydrates each row into a fresh detached entity. Returns an empty list if the
-    /// statement returns no rows.
+    /// hydrates each row into a fresh entity. Returns the root-level entities; nested
+    /// rows from <see cref="WithInclude"/> are tracked alongside in an internal session
+    /// reachable via the entities' navigation properties.
     /// </summary>
     public async Task<IReadOnlyList<T>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
     {
-        var (sql, bindings) = QueryCompiler.Compile(table, filter, pinnedId);
+        var (sql, bindings) = QueryCompiler.Compile(table, filter, pinnedId, includes);
         using var doc = await transport.ExecuteAsync(sql, bindings, ct);
         var rs = new SurrealResultSet(doc.RootElement);
         var rows = rs.ResultAt(0);
+
+        var session = new SurrealSession();
+        IHydrationSink sink = session;
 
         var list = new List<T>();
         switch (rows.ValueKind)
@@ -68,40 +91,74 @@ public sealed class Query<T>
             case JsonValueKind.Array:
                 foreach (var row in rows.EnumerateArray())
                 {
-                    list.Add(HydrateOne(row));
+                    list.Add(HydrateOne(row, sink));
                 }
                 break;
             case JsonValueKind.Object:
-                list.Add(HydrateOne(rows));
+                list.Add(HydrateOne(rows, sink));
                 break;
             // Null / Undefined / scalar — no rows.
         }
+
+        // Walk each root row's nested arrays and feed them through Hydrate as well — so
+        // children / inline-ref records emitted by the compiler land in the same session
+        // and reads of [Children] / [Reference] resolve correctly. The compiler's chosen
+        // alias names match what the user asked for via WithInclude, so we descend the
+        // include AST to know exactly which keys to look up.
+        for (var i = 0; i < list.Count; i++)
+        {
+            var rowJson = rows.ValueKind == JsonValueKind.Array
+                ? GetRowAt(rows, i)
+                : rows;
+            HydrateNested(rowJson, includes, sink);
+        }
+
         return list;
 
-        static T HydrateOne(JsonElement row)
+        static T HydrateOne(JsonElement row, IHydrationSink sink)
         {
             var entity = new T();
-            ((IEntity)entity).Hydrate(row, NoOpHydrationSink.Instance);
+            ((IEntity)entity).Hydrate(row, sink);
             return entity;
         }
     }
-}
 
-/// <summary>
-/// <see cref="IHydrationSink"/> that swallows every call. Lets <c>IEntity.Hydrate</c>
-/// run on a freshly-constructed entity to populate its <c>[Property]</c> backing fields
-/// without binding it to a session or recording any parent/reference/edge state. Used by
-/// <see cref="Query{T}.ExecuteAsync"/> for read-mode result hydration.
-/// </summary>
-internal sealed class NoOpHydrationSink : IHydrationSink
-{
-    public static readonly NoOpHydrationSink Instance = new();
+    private static JsonElement GetRowAt(JsonElement array, int index)
+    {
+        var i = 0;
+        foreach (var row in array.EnumerateArray())
+        {
+            if (i == index) return row;
+            i++;
+        }
+        throw new InvalidOperationException($"Row index {index} out of range.");
+    }
 
-    private NoOpHydrationSink() { }
+    /// <summary>
+    /// Recursively hydrate the included slices on a single root row.
+    /// <see cref="IncludeChildrenNode"/> expands to a JSON array under the child-table
+    /// alias; each element gets a fresh entity instance via the node's own
+    /// <see cref="IncludeChildrenNode.Hydrator"/> callback (generator-emitted at codegen
+    /// time, captures the right concrete <c>new T()</c> + <c>Hydrate</c>).
+    /// <see cref="IncludeInlineRefNode"/> is already projected into the row by
+    /// <c>field.*</c> and is picked up by the owning entity's own <c>Hydrate</c> via
+    /// <see cref="HydrationJson.HydrateReference{T}"/>; nothing extra to do here.
+    /// </summary>
+    private static void HydrateNested(JsonElement row, IReadOnlyList<IIncludeNode> nodes, IHydrationSink sink)
+    {
+        foreach (var node in nodes)
+        {
+            if (node is not IncludeChildrenNode children) continue;
+            if (children.Hydrator is null) continue; // ad-hoc node; tests skip nested hydration
+            if (!row.TryGetProperty(children.ChildTable, out var arr)) continue;
+            if (arr.ValueKind != JsonValueKind.Array) continue;
 
-    public void Track(IEntity entity) { }
-    public void Parent(RecordId childId, RecordId parentId) { }
-    public void Reference(RecordId ownerId, string fieldName, RecordId refId) { }
-    public void Edge(RecordId source, string edgeKind, RecordId target) { }
-    public bool IsTracked(IRecordId id) => false;
+            foreach (var childRow in arr.EnumerateArray())
+            {
+                if (childRow.ValueKind != JsonValueKind.Object) continue;
+                children.Hydrator(childRow, sink);
+                HydrateNested(childRow, children.Nested, sink);
+            }
+        }
+    }
 }

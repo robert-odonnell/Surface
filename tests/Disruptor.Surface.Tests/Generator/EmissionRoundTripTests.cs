@@ -125,6 +125,138 @@ public sealed class EmissionRoundTripTests
         Assert.Equal(ulidStr, idValue);
     }
 
+
+
+[Fact]
+    public async Task TraversalQuery_EmitsNestedSelect_AndHydratesChildrenIntoSession()
+    {
+        // Compile a fixture with parent + child, exercise the user-facing query surface
+        // reflectively, and verify (a) the SurrealQL on the wire carries the nested
+        // SELECT with $parent.id scoping, (b) the parent's [Children] accessor returns
+        // the hydrated children — proving the per-include hydrator delegate dispatches
+        // to the right concrete entity type.
+        const string source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Design {
+                [Id] public partial DesignId Id { get; set; }
+                [Property] public partial string Description { get; set; }
+                [Children] public partial IReadOnlyCollection<Constraint> Constraints { get; }
+            }
+
+            [Table] public partial class Constraint {
+                [Id] public partial ConstraintId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [Property] public partial string Description { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+        var assembly = GeneratorHarness.CompileAndLoad(source);
+
+        // Workspace.Query.Designs returns Query<Design>. Pull the static accessor via
+        // reflection.
+        var workspaceType = assembly.GetType("M.Workspace")!;
+        var queryRoot = workspaceType.GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
+        var designQuery = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
+
+        // Call DesignQueryIncludes.IncludeConstraints(query, configure) — extension
+        // method, so it's static on the includes class.
+        var includesClass = assembly.GetType("M.DesignQueryIncludes")!;
+        var includeMethod = includesClass.GetMethod("IncludeConstraints")!;
+
+        // Configure action: invoke ConstraintTraversalBuilder.Where with a filter so we
+        // verify both the children projection AND the user filter compose correctly.
+        var constraintQType = assembly.GetType("M.ConstraintQ")!;
+        var descriptionExpr = constraintQType.GetField("Description")!.GetValue(null)!;
+        var eqMethod = descriptionExpr.GetType().GetMethod("Eq")!;
+        var predicate = eqMethod.Invoke(descriptionExpr, new object?[] { "filtered" });
+
+        var configureType = includeMethod.GetParameters()[1].ParameterType;
+        var configureLambda = MakeConfigure(configureType, builderInstance =>
+        {
+            builderInstance.GetType().GetMethod("Where")!.Invoke(builderInstance, new[] { predicate });
+        });
+
+        var queryWithIncludes = includeMethod.Invoke(null, new[] { designQuery, configureLambda })!;
+
+        // Drive ExecuteAsync against a recording transport that responds with one root
+        // row (a Design) and one nested constraint row. Use real Ulids — RecordIdFormat
+        // validates the value at typed-id construction time.
+        var designUlid = Ulid.NewUlid().ToString();
+        var constraintUlid = Ulid.NewUlid().ToString();
+        var scriptedResponse = $$"""
+            [{"result":[
+                {
+                    "id":"designs:{{designUlid}}",
+                    "description":"design-desc",
+                    "constraints":[
+                        {
+                            "id":"constraints:{{constraintUlid}}",
+                            "description":"filtered",
+                            "design":"designs:{{designUlid}}"
+                        }
+                    ]
+                }
+            ],"status":"OK"}]
+            """;
+        var transport = new ScriptedTransport(scriptedResponse);
+
+        var executeMethod = queryWithIncludes.GetType().GetMethod("ExecuteAsync")!;
+        var task = (Task)executeMethod.Invoke(queryWithIncludes, new object?[] { transport, default(CancellationToken) })!;
+        await task;
+        var resultProp = task.GetType().GetProperty("Result")!;
+        var resultList = (System.Collections.IList)resultProp.GetValue(task)!;
+
+        // Wire-side check: nested SELECT uses $parent.id to scope to the design row.
+        Assert.Single(transport.SqlSeen);
+        var sql = transport.SqlSeen[0];
+        Assert.Contains("SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = $p0) AS constraints FROM designs;", sql);
+
+        // Result-side check: one design, with one navigable constraint child. The
+        // [Children] accessor walks the session's parents dict — proves the per-include
+        // hydrator delegate fired for the constraint row.
+        Assert.Single(resultList);
+        var design = resultList[0]!;
+        var constraintsCol = (System.Collections.IEnumerable)design.GetType().GetProperty("Constraints")!.GetValue(design)!;
+        var constraints = constraintsCol.Cast<object>().ToList();
+        Assert.Single(constraints);
+        Assert.Equal("filtered", constraints[0].GetType().GetProperty("Description")!.GetValue(constraints[0]));
+    }
+
+    /// <summary>
+    /// Build an Action&lt;TBuilder&gt; delegate from a runtime-known builder type without
+    /// needing a generic helper. Used to feed the configure lambda into a generated
+    /// IncludeX extension whose signature is only known via reflection.
+    /// </summary>
+    private static Delegate MakeConfigure(Type actionType, Action<object> body)
+    {
+        var builderType = actionType.GetGenericArguments()[0];
+        var param = System.Linq.Expressions.Expression.Parameter(builderType, "b");
+        var bodyConst = System.Linq.Expressions.Expression.Constant(body);
+        var invoke = System.Linq.Expressions.Expression.Invoke(
+            bodyConst,
+            System.Linq.Expressions.Expression.Convert(param, typeof(object)));
+        var lambda = System.Linq.Expressions.Expression.Lambda(actionType, invoke, param);
+        return lambda.Compile();
+    }
+
+    private sealed class ScriptedTransport : ISurrealTransport
+    {
+        private readonly string responseJson;
+        public List<string> SqlSeen { get; } = new();
+        public ScriptedTransport(string responseJson) => this.responseJson = responseJson;
+        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+        {
+            SqlSeen.Add(sql);
+            return Task.FromResult(JsonDocument.Parse(responseJson));
+        }
+        public ValueTask DisposeAsync() => default;
+    }
+
     // ─────────────────────────── helpers ───────────────────────────
 
     private static object NewEntity(Assembly assembly, string fullName)

@@ -307,4 +307,111 @@ public sealed class EmissionShapeTests
         Assert.DoesNotContain("protected void RemoveRestriction", allSrc);
         Assert.DoesNotContain("protected void ClearRestrictions", allSrc);
     }
+
+    [Fact]
+    public void Emits_TraversalBuilder_PerTable_WithIncludeMethodsAndExtensions()
+    {
+        var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
+        var designBuilder = GeneratorHarness.FindGeneratedFile(result, "DesignTraversalBuilder");
+        Assert.NotNull(designBuilder);
+
+        var src = designBuilder!.ToString();
+
+        // Builder type is sealed and exposes Where + an Include per [Children].
+        Assert.Contains("public sealed class DesignTraversalBuilder", src);
+        Assert.Contains("public DesignTraversalBuilder Where(", src);
+        Assert.Contains("public DesignTraversalBuilder IncludeConstraints(", src);
+        Assert.Contains("global::M.ConstraintTraversalBuilder", src);
+
+        // Generates the AST node with the parent-link field name resolved at codegen time
+        // (not via runtime reflection).
+        Assert.Contains("new global::Disruptor.Surface.Runtime.Query.IncludeChildrenNode(\"constraints\", \"design\"", src);
+
+        // Sibling extension class anchors on Query<Design> with the same surface so
+        // root-level and nested-level Include calls read identically at the call site.
+        Assert.Contains("public static class DesignQueryIncludes", src);
+        Assert.Contains("this global::Disruptor.Surface.Runtime.Query.Query<global::M.Design> query", src);
+        Assert.Contains("query.WithInclude(new global::Disruptor.Surface.Runtime.Query.IncludeChildrenNode(\"constraints\", \"design\"", src);
+    }
+
+    [Fact]
+    public void TraversalBuilder_Skips_PlainReference_KeepsInlineReferenceAndChildren()
+    {
+        // [Reference, Inline] becomes IncludeX(); plain [Reference] (foreign pointer) is
+        // not exposed for traversal — the loader pulls it as id-only and there's no
+        // sensible v1 read shape for arbitrary record links.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Root {
+                [Id] public partial RootId Id { get; set; }
+                [Reference, Inline] public partial Owned? Owned { get; set; }
+                [Reference]         public partial Foreign? Foreign { get; set; }
+                [Children]          public partial IReadOnlyCollection<Child> Children { get; }
+            }
+
+            [Table] public partial class Owned {
+                [Id] public partial OwnedId Id { get; set; }
+            }
+
+            [Table] public partial class Foreign {
+                [Id] public partial ForeignId Id { get; set; }
+            }
+
+            [Table] public partial class Child {
+                [Id] public partial ChildId Id { get; set; }
+                [Parent] public partial Root Root { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+        var (result, _, _, _) = GeneratorHarness.Run(src);
+        var rootBuilder = GeneratorHarness.FindGeneratedFile(result, "RootTraversalBuilder");
+        Assert.NotNull(rootBuilder);
+
+        var s = rootBuilder!.ToString();
+        Assert.Contains("public RootTraversalBuilder IncludeOwned(", s);     // [Reference, Inline]
+        Assert.Contains("public RootTraversalBuilder IncludeChildren(", s);  // [Children]
+        Assert.DoesNotContain("IncludeForeign", s);                          // plain [Reference] skipped
+    }
+
+    [Fact]
+    public void TraversalBuilder_LeafTable_StillEmitsBuilder_WithJustWhere()
+    {
+        // A table with no traversable members (no [Children], no [Reference, Inline])
+        // still gets a builder so the per-Table emit surface stays uniform — the user can
+        // call .Where(...) on it inside a parent's IncludeX configure lambda. The
+        // sibling extension class is suppressed (nothing to anchor on Query<T>).
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Root {
+                [Id] public partial RootId Id { get; set; }
+                [Children] public partial IReadOnlyCollection<Leaf> Leaves { get; }
+            }
+
+            [Table] public partial class Leaf {
+                [Id] public partial LeafId Id { get; set; }
+                [Parent] public partial Root Root { get; set; }
+                [Property] public partial string Description { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+        var (result, _, _, _) = GeneratorHarness.Run(src);
+        var leafBuilder = GeneratorHarness.FindGeneratedFile(result, "LeafTraversalBuilder");
+        Assert.NotNull(leafBuilder);
+
+        var s = leafBuilder!.ToString();
+        Assert.Contains("public sealed class LeafTraversalBuilder", s);
+        Assert.Contains("public LeafTraversalBuilder Where(", s);
+        // No Include* methods — Leaf has none of [Children] / [Reference, Inline].
+        Assert.DoesNotContain("public LeafTraversalBuilder Include", s);
+        // No sibling extension class either.
+        Assert.DoesNotContain("LeafQueryIncludes", s);
+    }
 }

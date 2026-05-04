@@ -64,8 +64,10 @@ internal static class QueryRootEmitter
         sb.AppendLine();
 
         // Internal companion — keeps the {CompositionRoot} surface clean. Singleton: query
-        // factories are stateless, so a per-process instance is fine.
-        sb.Append(indent).Append("public sealed class ").AppendLine(GeneratedClass);
+        // factories are stateless, so a per-process instance is fine. Marked partial so
+        // sibling emitters (EdgeQueryRootEmitter) can graft their own accessors onto the
+        // same class.
+        sb.Append(indent).Append("public sealed partial class ").AppendLine(GeneratedClass);
         sb.Append(indent).AppendLine("{");
         sb.Append(memberIndent).Append("public static readonly ").Append(GeneratedClass).Append(" Instance = new ").Append(GeneratedClass).AppendLine("();");
         sb.AppendLine();
