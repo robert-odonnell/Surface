@@ -75,7 +75,7 @@ internal static class LoadEntryEmitter
         var bodyIndent = $"{memberIndent}    ";
 
         sb.Append(indent)
-          .AppendLine($"/// <summary>Write-mode entry on <c>Query&lt;{aggRoot.Name}&gt;</c>. Acquires the supplied <see cref=\"global::Disruptor.Surface.Runtime.WriterLease\"/> commitment up-front; v1 delegates to the existing <c>{aggRoot.Name}AggregateLoader.PopulateAsync</c>, so the loaded session matches what <c>Workspace.Load{aggRoot.Name}Async</c> produces today.</summary>");
+          .AppendLine($"/// <summary>Write-mode entry on <c>Query&lt;{aggRoot.Name}&gt;</c>. Two paths: with no <c>Include*</c> calls, delegates to the legacy <c>{aggRoot.Name}AggregateLoader.PopulateAsync</c> (matches <c>Workspace.Load{aggRoot.Name}Async</c>); with at least one <c>Include*</c>, the compiler-driven path emits a nested <c>SELECT</c> and hydrates only the user-chosen slice through <see cref=\"global::Disruptor.Surface.Runtime.IHydrationSink\"/>.</summary>");
         sb.Append(indent).Append("public static class ").Append(aggRoot.Name).AppendLine("QueryLoad");
         sb.Append(indent).AppendLine("{");
 
@@ -89,15 +89,10 @@ internal static class LoadEntryEmitter
           .Append(CtFqn).AppendLine(" ct = default)");
         sb.Append(memberIndent).AppendLine("{");
 
-        // Filtered loads (with traversal Includes) deferred to PR6 — the compiler-driven
-        // path needs the new IHydrationSink wiring before it can populate a session.
-        sb.Append(bodyIndent).AppendLine("if (query.Includes.Count > 0)");
-        sb.Append(bodyIndent).AppendLine("{");
-        sb.Append(bodyIndent).AppendLine("    throw new global::System.NotImplementedException(");
-        sb.Append(bodyIndent).AppendLine("        \"Filtered LoadAsync (with Include* traversals) is not implemented yet. Use ExecuteAsync for traversal in read mode, or omit Include* calls for the full-aggregate load.\");");
-        sb.Append(bodyIndent).AppendLine("}");
-        sb.AppendLine();
-
+        // PinnedId is required regardless of which path we take — load mode is single-
+        // aggregate-rooted, and both the legacy aggregate loader and the compiler-driven
+        // path key the SurrealQL on the root id (`FROM {table}:{id}` and `WHERE id = $p0`
+        // respectively). Multi-aggregate atomic load is out of scope.
         sb.Append(bodyIndent).AppendLine("if (query.PinnedId is null)");
         sb.Append(bodyIndent).AppendLine("{");
         sb.Append(bodyIndent).AppendLine("    throw new global::System.InvalidOperationException(");
@@ -105,12 +100,25 @@ internal static class LoadEntryEmitter
         sb.Append(bodyIndent).AppendLine("}");
         sb.AppendLine();
 
+        sb.Append(bodyIndent).Append("var session = new ").Append(SessionFqn).Append('(').Append(refRegistryFqn).AppendLine(");");
+        sb.AppendLine();
+
+        // Two-path body: with Includes, the new compiler-driven path emits its own
+        // nested SELECT and hydrates the user-chosen slice via IHydrationSink. Without
+        // Includes, delegate to the legacy aggregate loader for the full-aggregate
+        // load. Both produce the same SurrealSession shape; only the slice differs.
+        sb.Append(bodyIndent).AppendLine("if (query.Includes.Count > 0)");
+        sb.Append(bodyIndent).AppendLine("{");
+        sb.Append(bodyIndent).AppendLine("    await query.ExecuteIntoSessionAsync(session, transport, ct);");
+        sb.Append(bodyIndent).AppendLine("}");
+        sb.Append(bodyIndent).AppendLine("else");
+        sb.Append(bodyIndent).AppendLine("{");
         // Reconstruct the typed id from the canonical RecordId. RecordIdFormat.Validate
         // already accepted the value when the user constructed their {Root}Id; passing
         // the same string back through the typed ctor is a round-trip with no surprises.
-        sb.Append(bodyIndent).Append("var rootId = new ").Append(idFqn).AppendLine("(query.PinnedId.Value.Value);");
-        sb.Append(bodyIndent).Append("var session = new ").Append(SessionFqn).Append('(').Append(refRegistryFqn).AppendLine(");");
-        sb.Append(bodyIndent).Append("await ").Append(loaderFqn).AppendLine(".PopulateAsync(session, transport, rootId, ct);");
+        sb.Append(bodyIndent).Append("    var rootId = new ").Append(idFqn).AppendLine("(query.PinnedId.Value.Value);");
+        sb.Append(bodyIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(session, transport, rootId, ct);");
+        sb.Append(bodyIndent).AppendLine("}");
         sb.AppendLine();
 
         // Lease is taken in the signature to enforce the "this is write-mode" contract.

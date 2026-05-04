@@ -20,7 +20,9 @@ public sealed class SurrealSessionTests
 
         session.Track(entity);
 
-        Assert.Equal(new[] { "Bind", "Initialize", "Flush" }, entity.Calls.ToArray());
+        // PR7: MarkAllSlicesLoaded runs after Flush — fresh-entity Track owns the entire
+        // state, so every slice on the entity is marked loaded as part of the lifecycle.
+        Assert.Equal(new[] { "Bind", "Initialize", "Flush", "MarkAllSlicesLoaded" }, entity.Calls.ToArray());
         Assert.Same(session, entity.BoundSession);
     }
 
@@ -373,7 +375,7 @@ public sealed class SurrealSessionTests
 
         Assert.Same(fresh, tracked);
         Assert.Same(session, fresh.BoundSession);
-        Assert.Equal(new[] { "Bind", "Initialize", "Flush" }, fresh.Calls.ToArray());
+        Assert.Equal(new[] { "Bind", "Initialize", "Flush", "MarkAllSlicesLoaded" }, fresh.Calls.ToArray());
         Assert.Contains(session.Log.Entries, e => e.Op == CommandOp.Delete);
         Assert.Contains(session.Log.Entries, e => e.Op == CommandOp.Create);
     }
@@ -443,6 +445,7 @@ public sealed class SurrealSessionTests
         public void Flush(SurrealSession session)      => Calls.Add("Flush");
         public void Hydrate(JsonElement json, IHydrationSink sink) => Calls.Add("Hydrate");
         public void OnDeleting()                       => Calls.Add("OnDeleting");
+        public void MarkAllSlicesLoaded(IHydrationSink sink) => Calls.Add("MarkAllSlicesLoaded");
     }
 
     /// <summary>Test-only relation kind so the typed Relate&lt;TKind&gt; surface can be exercised without the generator.</summary>

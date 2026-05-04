@@ -98,6 +98,9 @@ internal static class AggregateLoaderEmitter
         // Hydrate the root entity. Hydrate also picks up the inlined `details.*` etc.
         sb.Append("            var __root = new global::").Append(root.FullName).AppendLine("();");
         sb.AppendLine("            ((global::Disruptor.Surface.Runtime.IEntity)__root).Hydrate(rootRow.Value, sink);");
+        // Legacy aggregate loader is full-aggregate by definition — mark every slice on
+        // the root loaded so reads against [Children] / [Reference] / relations succeed.
+        sb.AppendLine("            ((global::Disruptor.Surface.Runtime.IEntity)__root).MarkAllSlicesLoaded(sink);");
         sb.AppendLine();
 
         // Hydrate non-root members from their per-table-name array on the root row.
@@ -367,6 +370,8 @@ internal static class AggregateLoaderEmitter
         sb.AppendLine("                if (row.ValueKind != JsonValueKind.Object) continue;");
         sb.AppendLine("                var entity = new T();");
         sb.AppendLine("                ((global::Disruptor.Surface.Runtime.IEntity)entity).Hydrate(row, sink);");
+        sb.AppendLine("                // Full-aggregate load: every slice on every loaded child is marked so reads succeed.");
+        sb.AppendLine("                ((global::Disruptor.Surface.Runtime.IEntity)entity).MarkAllSlicesLoaded(sink);");
         sb.AppendLine("            }");
         sb.AppendLine("        }");
         sb.AppendLine();

@@ -44,6 +44,16 @@ public interface IHydrationSink
 
     /// <summary>True iff <paramref name="id"/> is already tracked in the session — used by hydration helpers to dedup multi-owner inline-reference expansions.</summary>
     bool IsTracked(IRecordId id);
+
+    /// <summary>
+    /// Records that the slice rooted at <c>(ownerId, fieldName)</c> has been hydrated.
+    /// Generator-emitted property reads check this flag before walking the in-memory
+    /// cache; absence throws <see cref="LoadShapeViolationException"/> with a hint at
+    /// <see cref="SurrealSession.FetchAsync{T}"/>. The legacy aggregate loader marks
+    /// every known slice; the compiler-driven path in <see cref="Query{T}.ExecuteIntoSessionAsync"/>
+    /// marks only what the user explicitly Included.
+    /// </summary>
+    void MarkSliceLoaded(RecordId ownerId, string fieldName);
 }
 
 /// <summary>
@@ -104,6 +114,17 @@ public interface IEntity
     /// records I reference).
     /// </summary>
     void OnDeleting();
+
+    /// <summary>
+    /// Calls <see cref="IHydrationSink.MarkSliceLoaded"/> once per known slice on this
+    /// entity ([Property], [Parent], [Reference], [Children], and forward/inverse
+    /// relation collections). Used by the legacy aggregate loader and
+    /// <see cref="SurrealSession.Track{T}"/> to declare "I own all this entity's
+    /// state". The compiler-driven query path marks slices selectively via
+    /// <see cref="IHydrationSink.MarkSliceLoaded"/> directly, so this method isn't
+    /// called there.
+    /// </summary>
+    void MarkAllSlicesLoaded(IHydrationSink sink);
 }
 
 /// <summary>
@@ -133,6 +154,13 @@ public sealed class SurrealSession : IHydrationSink
     private readonly Dictionary<RecordId, RecordId> parents = [];
     private readonly Dictionary<(RecordId Owner, string Field), RecordId> references = [];
     private readonly Dictionary<(RecordId Source, string Edge, RecordId Target), bool> edges = [];
+
+    // Per-entity load-shape tracking. Each set lists the field names on that entity
+    // whose slice has been hydrated (or freshly authored via Track<T>). Generator-emitted
+    // property reads consult this map and throw LoadShapeViolationException if a slice
+    // they need wasn't loaded — the strict-with-escape contract that PR8's Fetch
+    // extends.
+    private readonly Dictionary<RecordId, HashSet<string>> loadedSlices = [];
 
     // One-shot lifecycle invariant: a session represents one loaded snapshot plus one
     // pending mutation batch. Successful CommitAsync or AbandonAsync flips `_closed` to
@@ -376,11 +404,40 @@ public sealed class SurrealSession : IHydrationSink
         Record(Command.Create(entity.Id));
         entity.Initialize(this);
         entity.Flush(this);
+        // Fresh-entity Track: the user owns the entire state, so every slice is
+        // implicitly "loaded" — there's no DB row to compare against. Mark all of them
+        // so subsequent reads of [Children] / [Reference] / relations return the local
+        // dicts (which may be empty for a brand-new entity, and that's fine).
+        entity.MarkAllSlicesLoaded(this);
         return entity;
     }
 
     /// <summary>True iff <paramref name="id"/> is currently tracked (loaded or freshly minted) in this session.</summary>
     public bool IsTracked(IRecordId id) => entities.ContainsKey(RecordId.From(id));
+
+    /// <summary>
+    /// True iff the slice rooted at <c>(<paramref name="owner"/>, <paramref name="fieldName"/>)</c>
+    /// has been marked loaded — by the legacy aggregate loader (which marks every slice),
+    /// by <see cref="Track{T}"/> (fresh-entity, marks every slice), or by the compiler-
+    /// driven traversal path (which marks only Included slices). Generator-emitted
+    /// property reads consult this before walking the in-memory cache.
+    /// </summary>
+    public bool IsSliceLoaded(IRecordId owner, string fieldName)
+        => loadedSlices.TryGetValue(RecordId.From(owner), out var set)
+           && set.Contains(fieldName);
+
+    /// <summary>
+    /// Stub for the strict-with-escape extension query landing in PR8. Throws
+    /// <see cref="NotImplementedException"/> for now — the typed
+    /// <see cref="LoadShapeViolationException"/> raised by unloaded property reads
+    /// points users at this method. PR8 will run <paramref name="query"/> through the
+    /// transport, hydrate the response into <c>this</c> session via a partial-merge
+    /// sink, and mark the newly-loaded slices.
+    /// </summary>
+    public Task FetchAsync<T>(Query.Query<T> query, ISurrealTransport transport, CancellationToken ct = default)
+        where T : class, IEntity, new()
+        => throw new NotImplementedException(
+            "SurrealSession.FetchAsync is not implemented yet (PR8). For now, design the load shape up-front via Workspace.Query.{Root}.WithId(id).Include*(...).LoadAsync(...).");
 
     /// <summary>
     /// Single-field write. <paramref name="value"/> may be any scalar, an
@@ -709,6 +766,17 @@ public sealed class SurrealSession : IHydrationSink
         ThrowIfClosed();
         edges[(source, edgeKind, target)] = true;
         relationsAtStart.Add((edgeKind, source, target));
+    }
+
+    void IHydrationSink.MarkSliceLoaded(RecordId ownerId, string fieldName)
+    {
+        ThrowIfClosed();
+        if (!loadedSlices.TryGetValue(ownerId, out var set))
+        {
+            set = new HashSet<string>(StringComparer.Ordinal);
+            loadedSlices[ownerId] = set;
+        }
+        set.Add(fieldName);
     }
 
     // ──────────────────────────── private helpers ───────────────────────────

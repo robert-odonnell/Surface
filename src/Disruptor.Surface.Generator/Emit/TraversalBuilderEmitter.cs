@@ -182,7 +182,7 @@ internal static class TraversalBuilderEmitter
             sb.Append(bodyIndent).AppendLine("var (__filter, __nested) = __sub.Build();");
             sb.Append(bodyIndent).Append("return query.WithInclude(new ").Append(IncludeChildrenNodeFqn)
               .Append("(\"").Append(child.ChildTable).Append("\", \"").Append(child.ParentField).Append("\", __filter, __nested, ")
-              .Append(child.HydratorExpression).AppendLine("));");
+              .Append(child.HydratorExpression).Append(", \"").Append(child.SliceKey).AppendLine("\"));");
             sb.Append(memberIndent).AppendLine("}");
         }
 
@@ -221,7 +221,7 @@ internal static class TraversalBuilderEmitter
         sb.Append(bodyIndent).AppendLine("var (__filter, __nested) = __sub.Build();");
         sb.Append(bodyIndent).Append("_nested.Add(new ").Append(IncludeChildrenNodeFqn)
           .Append("(\"").Append(child.ChildTable).Append("\", \"").Append(child.ParentField).Append("\", __filter, __nested, ")
-          .Append(child.HydratorExpression).AppendLine("));");
+          .Append(child.HydratorExpression).Append(", \"").Append(child.SliceKey).AppendLine("\"));");
         sb.Append(bodyIndent).AppendLine("return this;");
         sb.Append(memberIndent).AppendLine("}");
     }
@@ -280,7 +280,8 @@ internal static class TraversalBuilderEmitter
                 ChildTypeName: childTable.Name,
                 ChildNamespace: childTable.Namespace,
                 ParentField: parentField,
-                HydratorExpression: hydratorExpr));
+                HydratorExpression: hydratorExpr,
+                SliceKey: SurrealNaming.ToFieldName(p.Name)));
         }
         return result;
     }
@@ -307,5 +308,6 @@ internal static class TraversalBuilderEmitter
         string ChildTypeName,
         string ChildNamespace,
         string ParentField,
-        string HydratorExpression);
+        string HydratorExpression,
+        string SliceKey);
 }

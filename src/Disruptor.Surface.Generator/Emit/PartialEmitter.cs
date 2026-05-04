@@ -143,6 +143,13 @@ internal static class PartialEmitter
         builder.AppendLine();
         EmitOnDeleting(builder, memberIndent);
 
+        // MarkAllSlicesLoaded — used by the legacy aggregate loader (after Hydrate) and by
+        // SurrealSession.Track<T> (fresh-entity path) to declare every slice on this entity
+        // is "loaded". The compiler-driven path marks slices selectively via the include
+        // AST instead.
+        builder.AppendLine();
+        EmitMarkAllSlicesLoaded(builder, memberIndent, table);
+
         builder
             .Append(indent)
             .AppendLine("}");
@@ -235,6 +242,18 @@ internal static class PartialEmitter
             .Append(indent).AppendLine("{")
             .Append(indent).AppendLine("    if (_session is null) _pendingWrites?.RemoveAll(p => p.Field == field);")
             .Append(indent).AppendLine($"    else _session.UnsetField((({EntityInterface})this).Id, field, kind);")
+            .Append(indent).AppendLine("}")
+            .AppendLine()
+            // Slice guard — called by every navigable read path before walking the in-memory
+            // cache. Reuses the protected Session accessor so unbound entities still get the
+            // existing "not tracked" error; once bound, the slice check throws
+            // LoadShapeViolationException with a hint at FetchAsync.
+            .Append(indent)
+            .AppendLine("private void __EnsureSliceLoaded(string sliceKey, string fetchHint)")
+            .Append(indent).AppendLine("{")
+            .Append(indent).Append("    var __id = ((").Append(EntityInterface).AppendLine(")this).Id;")
+            .Append(indent).AppendLine("    if (!Session.IsSliceLoaded(__id, sliceKey))")
+            .Append(indent).AppendLine("        throw new global::Disruptor.Surface.Runtime.LoadShapeViolationException(__id, sliceKey, fetchHint);")
             .Append(indent).AppendLine("}");
     }
 
@@ -487,21 +506,9 @@ internal static class PartialEmitter
         var declared = p.Type.FullyQualifiedName;
         var typeArg = StripNullable(declared);
         var access = FormatAccessibility(p.DeclaredAccessibility);
-        var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
-
-        if (!p.HasSetter && !p.HasInitOnlySetter)
-        {
-            builder.Append(indent)
-                .Append(access)
-                .Append(" partial ")
-                .Append(declared)
-                .Append(' ')
-                .Append(p.Name)
-                .Append(" => Session.GetParent<")
-                .Append(typeArg)
-                .AppendLine(">(this);");
-            return;
-        }
+        var sliceKey = SurrealNaming.ToFieldName(p.Name);
+        var sliceKeyLit = Quote(sliceKey);
+        var fetchHintLit = Quote($".Include{p.Name}() on the parent query");
 
         builder
             .Append(indent)
@@ -513,18 +520,25 @@ internal static class PartialEmitter
             .Append(indent)
             .AppendLine("{")
             .Append(indent)
-            .Append("    get => Session.GetParent<")
-            .Append(typeArg)
-            .AppendLine(">(this);")
-            .Append(indent)
-            .Append("    ")
-            .AppendLine(p.HasInitOnlySetter ? "init" : "set")
-            .Append(indent)
-            .Append("        => __WriteField(")
-            .Append(fieldLit)
-            .AppendLine(", value, global::Disruptor.Surface.Runtime.FieldKind.Parent);")
-            .Append(indent)
-            .AppendLine("}");
+            .AppendLine("    get")
+            .Append(indent).AppendLine("    {")
+            .Append(indent).Append("        __EnsureSliceLoaded(").Append(sliceKeyLit).Append(", ").Append(fetchHintLit).AppendLine(");")
+            .Append(indent).Append("        return Session.GetParent<").Append(typeArg).AppendLine(">(this);")
+            .Append(indent).AppendLine("    }");
+
+        if (p.HasSetter || p.HasInitOnlySetter)
+        {
+            builder
+                .Append(indent)
+                .Append("    ")
+                .AppendLine(p.HasInitOnlySetter ? "init" : "set")
+                .Append(indent)
+                .Append("        => __WriteField(")
+                .Append(sliceKeyLit)
+                .AppendLine(", value, global::Disruptor.Surface.Runtime.FieldKind.Parent);");
+        }
+
+        builder.Append(indent).AppendLine("}");
     }
 
     private static void EmitChildrenProperty(StringBuilder builder, string indent, PropertyModel p)
@@ -533,6 +547,9 @@ internal static class PartialEmitter
         var element = p.Type.ElementType ?? p.Type;
         var (elementTypeArg, elementNameExpr) = ResolveElement(element);
         var access = FormatAccessibility(p.DeclaredAccessibility);
+        var sliceKey = SurrealNaming.ToFieldName(p.Name);
+        var sliceKeyLit = Quote(sliceKey);
+        var fetchHintLit = Quote($".Include{p.Name}(...) on the parent query");
 
         builder
             .Append(indent)
@@ -540,12 +557,15 @@ internal static class PartialEmitter
             .Append(" partial ")
             .Append(declared)
             .Append(' ')
-            .Append(p.Name)
-            .Append(" => Session.QueryChildren<")
-            .Append(elementTypeArg)
-            .Append(">(this, ")
-            .Append(elementNameExpr)
-            .AppendLine(");");
+            .AppendLine(p.Name)
+            .Append(indent).AppendLine("{")
+            .Append(indent).AppendLine("    get")
+            .Append(indent).AppendLine("    {")
+            .Append(indent).Append("        __EnsureSliceLoaded(").Append(sliceKeyLit).Append(", ").Append(fetchHintLit).AppendLine(");")
+            .Append(indent).Append("        return Session.QueryChildren<")
+            .Append(elementTypeArg).Append(">(this, ").Append(elementNameExpr).AppendLine(");")
+            .Append(indent).AppendLine("    }")
+            .Append(indent).AppendLine("}");
     }
 
     /// <summary>
@@ -568,27 +588,9 @@ internal static class PartialEmitter
         var typeArg = StripNullable(declared);
         var access = FormatAccessibility(p.DeclaredAccessibility);
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
+        var fetchHintLit = Quote($".Include{p.Name}() on the parent query");
         var nullable = p.Type.IsNullable;
         var getMethod = nullable ? "GetReferenceOrDefault" : "GetReference";
-
-        if (!p.HasSetter && !p.HasInitOnlySetter)
-        {
-            builder
-                .Append(indent)
-                .Append(access)
-                .Append(" partial ")
-                .Append(declared)
-                .Append(' ')
-                .Append(p.Name)
-                .Append(" => Session.")
-                .Append(getMethod)
-                .Append('<')
-                .Append(typeArg)
-                .Append(">(this, ")
-                .Append(fieldLit)
-                .AppendLine(");");
-            return;
-        }
 
         builder
             .Append(indent)
@@ -597,48 +599,40 @@ internal static class PartialEmitter
             .Append(declared)
             .Append(' ')
             .AppendLine(p.Name)
-            .Append(indent)
-            .AppendLine("{")
-            .Append(indent)
-            .Append("    get => Session.")
-            .Append(getMethod)
-            .Append('<')
-            .Append(typeArg)
-            .Append(">(this, ")
-            .Append(fieldLit)
-            .AppendLine(");")
-            .Append(indent)
-            .Append("    ")
-            .AppendLine(p.HasInitOnlySetter ? "init" : "set");
+            .Append(indent).AppendLine("{")
+            .Append(indent).AppendLine("    get")
+            .Append(indent).AppendLine("    {")
+            .Append(indent).Append("        __EnsureSliceLoaded(").Append(fieldLit).Append(", ").Append(fetchHintLit).AppendLine(");")
+            .Append(indent).Append("        return Session.").Append(getMethod).Append('<').Append(typeArg)
+            .Append(">(this, ").Append(fieldLit).AppendLine(");")
+            .Append(indent).AppendLine("    }");
 
-        if (nullable)
+        if (p.HasSetter || p.HasInitOnlySetter)
         {
             builder
                 .Append(indent)
-                .AppendLine("    {")
-                .Append(indent)
-                .Append("        if (value is null) __ClearField(")
-                .Append(fieldLit)
-                .AppendLine(", global::Disruptor.Surface.Runtime.FieldKind.Reference);")
-                .Append(indent)
-                .Append("        else __WriteField(")
-                .Append(fieldLit)
-                .AppendLine(", value, global::Disruptor.Surface.Runtime.FieldKind.Reference);")
-                .Append(indent)
-                .AppendLine("    }");
-        }
-        else
-        {
-            builder
-                .Append(indent)
-                .Append("        => __WriteField(")
-                .Append(fieldLit)
-                .AppendLine(", value, global::Disruptor.Surface.Runtime.FieldKind.Reference);");
+                .Append("    ")
+                .AppendLine(p.HasInitOnlySetter ? "init" : "set");
+
+            if (nullable)
+            {
+                builder
+                    .Append(indent).AppendLine("    {")
+                    .Append(indent).Append("        if (value is null) __ClearField(")
+                    .Append(fieldLit).AppendLine(", global::Disruptor.Surface.Runtime.FieldKind.Reference);")
+                    .Append(indent).Append("        else __WriteField(")
+                    .Append(fieldLit).AppendLine(", value, global::Disruptor.Surface.Runtime.FieldKind.Reference);")
+                    .Append(indent).AppendLine("    }");
+            }
+            else
+            {
+                builder
+                    .Append(indent).Append("        => __WriteField(")
+                    .Append(fieldLit).AppendLine(", value, global::Disruptor.Surface.Runtime.FieldKind.Reference);");
+            }
         }
 
-        builder
-            .Append(indent)
-            .AppendLine("}");
+        builder.Append(indent).AppendLine("}");
     }
 
     /// <summary>
@@ -663,6 +657,9 @@ internal static class PartialEmitter
 
         var forwardKindFullName = ForwardKindFullNameFor(p.RelationKindFullName, p.RelationRole, graph);
         var crossAggregate = forwardKindFullName is not null && graph.IsCrossAggregate(forwardKindFullName);
+        var sliceKey = SurrealNaming.ToFieldName(p.Name);
+        var sliceKeyLit = Quote(sliceKey);
+        var fetchHintLit = Quote($"a Workspace.Query.Edges.* query covering {p.Name}");
 
         if (crossAggregate)
         {
@@ -673,12 +670,14 @@ internal static class PartialEmitter
                 .Append(" partial ")
                 .Append(declared)
                 .Append(' ')
-                .Append(p.Name)
-                .Append(" => Session.")
-                .Append(method)
-                .Append('<')
-                .Append(kindMarker)
-                .AppendLine(">(this);");
+                .AppendLine(p.Name)
+                .Append(indent).AppendLine("{")
+                .Append(indent).AppendLine("    get")
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        __EnsureSliceLoaded(").Append(sliceKeyLit).Append(", ").Append(fetchHintLit).AppendLine(");")
+                .Append(indent).Append("        return Session.").Append(method).Append('<').Append(kindMarker).AppendLine(">(this);")
+                .Append(indent).AppendLine("    }")
+                .Append(indent).AppendLine("}");
             return;
         }
 
@@ -697,14 +696,15 @@ internal static class PartialEmitter
             .Append(" partial ")
             .Append(declared)
             .Append(' ')
-            .Append(p.Name)
-            .Append(" => Session.")
-            .Append(directionalMethod)
-            .Append('<')
-            .Append(kindMarker)
-            .Append(", ")
-            .Append(elementArg)
-            .AppendLine(">(this);");
+            .AppendLine(p.Name)
+            .Append(indent).AppendLine("{")
+            .Append(indent).AppendLine("    get")
+            .Append(indent).AppendLine("    {")
+            .Append(indent).Append("        __EnsureSliceLoaded(").Append(sliceKeyLit).Append(", ").Append(fetchHintLit).AppendLine(");")
+            .Append(indent).Append("        return Session.").Append(directionalMethod).Append('<')
+            .Append(kindMarker).Append(", ").Append(elementArg).AppendLine(">(this);")
+            .Append(indent).AppendLine("    }")
+            .Append(indent).AppendLine("}");
     }
 
     /// <summary>
@@ -906,6 +906,41 @@ internal static class PartialEmitter
             .Append("void ")
             .Append(EntityInterface)
             .AppendLine(".OnDeleting() => OnDeleting();");
+    }
+
+    /// <summary>
+    /// Emits <c>IEntity.MarkAllSlicesLoaded</c> — one <see cref="IHydrationSink.MarkSliceLoaded"/>
+    /// call per navigable slice on this entity. Slice keys are snake-cased C# property names
+    /// (matches the keys the read paths look up via <see cref="SurrealSession.IsSliceLoaded"/>).
+    /// Skipped: <c>[Id]</c> (the entity itself) and scalar <c>[Property]</c> (always loaded
+    /// with the row's <c>*</c> projection — no slice check on the read path).
+    /// </summary>
+    private static void EmitMarkAllSlicesLoaded(StringBuilder builder, string indent, TableModel table)
+    {
+        builder
+            .Append(indent)
+            .Append("void ")
+            .Append(EntityInterface)
+            .Append(".MarkAllSlicesLoaded(").Append(HydrationSinkType).AppendLine(" sink)")
+            .Append(indent).AppendLine("{")
+            .Append(indent).AppendLine($"    var __id = (({EntityInterface})this).Id;");
+
+        foreach (var p in table.Properties)
+        {
+            // Skip [Id] (the entity itself) and scalar [Property] (no slice check).
+            if (p.Kinds.HasFlag(PropertyKind.Id)) continue;
+            if (p.Kinds.HasFlag(PropertyKind.Property) && p.RelationRole == RelationRole.None) continue;
+            // [Parent] / [Reference] / [Children] / forward+inverse relation kinds — all
+            // get a slice mark keyed on the snake-cased property name.
+            var sliceKey = SurrealNaming.ToFieldName(p.Name);
+            builder
+                .Append(indent)
+                .Append("    sink.MarkSliceLoaded(__id, \"")
+                .Append(sliceKey)
+                .AppendLine("\");");
+        }
+
+        builder.Append(indent).AppendLine("}");
     }
 
     // ──────────────────────────── Hydrate emission ──────────────────────────

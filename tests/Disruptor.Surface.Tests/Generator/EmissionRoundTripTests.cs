@@ -258,6 +258,158 @@ public sealed class EmissionRoundTripTests
     }
 
 [Fact]
+    public async Task LoadAsync_FilteredSlice_IncludedReadsSucceed_OutsideReadsThrow()
+    {
+        // Strict-with-escape contract: a filtered LoadAsync only marks the user-Included
+        // slices loaded. Reads against [Children] outside the loaded slice throw
+        // LoadShapeViolationException naming the missing field. The fixture has TWO
+        // [Children] on Design (Constraints + Notes) so we can include one and verify
+        // the other throws.
+        const string twoSliceFixture = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Design {
+                [Id] public partial DesignId Id { get; set; }
+                [Property] public partial string Description { get; set; }
+                [Children] public partial IReadOnlyCollection<Constraint> Constraints { get; }
+                [Children] public partial IReadOnlyCollection<Note> Notes { get; }
+            }
+
+            [Table] public partial class Constraint {
+                [Id] public partial ConstraintId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [Property] public partial string Description { get; set; }
+            }
+
+            [Table] public partial class Note {
+                [Id] public partial NoteId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [Property] public partial string Body { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+        var assembly = GeneratorHarness.CompileAndLoad(twoSliceFixture);
+        var designUlid = Ulid.NewUlid().ToString();
+
+        var queryRoot = assembly.GetType("M.Workspace")!
+            .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
+        var query = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
+        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor(new[] { typeof(string) })!;
+        query = query.GetType().GetMethod("WithId")!.Invoke(query, new[] { designIdCtor.Invoke(new object?[] { designUlid }) })!;
+
+        // Include Constraints, NOT Notes.
+        var includesClass = assembly.GetType("M.DesignQueryIncludes")!;
+        var includeConstraints = includesClass.GetMethod("IncludeConstraints")!;
+        var configureType = includeConstraints.GetParameters()[1].ParameterType;
+        query = includeConstraints.Invoke(null, new[] { query, MakeConfigure(configureType, _ => { }) })!;
+
+        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
+        var transport = new RecordingLoadTransport($$"""
+            [{"result":[
+                {
+                    "id":"designs:{{designUlid}}",
+                    "description":"d",
+                    "constraints":[]
+                }
+            ],"status":"OK"}]
+            """);
+        var lease = await WriterLease.AcquireAsync(transport, "design", default);
+
+        var task = (Task)loadAsync.Invoke(null, new object?[] { query, transport, lease, default(CancellationToken) })!;
+        await task;
+        var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
+
+        var designId = designIdCtor.Invoke(new object?[] { designUlid });
+        var design = typeof(SurrealSession).GetMethods()
+            .First(m => m.Name == "Get" && m.IsGenericMethod && m.GetParameters().Length == 1)
+            .MakeGenericMethod(assembly.GetType("M.Design")!)
+            .Invoke(session, new[] { designId })!;
+
+        // Constraints (Included): read succeeds.
+        var constraintsProp = design.GetType().GetProperty("Constraints")!;
+        var constraints = (System.Collections.IEnumerable)constraintsProp.GetValue(design)!;
+        Assert.Empty(constraints);
+
+        // Description ([Property]): always loaded with `*`.
+        Assert.Equal("d", design.GetType().GetProperty("Description")!.GetValue(design));
+
+        // Notes (NOT Included): read throws LoadShapeViolationException.
+        var notesProp = design.GetType().GetProperty("Notes")!;
+        var ex = Assert.Throws<LoadShapeViolationException>(() =>
+        {
+            try { _ = notesProp.GetValue(design); }
+            catch (TargetInvocationException tie) when (tie.InnerException is not null) { throw tie.InnerException; }
+        });
+        Assert.Equal("notes", ex.Field);
+        Assert.Contains("FetchAsync", ex.Message);
+    }
+
+    [Fact]
+    public async Task LoadAsync_LegacyPath_LoadsAllSlices_AllReadsSucceed()
+    {
+        // Migration check: the legacy aggregate-loader path (no Include* calls) marks
+        // every slice on every loaded entity. Existing user code that loads via this
+        // path keeps working — every navigable read returns rather than throwing.
+        var assembly = GeneratorHarness.CompileAndLoad(LoadFixture);
+        var query = BuildPinnedDesignQuery(assembly, out var designUlid);
+        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
+
+        var transport = new RecordingLoadTransport(BuildEmptyLoadResponse(designUlid));
+        var lease = await WriterLease.AcquireAsync(transport, "design", default);
+
+        var task = (Task)loadAsync.Invoke(null, new object?[] { query, transport, lease, default(CancellationToken) })!;
+        await task;
+        var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
+
+        var designIdType = assembly.GetType("M.DesignId")!;
+        var designId = designIdType.GetConstructor(new[] { typeof(string) })!.Invoke(new object?[] { designUlid });
+        var design = typeof(SurrealSession).GetMethods()
+            .First(m => m.Name == "Get" && m.IsGenericMethod && m.GetParameters().Length == 1)
+            .MakeGenericMethod(assembly.GetType("M.Design")!)
+            .Invoke(session, new[] { designId })!;
+
+        // After legacy load, the [Children] read returns the empty in-memory collection
+        // — no throw — because MarkAllSlicesLoaded ran during the loader's hydration.
+        var constraintsCol = (System.Collections.IEnumerable)design.GetType().GetProperty("Constraints")!.GetValue(design)!;
+        Assert.Empty(constraintsCol);
+    }
+
+    [Fact]
+    public void FetchAsync_ThrowsNotImplementedException()
+    {
+        // PR7 stub for the strict-with-escape exit. PR8 wires the partial-merge hydrator;
+        // for now reads that hit the throw point at this method by name.
+        var assembly = GeneratorHarness.CompileAndLoad(LoadFixture);
+        var session = new SurrealSession();
+
+        // Build a Query<Design> via reflection to feed FetchAsync's typed parameter.
+        var workspaceType = assembly.GetType("M.Workspace")!;
+        var queryRoot = workspaceType.GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
+        var query = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
+
+        var fetchMethod = typeof(SurrealSession).GetMethods()
+            .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
+            .MakeGenericMethod(assembly.GetType("M.Design")!);
+
+        var ex = Assert.Throws<NotImplementedException>(() =>
+        {
+            try
+            {
+                fetchMethod.Invoke(session, new object?[] { query, null!, default(CancellationToken) });
+            }
+            catch (TargetInvocationException tie) when (tie.InnerException is not null)
+            {
+                throw tie.InnerException;
+            }
+        });
+        Assert.Contains("PR8", ex.Message);
+    }
+
+    [Fact]
     public async Task LoadAsync_EmptyIncludes_DelegatesToAggregateLoader()
     {
         // PR5 v1: Query<TRoot>.LoadAsync(transport, lease) with no Include* calls fires
@@ -288,26 +440,63 @@ public sealed class EmissionRoundTripTests
     }
 
     [Fact]
-    public async Task LoadAsync_WithIncludes_Throws_NotImplementedException()
+    public async Task LoadAsync_WithIncludes_UsesCompilerDrivenPath_AndHydratesSlice()
     {
+        // PR6: LoadAsync with at least one Include* call no longer throws — the new
+        // compiler-driven path emits a nested SELECT, hydrates the chosen slice into
+        // the supplied SurrealSession, and returns it for the caller to mutate / commit.
+        // This test pins the wire shape (NOT the legacy aggregate-loader's `FROM
+        // table:literal` flat shape) and confirms the children are reachable through
+        // the parent's [Children] accessor.
         var assembly = GeneratorHarness.CompileAndLoad(LoadFixture);
-        var query = BuildPinnedDesignQuery(assembly, out _);
+        var query = BuildPinnedDesignQuery(assembly, out var designUlid);
 
-        // Add an Include — the compiler-driven LoadAsync lands in PR6, so for now the
-        // user-facing surface throws with a clear pointer at ExecuteAsync.
         var withIncludes = AppendIncludeConstraints(assembly, query);
 
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
-        var transport = new RecordingLoadTransport("[]");
+
+        var constraintUlid = Ulid.NewUlid().ToString();
+        var scriptedResponse = $$"""
+            [{"result":[
+                {
+                    "id":"designs:{{designUlid}}",
+                    "description":"d",
+                    "constraints":[
+                        {
+                            "id":"constraints:{{constraintUlid}}",
+                            "description":"c",
+                            "design":"designs:{{designUlid}}"
+                        }
+                    ]
+                }
+            ],"status":"OK"}]
+            """;
+        var transport = new RecordingLoadTransport(scriptedResponse);
         var lease = await WriterLease.AcquireAsync(transport, "design", default);
 
-        var ex = await Assert.ThrowsAsync<NotImplementedException>(async () =>
-        {
-            var task = (Task)loadAsync.Invoke(null, new object?[] { withIncludes, transport, lease, default(CancellationToken) })!;
-            await task;
-        });
-        Assert.Contains("Filtered LoadAsync", ex.Message);
-        Assert.Contains("ExecuteAsync", ex.Message);
+        var task = (Task)loadAsync.Invoke(null, new object?[] { withIncludes, transport, lease, default(CancellationToken) })!;
+        await task;
+        var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
+
+        // Wire shape: nested SELECT, parameterised id (NOT `FROM designs:literal`).
+        var loadSql = transport.NonLeaseSqlSeen.Single();
+        Assert.Contains("(SELECT * FROM constraints WHERE design = $parent.id) AS constraints", loadSql);
+        Assert.Contains("FROM designs WHERE id = $p0", loadSql);
+        Assert.DoesNotContain($"FROM designs:{designUlid}", loadSql);
+
+        // Session check: root + children present, navigable through [Children].
+        var designIdType = assembly.GetType("M.DesignId")!;
+        var designId = designIdType.GetConstructor(new[] { typeof(string) })!.Invoke(new object?[] { designUlid });
+        var getMethod = typeof(SurrealSession).GetMethods()
+            .First(m => m.Name == "Get" && m.IsGenericMethod && m.GetParameters().Length == 1)
+            .MakeGenericMethod(assembly.GetType("M.Design")!);
+        var design = getMethod.Invoke(session, new[] { designId })!;
+        Assert.NotNull(design);
+
+        var constraints = ((System.Collections.IEnumerable)design.GetType().GetProperty("Constraints")!.GetValue(design)!)
+            .Cast<object>().ToList();
+        Assert.Single(constraints);
+        Assert.Equal("c", constraints[0].GetType().GetProperty("Description")!.GetValue(constraints[0]));
     }
 
     [Fact]

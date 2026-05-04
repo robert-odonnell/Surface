@@ -36,6 +36,13 @@ public sealed record IncludeInlineRefNode(string Field) : IIncludeNode;
 /// <see cref="Nested"/> describes further descent inside the subselect — which inline
 /// refs to expand on the child rows and which grandchildren to pull through.
 /// <para>
+/// <see cref="ParentSliceKey"/> is the field name marked loaded on the enclosing parent
+/// once this slice is hydrated — usually the snake-cased C# property name. Decoupled
+/// from <see cref="ChildTable"/> because the user can rename the [Children] property
+/// (e.g. <c>partial IReadOnlyCollection&lt;UserStory&gt; Stories</c>: child table is
+/// <c>user_stories</c>, slice key is <c>stories</c>).
+/// </para>
+/// <para>
 /// <see cref="Hydrator"/> is the generator-emitted callback that instantiates a fresh
 /// entity of the right CLR type and runs <c>IEntity.Hydrate</c> against the row JSON.
 /// Captured at codegen time so the runtime never needs reflection / type discovery to
@@ -49,4 +56,5 @@ public sealed record IncludeChildrenNode(
     string ParentField,
     IPredicate? Filter,
     IReadOnlyList<IIncludeNode> Nested,
-    Action<System.Text.Json.JsonElement, IHydrationSink>? Hydrator = null) : IIncludeNode;
+    Action<System.Text.Json.JsonElement, IHydrationSink>? Hydrator = null,
+    string? ParentSliceKey = null) : IIncludeNode;

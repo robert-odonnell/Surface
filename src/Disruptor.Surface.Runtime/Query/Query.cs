@@ -82,14 +82,33 @@ public sealed class Query<T>
     /// rows from <see cref="WithInclude"/> are tracked alongside in an internal session
     /// reachable via the entities' navigation properties.
     /// </summary>
-    public async Task<IReadOnlyList<T>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
+    public Task<IReadOnlyList<T>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
+        => ExecuteIntoSessionAsync(new SurrealSession(), transport, ct);
+
+    /// <summary>
+    /// Compile, execute, and hydrate the query against a caller-supplied
+    /// <see cref="SurrealSession"/>. The session receives every traversed slice
+    /// (root rows, inline-ref expansions, nested children) through
+    /// <see cref="IHydrationSink"/>. Returns the root-level entities; the rest of the
+    /// graph is reachable through them.
+    /// <para>
+    /// LoadAsync (write-mode) calls this with a session newed up against the model's
+    /// <see cref="IReferenceRegistry"/>; <see cref="ExecuteAsync"/> (read-mode) calls it
+    /// with a throw-away session. Direct callers can hydrate multiple queries into one
+    /// session — useful for batched read-then-mutate flows — though the typical path is
+    /// the generated <c>LoadAsync</c> extension.
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(
+        SurrealSession session,
+        ISurrealTransport transport,
+        CancellationToken ct = default)
     {
         var (sql, bindings) = QueryCompiler.Compile(Table, Filter, PinnedId, Includes);
         using var doc = await transport.ExecuteAsync(sql, bindings, ct);
         var rs = new SurrealResultSet(doc.RootElement);
         var rows = rs.ResultAt(0);
 
-        var session = new SurrealSession();
         IHydrationSink sink = session;
 
         var list = new List<T>();
@@ -142,29 +161,48 @@ public sealed class Query<T>
     }
 
     /// <summary>
-    /// Recursively hydrate the included slices on a single root row.
+    /// Recursively hydrate the included slices on a single row and mark each visited
+    /// slice as loaded on the row's owner.
     /// <see cref="IncludeChildrenNode"/> expands to a JSON array under the child-table
     /// alias; each element gets a fresh entity instance via the node's own
     /// <see cref="IncludeChildrenNode.Hydrator"/> callback (generator-emitted at codegen
     /// time, captures the right concrete <c>new T()</c> + <c>Hydrate</c>).
     /// <see cref="IncludeInlineRefNode"/> is already projected into the row by
     /// <c>field.*</c> and is picked up by the owning entity's own <c>Hydrate</c> via
-    /// <see cref="HydrationJson.HydrateReference{T}"/>; nothing extra to do here.
+    /// <see cref="HydrationJson.HydrateReference{T}"/>; we still mark the slice loaded
+    /// so the read path knows the user asked for it.
     /// </summary>
     private static void HydrateNested(JsonElement row, IReadOnlyList<IIncludeNode> nodes, IHydrationSink sink)
     {
+        var hasOwnerId = HydrationJson.TryReadRecordId(row, "id", out var ownerId);
+
         foreach (var node in nodes)
         {
-            if (node is not IncludeChildrenNode children) continue;
-            if (children.Hydrator is null) continue; // ad-hoc node; tests skip nested hydration
-            if (!row.TryGetProperty(children.ChildTable, out var arr)) continue;
-            if (arr.ValueKind != JsonValueKind.Array) continue;
-
-            foreach (var childRow in arr.EnumerateArray())
+            switch (node)
             {
-                if (childRow.ValueKind != JsonValueKind.Object) continue;
-                children.Hydrator(childRow, sink);
-                HydrateNested(childRow, children.Nested, sink);
+                case IncludeInlineRefNode inlineRef:
+                    if (hasOwnerId)
+                    {
+                        sink.MarkSliceLoaded(ownerId, inlineRef.Field);
+                    }
+                    break;
+
+                case IncludeChildrenNode children:
+                    if (hasOwnerId && children.ParentSliceKey is { } sliceKey)
+                    {
+                        sink.MarkSliceLoaded(ownerId, sliceKey);
+                    }
+                    if (children.Hydrator is null) continue; // ad-hoc node; tests skip nested hydration
+                    if (!row.TryGetProperty(children.ChildTable, out var arr)) continue;
+                    if (arr.ValueKind != JsonValueKind.Array) continue;
+
+                    foreach (var childRow in arr.EnumerateArray())
+                    {
+                        if (childRow.ValueKind != JsonValueKind.Object) continue;
+                        children.Hydrator(childRow, sink);
+                        HydrateNested(childRow, children.Nested, sink);
+                    }
+                    break;
             }
         }
     }

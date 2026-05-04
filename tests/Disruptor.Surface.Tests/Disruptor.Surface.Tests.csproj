@@ -19,6 +19,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Disruptor.Surface.Runtime\Disruptor.Surface.Runtime.csproj" />
     <ProjectReference Include="..\..\src\Disruptor.Surface.Generator\Disruptor.Surface.Generator.csproj" />
+    <ProjectReference Include="..\..\src\Disruptor.Surface.Sample\Disruptor.Surface.Sample.csproj" />
   </ItemGroup>
 
 </Project>

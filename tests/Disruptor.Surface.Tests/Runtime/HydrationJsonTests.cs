@@ -142,5 +142,6 @@ public sealed class HydrationJsonTests
         }
 
         public void OnDeleting() { }
+        public void MarkAllSlicesLoaded(IHydrationSink sink) { }
     }
 }

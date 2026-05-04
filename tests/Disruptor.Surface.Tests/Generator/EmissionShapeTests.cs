@@ -410,21 +410,28 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
-    public void LoadAsync_RejectsFilteredQueries_AndUnpinnedQueries()
+    public void LoadAsync_BranchesOnIncludes_AndRequiresPinnedId()
     {
-        // Two preconditions encoded into the body: traversal Includes still throw NIE
-        // (gate for PR6), and a missing WithId throws InvalidOperationException with a
-        // hint at the right call.
+        // PR6: filtered loads use the compiler-driven path (no NIE throw). Two
+        // preconditions remain: a missing WithId still throws InvalidOperationException
+        // with a hint at the right call, and the Includes-non-empty branch routes through
+        // ExecuteIntoSessionAsync rather than the legacy aggregate loader.
         var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
         var loadFile = GeneratorHarness.FindGeneratedFile(result, "DesignQueryLoad");
         Assert.NotNull(loadFile);
 
         var src = loadFile!.ToString();
-        Assert.Contains("if (query.Includes.Count > 0)", src);
-        Assert.Contains("throw new global::System.NotImplementedException", src);
+
         Assert.Contains("if (query.PinnedId is null)", src);
         Assert.Contains("throw new global::System.InvalidOperationException", src);
         Assert.Contains(".WithId(DesignId)", src);
+
+        // Two-path body: Includes non-empty → ExecuteIntoSessionAsync; empty → legacy
+        // aggregate loader. The NIE throw is gone in PR6.
+        Assert.Contains("if (query.Includes.Count > 0)", src);
+        Assert.Contains("await query.ExecuteIntoSessionAsync(session, transport, ct);", src);
+        Assert.Contains("global::Disruptor.Surface.Runtime.DesignAggregateLoader.PopulateAsync", src);
+        Assert.DoesNotContain("NotImplementedException", src);
     }
 
     [Fact]
