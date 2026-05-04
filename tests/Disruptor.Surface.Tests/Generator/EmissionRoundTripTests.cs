@@ -95,9 +95,9 @@ public sealed class EmissionRoundTripTests
         // the session's pending state. The value travels in the parameters dictionary
         // (not inlined in the SQL) — the emitter binds via $p0 / $p1 / … bindings.
         var rendered = session.RenderBatch();
-        Assert.Contains("designs:", rendered.Sql);
-        Assert.Contains("description", rendered.Sql);
-        Assert.Contains("round-trip test", rendered.Parameters.Values.OfType<string>());
+        Assert.Contains("designs:", rendered);
+        Assert.Contains("description", rendered);
+        Assert.Contains("round-trip test", rendered);
     }
 
     [Fact]
@@ -173,15 +173,15 @@ public sealed class EmissionRoundTripTests
         var constraintQType = assembly.GetType("M.ConstraintQ")!;
         var descriptionExpr = constraintQType.GetField("Description")!.GetValue(null)!;
         var eqMethod = descriptionExpr.GetType().GetMethod("Eq")!;
-        var predicate = eqMethod.Invoke(descriptionExpr, new object?[] { "filtered" });
+        var predicate = eqMethod.Invoke(descriptionExpr, ["filtered"]);
 
         var configureType = includeMethod.GetParameters()[1].ParameterType;
         var configureLambda = MakeConfigure(configureType, builderInstance =>
         {
-            builderInstance.GetType().GetMethod("Where")!.Invoke(builderInstance, new[] { predicate });
+            builderInstance.GetType().GetMethod("Where")!.Invoke(builderInstance, [predicate]);
         });
 
-        var queryWithIncludes = includeMethod.Invoke(null, new[] { designQuery, configureLambda })!;
+        var queryWithIncludes = includeMethod.Invoke(null, [designQuery, configureLambda])!;
 
         // Drive ExecuteAsync against a recording transport that responds with one root
         // row (a Design) and one nested constraint row. Use real Ulids — RecordIdFormat
@@ -206,15 +206,16 @@ public sealed class EmissionRoundTripTests
         var transport = new ScriptedTransport(scriptedResponse);
 
         var executeMethod = queryWithIncludes.GetType().GetMethod("ExecuteAsync")!;
-        var task = (Task)executeMethod.Invoke(queryWithIncludes, new object?[] { transport, default(CancellationToken) })!;
+        var task = (Task)executeMethod.Invoke(queryWithIncludes, [transport, default(CancellationToken)])!;
         await task;
         var resultProp = task.GetType().GetProperty("Result")!;
         var resultList = (System.Collections.IList)resultProp.GetValue(task)!;
 
         // Wire-side check: nested SELECT uses $parent.id to scope to the design row.
+        // The user-supplied filter ("filtered") inlines as a SurrealQL string literal.
         Assert.Single(transport.SqlSeen);
         var sql = transport.SqlSeen[0];
-        Assert.Contains("SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = $p0) AS constraints FROM designs;", sql);
+        Assert.Contains("(SELECT * FROM constraints WHERE design = $parent.id AND description = \"filtered\") AS constraints", sql);
 
         // Result-side check: one design, with one navigable constraint child. The
         // [Children] accessor walks the session's parents dict — proves the per-include
@@ -244,12 +245,11 @@ public sealed class EmissionRoundTripTests
         return lambda.Compile();
     }
 
-    private sealed class ScriptedTransport : ISurrealTransport
+    private sealed class ScriptedTransport(string responseJson) : ISurrealTransport
     {
-        private readonly string responseJson;
-        public List<string> SqlSeen { get; } = new();
-        public ScriptedTransport(string responseJson) => this.responseJson = responseJson;
-        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+        public List<string> SqlSeen { get; } = [];
+
+        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
         {
             SqlSeen.Add(sql);
             return Task.FromResult(JsonDocument.Parse(responseJson));
@@ -298,14 +298,14 @@ public sealed class EmissionRoundTripTests
         var queryRoot = assembly.GetType("M.Workspace")!
             .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
         var query = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
-        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor(new[] { typeof(string) })!;
-        query = query.GetType().GetMethod("WithId")!.Invoke(query, new[] { designIdCtor.Invoke(new object?[] { designUlid }) })!;
+        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor([typeof(string)])!;
+        query = query.GetType().GetMethod("WithId")!.Invoke(query, [designIdCtor.Invoke([designUlid])])!;
 
         // Include Constraints, NOT Notes.
         var includesClass = assembly.GetType("M.DesignQueryIncludes")!;
         var includeConstraints = includesClass.GetMethod("IncludeConstraints")!;
         var configureType = includeConstraints.GetParameters()[1].ParameterType;
-        query = includeConstraints.Invoke(null, new[] { query, MakeConfigure(configureType, _ => { }) })!;
+        query = includeConstraints.Invoke(null, [query, MakeConfigure(configureType, _ => { })])!;
 
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
         var transport = new RecordingLoadTransport($$"""
@@ -319,15 +319,15 @@ public sealed class EmissionRoundTripTests
             """);
         var lease = await WriterLease.AcquireAsync(transport, "design", default);
 
-        var task = (Task)loadAsync.Invoke(null, new object?[] { query, transport, lease, default(CancellationToken) })!;
+        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, default(CancellationToken)])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
-        var designId = designIdCtor.Invoke(new object?[] { designUlid });
+        var designId = designIdCtor.Invoke([designUlid]);
         var design = typeof(SurrealSession).GetMethods()
             .First(m => m.Name == "Get" && m.IsGenericMethod && m.GetParameters().Length == 1)
             .MakeGenericMethod(assembly.GetType("M.Design")!)
-            .Invoke(session, new[] { designId })!;
+            .Invoke(session, [designId])!;
 
         // Constraints (Included): read succeeds.
         var constraintsProp = design.GetType().GetProperty("Constraints")!;
@@ -361,16 +361,16 @@ public sealed class EmissionRoundTripTests
         var transport = new RecordingLoadTransport(BuildEmptyLoadResponse(designUlid));
         var lease = await WriterLease.AcquireAsync(transport, "design", default);
 
-        var task = (Task)loadAsync.Invoke(null, new object?[] { query, transport, lease, default(CancellationToken) })!;
+        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, default(CancellationToken)])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
         var designIdType = assembly.GetType("M.DesignId")!;
-        var designId = designIdType.GetConstructor(new[] { typeof(string) })!.Invoke(new object?[] { designUlid });
+        var designId = designIdType.GetConstructor([typeof(string)])!.Invoke([designUlid]);
         var design = typeof(SurrealSession).GetMethods()
             .First(m => m.Name == "Get" && m.IsGenericMethod && m.GetParameters().Length == 1)
             .MakeGenericMethod(assembly.GetType("M.Design")!)
-            .Invoke(session, new[] { designId })!;
+            .Invoke(session, [designId])!;
 
         // After legacy load, the [Children] read returns the empty in-memory collection
         // — no throw — because MarkAllSlicesLoaded ran during the loader's hydration.
@@ -425,11 +425,13 @@ public sealed class EmissionRoundTripTests
         var queryRoot = assembly.GetType("M.Workspace")!
             .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
         var topUpQuery = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
-        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor(new[] { typeof(string) })!;
-        topUpQuery = topUpQuery.GetType().GetMethod("WithId")!.Invoke(topUpQuery, new[] { designIdCtor.Invoke(new object?[] { designUlid }) })!;
+        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor([typeof(string)])!;
+        topUpQuery = topUpQuery.GetType().GetMethod("WithId")!.Invoke(topUpQuery, [designIdCtor.Invoke([designUlid])
+            ]
+        )!;
         var includeNotes = assembly.GetType("M.DesignQueryIncludes")!.GetMethod("IncludeNotes")!;
         var configureType = includeNotes.GetParameters()[1].ParameterType;
-        topUpQuery = includeNotes.Invoke(null, new[] { topUpQuery, MakeConfigure(configureType, _ => { }) })!;
+        topUpQuery = includeNotes.Invoke(null, [topUpQuery, MakeConfigure(configureType, _ => { })])!;
 
         var noteUlid = Ulid.NewUlid().ToString();
         var fetchTransport = new ScriptedTransport($$"""
@@ -451,7 +453,7 @@ public sealed class EmissionRoundTripTests
         var fetchMethod = typeof(SurrealSession).GetMethods()
             .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
             .MakeGenericMethod(assembly.GetType("M.Design")!);
-        var task = (Task)fetchMethod.Invoke(session, new object?[] { topUpQuery, fetchTransport, default(CancellationToken) })!;
+        var task = (Task)fetchMethod.Invoke(session, [topUpQuery, fetchTransport, default(CancellationToken)])!;
         await task;
 
         // After Fetch, Notes is loaded.
@@ -494,9 +496,9 @@ public sealed class EmissionRoundTripTests
         var queryRoot = assembly.GetType("M.Workspace")!
             .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
         var loadQuery = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
-        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor(new[] { typeof(string) })!;
-        var designId = designIdCtor.Invoke(new object?[] { designUlid });
-        loadQuery = loadQuery.GetType().GetMethod("WithId")!.Invoke(loadQuery, new[] { designId })!;
+        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor([typeof(string)])!;
+        var designId = designIdCtor.Invoke([designUlid]);
+        loadQuery = loadQuery.GetType().GetMethod("WithId")!.Invoke(loadQuery, [designId])!;
 
         var loadTransport = new RecordingLoadTransport($$"""
             [{"result":[
@@ -508,14 +510,14 @@ public sealed class EmissionRoundTripTests
             """);
         var lease = await WriterLease.AcquireAsync(loadTransport, "design", default);
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
-        var loadTask = (Task)loadAsync.Invoke(null, new object?[] { loadQuery, loadTransport, lease, default(CancellationToken) })!;
+        var loadTask = (Task)loadAsync.Invoke(null, [loadQuery, loadTransport, lease, default(CancellationToken)])!;
         await loadTask;
         var session = (SurrealSession)loadTask.GetType().GetProperty("Result")!.GetValue(loadTask)!;
 
         var design = typeof(SurrealSession).GetMethods()
             .First(m => m.Name == "Get" && m.IsGenericMethod && m.GetParameters().Length == 1)
             .MakeGenericMethod(assembly.GetType("M.Design")!)
-            .Invoke(session, new[] { designId })!;
+            .Invoke(session, [designId])!;
 
         // User mutates Description.
         design.GetType().GetProperty("Description")!.SetValue(design, "user-edited");
@@ -532,15 +534,15 @@ public sealed class EmissionRoundTripTests
             ],"status":"OK"}]
             """);
         var fetchQuery = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
-        fetchQuery = fetchQuery.GetType().GetMethod("WithId")!.Invoke(fetchQuery, new[] { designId })!;
+        fetchQuery = fetchQuery.GetType().GetMethod("WithId")!.Invoke(fetchQuery, [designId])!;
         var includeNotes = assembly.GetType("M.DesignQueryIncludes")!.GetMethod("IncludeNotes")!;
         var configureType = includeNotes.GetParameters()[1].ParameterType;
-        fetchQuery = includeNotes.Invoke(null, new[] { fetchQuery, MakeConfigure(configureType, _ => { }) })!;
+        fetchQuery = includeNotes.Invoke(null, [fetchQuery, MakeConfigure(configureType, _ => { })])!;
 
         var fetchMethod = typeof(SurrealSession).GetMethods()
             .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
             .MakeGenericMethod(assembly.GetType("M.Design")!);
-        var fetchTask = (Task)fetchMethod.Invoke(session, new object?[] { fetchQuery, fetchTransport, default(CancellationToken) })!;
+        var fetchTask = (Task)fetchMethod.Invoke(session, [fetchQuery, fetchTransport, default(CancellationToken)])!;
         await fetchTask;
 
         // Description STILL reflects the user's pending write — Fetch did not clobber it.
@@ -571,7 +573,9 @@ public sealed class EmissionRoundTripTests
         // Invoke itself — await the task to surface them.
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            var task = (Task)fetchMethod.Invoke(session, new object?[] { query, new RecordingLoadTransport("[]"), default(CancellationToken) })!;
+            var task = (Task)fetchMethod.Invoke(session, [query, new RecordingLoadTransport("[]"), default(CancellationToken)
+                ]
+            )!;
             await task;
         });
         Assert.Contains("closed", ex.Message, StringComparison.OrdinalIgnoreCase);
@@ -588,13 +592,13 @@ public sealed class EmissionRoundTripTests
         var queryRoot = assembly.GetType("M.Workspace")!
             .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
         var query = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
-        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor(new[] { typeof(string) })!;
-        var designId = designIdCtor.Invoke(new object?[] { designUlid });
-        query = query.GetType().GetMethod("WithId")!.Invoke(query, new[] { designId })!;
+        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor([typeof(string)])!;
+        var designId = designIdCtor.Invoke([designUlid]);
+        query = query.GetType().GetMethod("WithId")!.Invoke(query, [designId])!;
 
         var includeConstraints = assembly.GetType("M.DesignQueryIncludes")!.GetMethod("IncludeConstraints")!;
         var configureType = includeConstraints.GetParameters()[1].ParameterType;
-        query = includeConstraints.Invoke(null, new[] { query, MakeConfigure(configureType, _ => { }) })!;
+        query = includeConstraints.Invoke(null, [query, MakeConfigure(configureType, _ => { })])!;
 
         var loadTransport = new RecordingLoadTransport($$"""
             [{"result":[
@@ -607,14 +611,14 @@ public sealed class EmissionRoundTripTests
             """);
         var lease = await WriterLease.AcquireAsync(loadTransport, "design", default);
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
-        var task = (Task)loadAsync.Invoke(null, new object?[] { query, loadTransport, lease, default(CancellationToken) })!;
+        var task = (Task)loadAsync.Invoke(null, [query, loadTransport, lease, default(CancellationToken)])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
         var design = typeof(SurrealSession).GetMethods()
             .First(m => m.Name == "Get" && m.IsGenericMethod && m.GetParameters().Length == 1)
             .MakeGenericMethod(assembly.GetType("M.Design")!)
-            .Invoke(session, new[] { designId })!;
+            .Invoke(session, [designId])!;
 
         return (session, designUlid, design);
     }
@@ -635,7 +639,7 @@ public sealed class EmissionRoundTripTests
         var transport = new RecordingLoadTransport(BuildEmptyLoadResponse(designUlid));
         var lease = await WriterLease.AcquireAsync(transport, "design", default);
 
-        var task = (Task)loadAsync.Invoke(null, new object?[] { query, transport, lease, default(CancellationToken) })!;
+        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, default(CancellationToken)])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -684,23 +688,25 @@ public sealed class EmissionRoundTripTests
         var transport = new RecordingLoadTransport(scriptedResponse);
         var lease = await WriterLease.AcquireAsync(transport, "design", default);
 
-        var task = (Task)loadAsync.Invoke(null, new object?[] { withIncludes, transport, lease, default(CancellationToken) })!;
+        var task = (Task)loadAsync.Invoke(null, [withIncludes, transport, lease, default(CancellationToken)])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
-        // Wire shape: nested SELECT, parameterised id (NOT `FROM designs:literal`).
+        // Wire shape: compiler-driven nested SELECT (NOT the legacy aggregate loader's
+        // `FROM designs:<literal>` flat shape). The pinned id inlines as a record literal
+        // in the WHERE clause, leaving the FROM as the bare table name.
         var loadSql = transport.NonLeaseSqlSeen.Single();
         Assert.Contains("(SELECT * FROM constraints WHERE design = $parent.id) AS constraints", loadSql);
-        Assert.Contains("FROM designs WHERE id = $p0", loadSql);
+        Assert.Contains($"FROM designs WHERE id = designs:{designUlid}", loadSql);
         Assert.DoesNotContain($"FROM designs:{designUlid}", loadSql);
 
         // Session check: root + children present, navigable through [Children].
         var designIdType = assembly.GetType("M.DesignId")!;
-        var designId = designIdType.GetConstructor(new[] { typeof(string) })!.Invoke(new object?[] { designUlid });
+        var designId = designIdType.GetConstructor([typeof(string)])!.Invoke([designUlid]);
         var getMethod = typeof(SurrealSession).GetMethods()
             .First(m => m.Name == "Get" && m.IsGenericMethod && m.GetParameters().Length == 1)
             .MakeGenericMethod(assembly.GetType("M.Design")!);
-        var design = getMethod.Invoke(session, new[] { designId })!;
+        var design = getMethod.Invoke(session, [designId])!;
         Assert.NotNull(design);
 
         var constraints = ((System.Collections.IEnumerable)design.GetType().GetProperty("Constraints")!.GetValue(design)!)
@@ -726,7 +732,7 @@ public sealed class EmissionRoundTripTests
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            var task = (Task)loadAsync.Invoke(null, new object?[] { query, transport, lease, default(CancellationToken) })!;
+            var task = (Task)loadAsync.Invoke(null, [query, transport, lease, default(CancellationToken)])!;
             await task;
         });
         Assert.Contains("WithId", ex.Message);
@@ -762,12 +768,12 @@ public sealed class EmissionRoundTripTests
         var query = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
 
         // Construct DesignId from a real Ulid and pin via WithId.
-        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor(new[] { typeof(string) })!;
-        var designId = designIdCtor.Invoke(new object?[] { designUlid });
+        var designIdCtor = assembly.GetType("M.DesignId")!.GetConstructor([typeof(string)])!;
+        var designId = designIdCtor.Invoke([designUlid]);
 
         // Query<Design>.WithId takes IRecordId — DesignId implements it.
         var withId = query.GetType().GetMethod("WithId")!;
-        return withId.Invoke(query, new[] { designId })!;
+        return withId.Invoke(query, [designId])!;
     }
 
     private static object AppendIncludeConstraints(Assembly assembly, object query)
@@ -777,7 +783,7 @@ public sealed class EmissionRoundTripTests
         var configureType = includeMethod.GetParameters()[1].ParameterType;
         // No-op configure delegate; we just need a non-empty Includes list to trip the throw.
         var noopAction = MakeConfigure(configureType, _ => { });
-        return includeMethod.Invoke(null, new[] { query, noopAction })!;
+        return includeMethod.Invoke(null, [query, noopAction])!;
     }
 
     private static string BuildEmptyLoadResponse(string designUlid)
@@ -802,16 +808,14 @@ public sealed class EmissionRoundTripTests
     /// the lease's <c>SELECT seq FROM writer_lease:design</c> so assertions about the
     /// load SQL don't have to step around it.
     /// </summary>
-    private sealed class RecordingLoadTransport : ISurrealTransport
+    private sealed class RecordingLoadTransport(string loadResponse) : ISurrealTransport
     {
-        private readonly string loadResponse;
-        public List<string> SqlSeen { get; } = new();
-        public RecordingLoadTransport(string loadResponse) => this.loadResponse = loadResponse;
+        public List<string> SqlSeen { get; } = [];
 
         public List<string> NonLeaseSqlSeen
             => SqlSeen.Where(s => !s.Contains("writer_lease", StringComparison.Ordinal)).ToList();
 
-        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
         {
             SqlSeen.Add(sql);
             // Lease acquisition: return a `seq:0` row so AcquireAsync doesn't fail.
@@ -840,8 +844,8 @@ public sealed class EmissionRoundTripTests
     /// <summary>Captures every SQL string passed through the transport for assertion.</summary>
     private sealed class RecordingTransport : ISurrealTransport
     {
-        public List<string> SqlSeen { get; } = new();
-        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+        public List<string> SqlSeen { get; } = [];
+        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
         {
             SqlSeen.Add(sql);
             return Task.FromResult(JsonDocument.Parse("[]"));

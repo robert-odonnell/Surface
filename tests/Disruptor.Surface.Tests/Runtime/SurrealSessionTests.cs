@@ -459,7 +459,7 @@ public sealed class SurrealSessionTests
     private sealed class NullTransport : ISurrealTransport
     {
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
             => Task.FromResult(JsonDocument.Parse("[]"));
     }
 
@@ -467,7 +467,7 @@ public sealed class SurrealSessionTests
     private sealed class ThrowingTransport(Exception ex) : ISurrealTransport
     {
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
             => Task.FromException<JsonDocument>(ex);
     }
 }

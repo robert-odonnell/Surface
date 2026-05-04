@@ -55,7 +55,7 @@ public sealed class EdgeQuery<TIn, TOut>
     /// </summary>
     public EdgeQuery<TIn, TOut> WhereIn(IEnumerable<TIn> ids)
     {
-        var snap = SnapshotIds<TIn>(ids);
+        var snap = SnapshotIds(ids);
         return new(edgeTable, snap, outFilter, extra);
     }
 
@@ -65,7 +65,7 @@ public sealed class EdgeQuery<TIn, TOut>
     /// </summary>
     public EdgeQuery<TIn, TOut> WhereOut(IEnumerable<TOut> ids)
     {
-        var snap = SnapshotIds<TOut>(ids);
+        var snap = SnapshotIds(ids);
         return new(edgeTable, inFilter, snap, extra);
     }
 
@@ -88,10 +88,10 @@ public sealed class EdgeQuery<TIn, TOut>
     /// </summary>
     public async Task<IReadOnlyList<EdgeRow>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
     {
-        var (sql, bindings) = EdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra);
-        using var doc = await transport.ExecuteAsync(sql, bindings, ct);
+        var sql = EdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra);
+        using var doc = await transport.ExecuteAsync(sql, ct);
         var rs = new SurrealResultSet(doc.RootElement);
-        var rows = rs.ResultAt(0);
+        var rows = rs.ResultAt();
 
         var list = new List<EdgeRow>();
         switch (rows.ValueKind)
@@ -148,14 +148,14 @@ public sealed class EdgeQuery<TIn, TOut>
 /// </summary>
 internal static class EdgeQueryCompiler
 {
-    public static (string Sql, IReadOnlyDictionary<string, object?>? Bindings) Compile(
+    public static string Compile(
         string edgeTable,
         IReadOnlyList<IRecordId>? inFilter,
         IReadOnlyList<IRecordId>? outFilter,
         IPredicate? extra)
     {
         var sb = new StringBuilder();
-        sb.Append("SELECT id, in, out FROM ").Append(SurrealFormatter.Identifier(edgeTable));
+        sb.Append("SELECT id, in, out FROM ").Append(edgeTable.Identifier());
 
         // Build a small synthetic AST so we can reuse QueryCompiler's predicate visitor for
         // the side filters + the user-supplied extra predicate. Side filters take canonical
@@ -177,18 +177,18 @@ internal static class EdgeQueryCompiler
         if (combined is null)
         {
             sb.Append(';');
-            return (sb.ToString(), null);
+            return sb.ToString();
         }
 
-        var (whereClause, bindings) = QueryCompiler.CompilePredicate(combined);
+        var whereClause = combined.CompilePredicate();
         sb.Append(" WHERE ").Append(whereClause).Append(';');
-        return (sb.ToString(), bindings);
+        return sb.ToString();
     }
 
     private static IPredicate AddClause(IPredicate? existing, IPredicate next)
         => existing is null ? next : Predicate.And(existing, next);
 
-    private static IPredicate BuildIn(string field, IReadOnlyList<IRecordId> ids)
+    private static InPredicate BuildIn(string field, IReadOnlyList<IRecordId> ids)
     {
         var values = new object?[ids.Count];
         for (var i = 0; i < ids.Count; i++)

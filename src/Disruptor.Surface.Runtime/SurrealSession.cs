@@ -4,7 +4,7 @@ namespace Disruptor.Surface.Runtime;
 
 public interface ISurrealTransport : IAsyncDisposable
 {
-    Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default);
+    Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -465,8 +465,8 @@ public sealed class SurrealSession : IHydrationSink
     {
         ThrowIfClosed();
 
-        var (sql, bindings) = query.Compile();
-        using var doc = await transport.ExecuteAsync(sql, bindings, ct);
+        var sql = query.Compile();
+        using var doc = await transport.ExecuteAsync(sql, ct);
         var rs = new SurrealResultSet(doc.RootElement);
         var rows = rs.ResultAt();
 
@@ -762,12 +762,18 @@ public sealed class SurrealSession : IHydrationSink
     /// Snapshot pending state as a SurrealQL script without clearing state — useful for
     /// diagnostics and tests. Returns an empty script when nothing has been recorded.
     /// </summary>
-    public (string Sql, IReadOnlyDictionary<string, object?> Parameters) RenderBatch()
+    public string RenderBatch()
     {
         ThrowIfClosed();
         var plan = CommitPlanner.Build(Pending, ReferenceRegistry);
         return SurrealCommandEmitter.Emit(plan);
     }
+    //public (string Sql, IReadOnlyDictionary<string, object?> Parameters) RenderBatch()
+    //{
+    //    ThrowIfClosed();
+    //    var plan = CommitPlanner.Build(Pending, ReferenceRegistry);
+    //    return SurrealCommandEmitter.Emit(plan);
+    //}
 
     /// <summary>
     /// Flushes pending writes as a single SurrealQL script. The session is closed on
@@ -792,7 +798,8 @@ public sealed class SurrealSession : IHydrationSink
         ThrowIfClosed();
         try
         {
-            var (sql, parameters) = RenderBatch();
+            //var (sql, parameters) = RenderBatch();
+            var sql = RenderBatch();
             var hasWork = !string.IsNullOrEmpty(sql) || lease is not null;
             if (hasWork)
             {
@@ -802,7 +809,8 @@ public sealed class SurrealSession : IHydrationSink
 
                 try
                 {
-                    await transport.ExecuteAsync(fullSql, parameters, ct);
+                    //await transport.ExecuteAsync(fullSql, parameters, ct);
+                    await transport.ExecuteAsync(fullSql, ct);
                 }
                 catch (Exception ex) when (lease is not null && WriterLease.IsStolen(ex))
                 {

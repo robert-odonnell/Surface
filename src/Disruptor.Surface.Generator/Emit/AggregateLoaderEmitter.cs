@@ -85,7 +85,7 @@ internal static class AggregateLoaderEmitter
         }
         sb.AppendLine("                \"\"\";");
         sb.AppendLine();
-        sb.AppendLine("            using var doc = await transport.ExecuteAsync(sql, null, ct);");
+        sb.AppendLine("            using var doc = await transport.ExecuteAsync(sql, ct);");
         sb.AppendLine("            var rootRow = ExtractFirstResultRow(doc);");
         sb.AppendLine("            if (rootRow is null) return;");
         sb.AppendLine();

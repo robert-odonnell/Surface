@@ -91,7 +91,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
         Description = $"design.constraint.description: {text}"
     });
 
-    for (var i = 0; i < 5; i++)
+    for (var i = 0; i < 3; i++)
     {
         var epic = session.Track(new Epic
         {
@@ -100,7 +100,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
             Description = $"design.epic.{i}.description: {text}"
         });
 
-        for (var j = 0; j < 5; j++)
+        for (var j = 0; j < 3; j++)
         {
             var feature = session.Track(new Feature
             {
@@ -110,7 +110,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
                 Description = $"design.epic.{i}.feature.{j}.description: {text}"
             });
 
-            for (var k = 0; k < 5; k++)
+            for (var k = 0; k < 3; k++)
             {
                 var userStory = session.Track(new UserStory
                 {
@@ -122,7 +122,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
                     SoThat = $"so that {text}"
                 });
 
-                for (var l = 0; l < 5; l++)
+                for (var l = 0; l < 3; l++)
                 {
                     var ac = session.Track(new AcceptanceCriteria
                     {
@@ -146,7 +146,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
                     // `restricts` for the within-aggregate edge surface.
                     session.Relate<Validates>(test, ac);
 
-                    for (var m = 0; m < 5; m++)
+                    for (var m = 0; m < 3; m++)
                     {
                         ac.Scenarios.Add(new Scenario(
                             $"scenario.{m}.kind",

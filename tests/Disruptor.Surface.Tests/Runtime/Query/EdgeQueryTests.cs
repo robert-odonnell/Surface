@@ -15,11 +15,10 @@ public sealed class EdgeQueryTests
         await new EdgeQuery<TestSrcId, TestTgtId>("restricts").ExecuteAsync(transport);
 
         Assert.Equal("SELECT id, in, out FROM restricts;", transport.SqlSeen[0]);
-        Assert.Null(transport.VarsSeen[0]);
     }
 
     [Fact]
-    public async Task ExecuteAsync_WhereIn_EmitsInClause_AndNormalisesIds()
+    public async Task ExecuteAsync_WhereIn_EmitsInClause_WithInlinedRecordLiterals()
     {
         var transport = new RecordingTransport().ScriptResponse(EmptyEnvelope);
         var ids = new[]
@@ -32,13 +31,9 @@ public sealed class EdgeQueryTests
             .WhereIn(ids)
             .ExecuteAsync(transport);
 
-        Assert.Equal("SELECT id, in, out FROM restricts WHERE in IN $p0;", transport.SqlSeen[0]);
-
-        var bindings = (IReadOnlyDictionary<string, object?>)transport.VarsSeen[0]!;
-        var list = Assert.IsAssignableFrom<IReadOnlyList<object?>>(bindings["p0"]);
-        Assert.Equal(2, list.Count);
-        Assert.IsType<RecordId>(list[0]);
-        Assert.IsType<RecordId>(list[1]);
+        Assert.Equal(
+            "SELECT id, in, out FROM restricts WHERE in IN [constraints:01HX7AF5, constraints:01HX7AF6];",
+            transport.SqlSeen[0]);
     }
 
     [Fact]
@@ -51,7 +46,9 @@ public sealed class EdgeQueryTests
             .WhereOut(ids)
             .ExecuteAsync(transport);
 
-        Assert.Equal("SELECT id, in, out FROM restricts WHERE out IN $p0;", transport.SqlSeen[0]);
+        Assert.Equal(
+            "SELECT id, in, out FROM restricts WHERE out IN [user_stories:01HX7AF7];",
+            transport.SqlSeen[0]);
     }
 
     [Fact]
@@ -67,7 +64,7 @@ public sealed class EdgeQueryTests
             .ExecuteAsync(transport);
 
         Assert.Equal(
-            "SELECT id, in, out FROM restricts WHERE (in IN $p0 AND out IN $p1);",
+            "SELECT id, in, out FROM restricts WHERE (in IN [constraints:01HX7AF5] AND out IN [user_stories:01HX7AF7]);",
             transport.SqlSeen[0]);
     }
 
@@ -83,7 +80,7 @@ public sealed class EdgeQueryTests
             .ExecuteAsync(transport);
 
         Assert.Equal(
-            "SELECT id, in, out FROM restricts WHERE (in IN $p0 AND note = $p1);",
+            "SELECT id, in, out FROM restricts WHERE (in IN [constraints:01HX7AF5] AND note = \"x\");",
             transport.SqlSeen[0]);
     }
 
@@ -139,8 +136,7 @@ public sealed class EdgeQueryTests
     {
         private readonly Queue<string> responses = new();
 
-        public List<string> SqlSeen { get; } = new();
-        public List<object?> VarsSeen { get; } = new();
+        public List<string> SqlSeen { get; } = [];
 
         public RecordingTransport ScriptResponse(string json)
         {
@@ -148,10 +144,9 @@ public sealed class EdgeQueryTests
             return this;
         }
 
-        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
         {
             SqlSeen.Add(sql);
-            VarsSeen.Add(vars);
             var json = responses.Count > 0 ? responses.Dequeue() : EmptyEnvelope;
             return Task.FromResult(JsonDocument.Parse(json));
         }

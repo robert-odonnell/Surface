@@ -7,9 +7,7 @@ namespace Disruptor.Surface.Runtime.Query;
 /// Compiles a predicate AST + traversal AST + optional pinned id into a SurrealQL
 /// <c>SELECT</c> string plus a parameter dictionary suitable for
 /// <see cref="ISurrealTransport.ExecuteAsync"/>. Every literal value (predicate operand,
-/// pinned id) is parameterised — the SQL itself only carries identifiers and operators,
-/// so the transport's <c>LET</c> prefix renderer handles the actual values via
-/// <see cref="SurrealFormatter"/>.
+/// pinned id) is rendered inline in the SQL via <see cref="SurrealFormatter"/>.
 /// <para>
 /// Traversals expand to nested <c>(SELECT … FROM child WHERE parent_field = $parent.id) AS child</c>
 /// subselects. Each level's WHERE merges the parent-link constraint with the user's
@@ -26,27 +24,26 @@ internal static class QueryCompiler
     /// <param name="filter">Optional predicate AST. AND-merged with the pinned-id constraint when both are present.</param>
     /// <param name="pinnedId">Optional record id pin. When set, emits <c>id = $pN</c> as a leading WHERE clause.</param>
     /// <param name="includes">Traversal AST — projection extensions and nested children subselects.</param>
-    public static (string Sql, IReadOnlyDictionary<string, object?>? Bindings) Compile(
+    public static string Compile(
         string table,
         IPredicate? filter,
         RecordId? pinnedId,
         IReadOnlyList<IIncludeNode> includes)
     {
-        var bindings = new Dictionary<string, object?>(StringComparer.Ordinal);
         var sb = new StringBuilder();
 
-        var projection = BuildProjection(includes, bindings);
+        var projection = BuildProjection(includes);
 
-        sb.Append("SELECT ").Append(projection).Append(" FROM ").Append(SurrealFormatter.Identifier(table));
+        sb.Append("SELECT ").Append(projection).Append(" FROM ").Append(table.Identifier());
 
         var clauses = new List<string>(2);
         if (pinnedId is { } id)
         {
-            clauses.Add($"id = ${NextParam(bindings, id)}");
+            clauses.Add($"id = {NextParam(id)}");
         }
         if (filter is not null)
         {
-            clauses.Add(CompilePredicate(filter, bindings));
+            clauses.Add(filter.CompilePredicate());
         }
         if (clauses.Count > 0)
         {
@@ -54,13 +51,13 @@ internal static class QueryCompiler
         }
         sb.Append(';');
 
-        return (sb.ToString(), bindings.Count == 0 ? null : bindings);
+        return sb.ToString();
     }
 
     /// <summary>Backwards-compat overload — flat select, no traversals.</summary>
-    public static (string Sql, IReadOnlyDictionary<string, object?>? Bindings) Compile(
+    public static string Compile(
         string table, IPredicate? filter, RecordId? pinnedId)
-        => Compile(table, filter, pinnedId, Array.Empty<IIncludeNode>());
+        => Compile(table, filter, pinnedId, []);
 
     /// <summary>
     /// Compile a predicate AST in isolation — returns the WHERE-clause text plus the
@@ -68,12 +65,11 @@ internal static class QueryCompiler
     /// their own statement shape (e.g. <see cref="EdgeQueryCompiler"/>) but want to reuse
     /// the predicate vocabulary and parameter normalisation.
     /// </summary>
-    public static (string WhereClause, Dictionary<string, object?> Bindings) CompilePredicate(IPredicate predicate)
-    {
-        var bindings = new Dictionary<string, object?>(StringComparer.Ordinal);
-        var clause = CompilePredicate(predicate, bindings);
-        return (clause, bindings);
-    }
+    //public static string CompilePredicate(IPredicate predicate)
+    //{
+    //    var clause = CompilePredicate(predicate);
+    //    return (clause);
+    //}
 
     /// <summary>
     /// Compose a level's projection list: starts with <c>*</c>, then adds <c>field.*</c>
@@ -81,7 +77,7 @@ internal static class QueryCompiler
     /// Order is stable: inline-refs precede subselects so the <c>SELECT</c>'s scalar +
     /// inline-record half stays adjacent and easy to scan in transport logs.
     /// </summary>
-    private static string BuildProjection(IReadOnlyList<IIncludeNode> includes, Dictionary<string, object?> bindings)
+    private static string BuildProjection(IReadOnlyList<IIncludeNode> includes)
     {
         if (includes.Count == 0) return "*";
 
@@ -90,14 +86,14 @@ internal static class QueryCompiler
         {
             if (node is IncludeInlineRefNode inline)
             {
-                sb.Append(", ").Append(SurrealFormatter.Identifier(inline.Field)).Append(".*");
+                sb.Append(", ").Append(inline.Field.Identifier()).Append(".*");
             }
         }
         foreach (var node in includes)
         {
             if (node is IncludeChildrenNode children)
             {
-                sb.Append(", ").Append(BuildChildSubselect(children, bindings));
+                sb.Append(", ").Append(BuildChildSubselect(children));
             }
         }
         return sb.ToString();
@@ -109,30 +105,30 @@ internal static class QueryCompiler
     /// <c>(SELECT projection FROM child WHERE parent_field = $parent.id [AND filter]) AS child</c>.
     /// Recurses into <see cref="IncludeChildrenNode.Nested"/> for the inner projection.
     /// </summary>
-    private static string BuildChildSubselect(IncludeChildrenNode node, Dictionary<string, object?> bindings)
+    private static string BuildChildSubselect(IncludeChildrenNode node)
     {
-        var childTable = SurrealFormatter.Identifier(node.ChildTable);
-        var parentField = SurrealFormatter.Identifier(node.ParentField);
-        var innerProjection = BuildProjection(node.Nested, bindings);
+        var childTable = node.ChildTable.Identifier();
+        var parentField = node.ParentField.Identifier();
+        var innerProjection = BuildProjection(node.Nested);
 
         var where = $"{parentField} = $parent.id";
         if (node.Filter is not null)
         {
-            where = $"{where} AND {CompilePredicate(node.Filter, bindings)}";
+            where = $"{where} AND {node.Filter.CompilePredicate()}";
         }
 
         return $"(SELECT {innerProjection} FROM {childTable} WHERE {where}) AS {childTable}";
     }
 
-    private static string CompilePredicate(IPredicate p, Dictionary<string, object?> bindings) => p switch
+    public static string CompilePredicate(this IPredicate p) => p switch
     {
-        EqPredicate eq        => $"{SurrealFormatter.Identifier(eq.Field)} = ${NextParam(bindings, eq.Value)}",
-        RangePredicate rp     => $"{SurrealFormatter.Identifier(rp.Field)} {RangeOpText(rp.Op)} ${NextParam(bindings, rp.Value)}",
-        InPredicate ip        => $"{SurrealFormatter.Identifier(ip.Field)} IN ${NextParam(bindings, ip.Values)}",
-        ContainsPredicate cp  => $"string::contains({SurrealFormatter.Identifier(cp.Field)}, ${NextParam(bindings, cp.Substring)})",
-        AndPredicate a        => $"({string.Join(" AND ", a.Operands.Select(o => CompilePredicate(o, bindings)))})",
-        OrPredicate  o        => $"({string.Join(" OR ", o.Operands.Select(op => CompilePredicate(op, bindings)))})",
-        NotPredicate n        => $"!({CompilePredicate(n.Operand, bindings)})",
+        EqPredicate eq        => $"{eq.Field.Identifier()} = {NextParam(eq.Value)}",
+        RangePredicate rp     => $"{rp.Field.Identifier()} {RangeOpText(rp.Op)} {NextParam(rp.Value)}",
+        InPredicate ip        => $"{ip.Field.Identifier()} IN {NextParam(ip.Values)}",
+        ContainsPredicate cp  => $"string::contains({cp.Field.Identifier()}, {NextParam(cp.Substring)})",
+        AndPredicate a        => $"({string.Join(" AND ", a.Operands.Select(o => o.CompilePredicate()))})",
+        OrPredicate  o        => $"({string.Join(" OR ", o.Operands.Select(op => op.CompilePredicate()))})",
+        NotPredicate n        => $"!({n.Operand.CompilePredicate()})",
         _ => throw new NotSupportedException($"Predicate type {p.GetType().FullName} is not supported by QueryCompiler.")
     };
 
@@ -145,11 +141,11 @@ internal static class QueryCompiler
         _ => throw new NotSupportedException($"Unknown RangeOp: {op}")
     };
 
-    private static string NextParam(Dictionary<string, object?> bindings, object? value)
+    private static string NextParam(object? value)
     {
-        var name = $"p{bindings.Count}";
-        bindings[name] = NormalizeBoundValue(value);
-        return name;
+        //var name = $"p{bindings.Count}";
+        //bindings[name] = NormalizeBoundValue(value);
+        return NormalizeBoundValue(value).RenderSurrealLiteral();
     }
 
     /// <summary>

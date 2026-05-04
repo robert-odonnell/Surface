@@ -4,11 +4,11 @@ namespace Disruptor.Surface.Runtime;
 
 public static class SurrealCommandEmitter
 {
-    public static (string Sql, IReadOnlyDictionary<string, object?> Parameters) Emit(IReadOnlyList<Command> commands)
+    public static string Emit(IReadOnlyList<Command> commands)
     {
         var sb = new StringBuilder();
-        var parameters = new Dictionary<string, object?>(StringComparer.Ordinal);
-        var counter = 0;
+        //var parameters = new Dictionary<string, object?>(StringComparer.Ordinal);
+        //var counter = 0;
 
         foreach (var c in commands)
         {
@@ -30,21 +30,21 @@ public static class SurrealCommandEmitter
 
                 case CommandOp.Set:
                     sb.Append("UPDATE ").Append(FormatId(c.Target))
-                      .Append(" SET ").Append(SurrealFormatter.Identifier(c.Key!)).Append(" = ");
+                      .Append(" SET ").Append(c.Key!.Identifier()).Append(" = ");
                     if (c.Value is RecordId setRid)
                     {
                         sb.Append(FormatId(setRid));
                     }
                     else
                     {
-                        sb.Append(AddParam(c.Value));
+                        sb.Append(c.Value.RenderSurrealLiteral());
                     }
                     sb.Append(";\n");
                     break;
 
                 case CommandOp.Unset:
                     sb.Append("UPDATE ").Append(FormatId(c.Target))
-                      .Append(" UNSET ").Append(SurrealFormatter.Identifier(c.Key!)).Append(";\n");
+                      .Append(" UNSET ").Append(c.Key!.Identifier()).Append(";\n");
                     break;
 
                 case CommandOp.Delete:
@@ -53,7 +53,7 @@ public static class SurrealCommandEmitter
 
                 case CommandOp.Relate:
                     sb.Append("RELATE ").Append(FormatId(c.Target))
-                      .Append("->").Append(SurrealFormatter.Identifier(c.Key!)).Append("->")
+                      .Append("->").Append(c.Key!.Identifier()).Append("->")
                       .Append(FormatId((RecordId)c.Value!));
                     if (c.EdgeContent is { Count: > 0 } content)
                     {
@@ -64,33 +64,35 @@ public static class SurrealCommandEmitter
                     break;
 
                 case CommandOp.Unrelate:
-                    sb.Append("DELETE ").Append(SurrealFormatter.Identifier(c.Key!))
+                    sb.Append("DELETE ").Append(c.Key!.Identifier())
                       .Append(" WHERE in = ").Append(FormatId(c.Target))
                       .Append(" AND out = ").Append(FormatId((RecordId)c.Value!))
                       .Append(";\n");
                     break;
 
                 case CommandOp.UnrelateAllFrom:
-                    sb.Append("DELETE ").Append(SurrealFormatter.Identifier(c.Key!))
+                    sb.Append("DELETE ").Append(c.Key!.Identifier())
                       .Append(" WHERE in = ").Append(FormatId(c.Target))
                       .Append(";\n");
                     break;
 
                 case CommandOp.UnrelateAllTo:
-                    sb.Append("DELETE ").Append(SurrealFormatter.Identifier(c.Key!))
+                    sb.Append("DELETE ").Append(c.Key!.Identifier())
                       .Append(" WHERE out = ").Append(FormatId(c.Target))
                       .Append(";\n");
                     break;
             }
         }
-        return (sb.ToString(), parameters);
 
-        string AddParam(object? value)
-        {
-            var name = $"p{counter++}";
-            parameters[name] = value;
-            return $"${name}";
-        }
+        return sb.ToString();
+        //return (sb.ToString(), parameters);
+
+        //string AddParam(object? value)
+        //{
+        //    var name = $"p{counter++}";
+        //    parameters[name] = value;
+        //    return $"${name}";
+        //}
 
         void AppendContent(IReadOnlyDictionary<string, object?> content)
         {
@@ -104,21 +106,21 @@ public static class SurrealCommandEmitter
                 }
 
                 first = false;
-                sb.Append(SurrealFormatter.Identifier(k)).Append(": ");
+                sb.Append(k.Identifier()).Append(": ");
                 if (v is RecordId rid)
                 {
                     sb.Append(FormatId(rid));
                 }
                 else
                 {
-                    sb.Append(AddParam(v));
+                    sb.Append(v.RenderSurrealLiteral());
                 }
             }
             sb.Append(" }");
         }
     }
 
-    private static string FormatId(RecordId id) => SurrealFormatter.RecordId(id);
+    private static string FormatId(RecordId id) => id.RecordId();
 }
 
 public enum CommandOp

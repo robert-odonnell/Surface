@@ -190,11 +190,11 @@ public sealed class Query<T> where T : class, IEntity, new()
 
     public Task<IReadOnlyList<T>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default);
     public Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(SurrealSession session, ISurrealTransport transport, CancellationToken ct = default);
-    public (string Sql, IReadOnlyDictionary<string, object?>? Bindings) Compile();
+    public string Compile();
 }
 ```
 
-`Where` AND-merges across calls. `WithId` overwrites. `WithInclude` is the primitive the generated `Include*` extensions call into.
+`Where` AND-merges across calls. `WithId` overwrites. `WithInclude` is the primitive the generated `Include*` extensions call into. `Compile()` renders the AST to a SurrealQL string with every binding inlined as a literal via `SurrealFormatter` — no separate parameter dictionary.
 
 ### Traversal — `{Name}TraversalBuilder` and `{Name}QueryIncludes`
 
@@ -337,15 +337,15 @@ Within-aggregate relation properties hydrate entity instances. Cross-aggregate r
 ```csharp
 public interface ISurrealTransport : IAsyncDisposable
 {
-    Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default);
+    Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default);
 }
 ```
 
-Implement this if you want a custom transport. Most users use `SurrealHttpClient`.
+A SurrealQL string in, a `JsonDocument` out. No vars — bindings are inlined as SurrealQL literals upstream by `QueryCompiler` / `SurrealCommandEmitter` / etc. via `SurrealFormatter`. Implement this for a custom transport (test recorders, alternate connectivity, retry policy); most users use `SurrealHttpClient`.
 
 ### `SurrealHttpClient`
 
-HTTP transport for SurrealDB. Uses the `/rpc` endpoint with JSON-RPC 2.0 envelopes; bindings are inlined into the SurrealQL via `SurrealFormatter` rather than passed in `params[1]` (SurrealDB's JSON binder doesn't preserve `Thing` types over the wire — record-id comparisons would silently miss).
+HTTP transport for SurrealDB. Uses the `/rpc` endpoint with JSON-RPC 2.0 envelopes (`{"method": "query", "params": [<sql>, {}]}`); the `params[1]` slot stays empty because every binding has already been inlined into the SQL. SurrealDB's JSON binder treats record-shaped objects as generic `Object`s rather than `Thing`s, so routing record ids through `params[1]` would silently miss; SurrealQL literal syntax (`table:value`) is parsed at the query level and preserves type. The bypass also lifts the per-query statement-count ceiling that a `LET $pN = …;` prefix used to hit on large commits.
 
 ```csharp
 await using var transport = new SurrealHttpClient(config, httpClient);
@@ -357,8 +357,8 @@ var resultSet = await transport.SqlAsync("SELECT * FROM designs;");
 Useful members:
 
 - `Config`: the `SurrealConfig` used by the client.
-- `ExecuteAsync(sql, vars, ct)`: transport contract used by generated loaders, commits, and the query layer. Vars get inlined as SurrealQL literals — strings via `StringLiteral`, record ids via `RecordId` (bare or angle-escaped), enumerables expanded into array literals.
-- `SqlAsync(sql, vars, ct)`: returns `SurrealResultSet` for direct SQL use.
+- `ExecuteAsync(sql, ct)`: transport contract used by generated loaders, commits, and the query layer.
+- `SqlAsync(sql, ct)`: returns `SurrealResultSet` for direct SQL use.
 
 ### `SurrealConfig`
 

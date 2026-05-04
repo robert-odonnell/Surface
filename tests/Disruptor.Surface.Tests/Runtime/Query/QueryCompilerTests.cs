@@ -4,39 +4,40 @@ using Xunit;
 
 namespace Disruptor.Surface.Tests.Runtime.Query;
 
+/// <summary>
+/// QueryCompiler now returns a single SurrealQL string with all bindings inlined as
+/// literals via <see cref="SurrealFormatter"/>. Strings are quoted via
+/// <see cref="SurrealFormatter.StringLiteral"/>; record ids via
+/// <see cref="SurrealFormatter.RecordId"/>; collections become array literals.
+/// </summary>
 public sealed class QueryCompilerTests
 {
     [Fact]
     public void Compile_NoFilter_NoPin_EmitsBareSelect()
     {
-        var (sql, bindings) = Invoke("constraints", filter: null, pinnedId: null);
+        var sql = Invoke("constraints", filter: null, pinnedId: null);
 
         Assert.Equal("SELECT * FROM constraints;", sql);
-        Assert.Null(bindings);
     }
 
     [Fact]
-    public void Compile_EqPredicate_EmitsParameterizedWhere()
+    public void Compile_EqPredicate_InlinesStringLiteral()
     {
         var pred = new EqPredicate("description", "security");
 
-        var (sql, bindings) = Invoke("constraints", pred, pinnedId: null);
+        var sql = Invoke("constraints", pred, pinnedId: null);
 
-        Assert.Equal("SELECT * FROM constraints WHERE description = $p0;", sql);
-        Assert.NotNull(bindings);
-        Assert.Equal("security", bindings!["p0"]);
+        Assert.Equal("SELECT * FROM constraints WHERE description = \"security\";", sql);
     }
 
     [Fact]
-    public void Compile_PinnedId_EmitsLeadingIdClause()
+    public void Compile_PinnedId_InlinesRecordLiteral()
     {
         var pin = new RecordId("constraints", "01HX7AF5");
 
-        var (sql, bindings) = Invoke("constraints", filter: null, pinnedId: pin);
+        var sql = Invoke("constraints", filter: null, pinnedId: pin);
 
-        Assert.Equal("SELECT * FROM constraints WHERE id = $p0;", sql);
-        Assert.NotNull(bindings);
-        Assert.Equal(pin, bindings!["p0"]);
+        Assert.Equal("SELECT * FROM constraints WHERE id = constraints:01HX7AF5;", sql);
     }
 
     [Fact]
@@ -45,49 +46,43 @@ public sealed class QueryCompilerTests
         var pin = new RecordId("constraints", "01HX7AF5");
         var pred = new EqPredicate("description", "security");
 
-        var (sql, bindings) = Invoke("constraints", pred, pin);
+        var sql = Invoke("constraints", pred, pin);
 
         Assert.Equal(
-            "SELECT * FROM constraints WHERE id = $p0 AND description = $p1;",
+            "SELECT * FROM constraints WHERE id = constraints:01HX7AF5 AND description = \"security\";",
             sql);
-        Assert.Equal(pin, bindings!["p0"]);
-        Assert.Equal("security", bindings["p1"]);
     }
 
     [Fact]
     public void Compile_AndPredicate_WrapsInParens()
     {
-        var pred = new AndPredicate(new IPredicate[]
-        {
+        var pred = new AndPredicate(
+        [
             new EqPredicate("description", "security"),
-            new EqPredicate("status", "open"),
-        });
+            new EqPredicate("status", "open")
+        ]);
 
-        var (sql, bindings) = Invoke("constraints", pred, pinnedId: null);
+        var sql = Invoke("constraints", pred, pinnedId: null);
 
         Assert.Equal(
-            "SELECT * FROM constraints WHERE (description = $p0 AND status = $p1);",
+            "SELECT * FROM constraints WHERE (description = \"security\" AND status = \"open\");",
             sql);
-        Assert.Equal("security", bindings!["p0"]);
-        Assert.Equal("open", bindings["p1"]);
     }
 
     [Fact]
     public void Compile_OrPredicate_UsesOr()
     {
-        var pred = new OrPredicate(new IPredicate[]
-        {
+        var pred = new OrPredicate(
+        [
             new EqPredicate("status", "open"),
-            new EqPredicate("status", "acknowledged"),
-        });
+            new EqPredicate("status", "acknowledged")
+        ]);
 
-        var (sql, bindings) = Invoke("issues", pred, pinnedId: null);
+        var sql = Invoke("issues", pred, pinnedId: null);
 
         Assert.Equal(
-            "SELECT * FROM issues WHERE (status = $p0 OR status = $p1);",
+            "SELECT * FROM issues WHERE (status = \"open\" OR status = \"acknowledged\");",
             sql);
-        Assert.Equal("open", bindings!["p0"]);
-        Assert.Equal("acknowledged", bindings["p1"]);
     }
 
     [Fact]
@@ -95,25 +90,23 @@ public sealed class QueryCompilerTests
     {
         var pred = new NotPredicate(new EqPredicate("description", "x"));
 
-        var (sql, _) = Invoke("constraints", pred, pinnedId: null);
+        var sql = Invoke("constraints", pred, pinnedId: null);
 
-        Assert.Equal("SELECT * FROM constraints WHERE !(description = $p0);", sql);
+        Assert.Equal("SELECT * FROM constraints WHERE !(description = \"x\");", sql);
     }
 
     [Fact]
-    public void Compile_TypedRecordId_NormalisedToCanonicalRecordId()
+    public void Compile_TypedRecordId_NormalisedToRecordLiteral()
     {
-        // PropertyExpr<TId>.Eq(typedId) flows the typed id through as the predicate value;
-        // QueryCompiler must collapse it to canonical RecordId so the transport's
-        // RenderValue formats it as a record literal rather than a JSON-quoted string.
+        // PropertyExpr<TId>.Eq(typedId) flows the typed id through; the compiler
+        // collapses IRecordId → canonical RecordId before SurrealFormatter renders it,
+        // so the wire form is the SurrealQL record literal — not a JSON-quoted string.
         var typed = new TypedTestId("constraints", "01HX7AF5");
         var pred = new EqPredicate("id", typed);
 
-        var (_, bindings) = Invoke("constraints", pred, pinnedId: null);
+        var sql = Invoke("constraints", pred, pinnedId: null);
 
-        var bound = Assert.IsType<RecordId>(bindings!["p0"]);
-        Assert.Equal("constraints", bound.Table);
-        Assert.Equal("01HX7AF5", bound.Value);
+        Assert.Equal("SELECT * FROM constraints WHERE id = constraints:01HX7AF5;", sql);
     }
 
     [Fact]
@@ -175,7 +168,7 @@ public sealed class QueryCompilerTests
         Assert.Throws<ArgumentException>(() => Predicate.Or());
     }
 
-    // ─────────────────────── PR2 operator coverage ───────────────────────
+    // ─────────────────────── Operator coverage ───────────────────────
 
     [Theory]
     [InlineData(RangeOp.Lt, "<")]
@@ -186,32 +179,29 @@ public sealed class QueryCompilerTests
     {
         var pred = new RangePredicate("priority", op, 5);
 
-        var (sql, bindings) = Invoke("issues", pred, pinnedId: null);
+        var sql = Invoke("issues", pred, pinnedId: null);
 
-        Assert.Equal($"SELECT * FROM issues WHERE priority {surreal} $p0;", sql);
-        Assert.Equal(5, bindings!["p0"]);
+        Assert.Equal($"SELECT * FROM issues WHERE priority {surreal} 5;", sql);
     }
 
     [Fact]
-    public void Compile_InPredicate_BindsValuesAsCollection()
+    public void Compile_InPredicate_InlinesArrayLiteral()
     {
-        var pred = new InPredicate("status", new object?[] { "open", "acknowledged" });
+        var pred = new InPredicate("status", ["open", "acknowledged"]);
 
-        var (sql, bindings) = Invoke("issues", pred, pinnedId: null);
+        var sql = Invoke("issues", pred, pinnedId: null);
 
-        Assert.Equal("SELECT * FROM issues WHERE status IN $p0;", sql);
-        var values = Assert.IsAssignableFrom<IReadOnlyList<object?>>(bindings!["p0"]);
-        Assert.Equal(2, values.Count);
-        Assert.Equal("open", values[0]);
-        Assert.Equal("acknowledged", values[1]);
+        Assert.Equal(
+            "SELECT * FROM issues WHERE status IN [\"open\", \"acknowledged\"];",
+            sql);
     }
 
     [Fact]
     public void Compile_InPredicate_WithTypedIds_NormalisesEachElement()
     {
-        // Each element of an In list passes through the same canonicalisation as a single
-        // typed-id binding — the transport's RenderValue iterates the collection and
-        // matches each element on its concrete CLR type.
+        // Each element passes through the same canonicalisation as a single typed-id
+        // binding — the compiler walks the collection and renders each element with
+        // SurrealFormatter so typed ids end up as record literals, not strings.
         var ids = new object?[]
         {
             new TypedTestId("constraints", "01HX7AF5"),
@@ -219,13 +209,11 @@ public sealed class QueryCompilerTests
         };
         var pred = new InPredicate("id", ids);
 
-        var (_, bindings) = Invoke("constraints", pred, pinnedId: null);
+        var sql = Invoke("constraints", pred, pinnedId: null);
 
-        var values = (IReadOnlyList<object?>)bindings!["p0"]!;
-        var first = Assert.IsType<RecordId>(values[0]);
-        var second = Assert.IsType<RecordId>(values[1]);
-        Assert.Equal("01HX7AF5", first.Value);
-        Assert.Equal("01HX7AF6", second.Value);
+        Assert.Equal(
+            "SELECT * FROM constraints WHERE id IN [constraints:01HX7AF5, constraints:01HX7AF6];",
+            sql);
     }
 
     [Fact]
@@ -233,42 +221,40 @@ public sealed class QueryCompilerTests
     {
         var pred = new ContainsPredicate("description", "security");
 
-        var (sql, bindings) = Invoke("constraints", pred, pinnedId: null);
+        var sql = Invoke("constraints", pred, pinnedId: null);
 
-        Assert.Equal("SELECT * FROM constraints WHERE string::contains(description, $p0);", sql);
-        Assert.Equal("security", bindings!["p0"]);
+        Assert.Equal(
+            "SELECT * FROM constraints WHERE string::contains(description, \"security\");",
+            sql);
     }
 
     [Fact]
     public void Compile_ContainsPredicate_PreservesStringAsScalarNotEnumerable()
     {
         // string is IEnumerable<char>; if the normaliser decomposed strings it would
-        // bind a list of characters and the resulting SurrealQL would be nonsense. This
-        // test pins down that strings stay scalar through the binding path.
+        // emit a list of characters. This test pins down that strings stay scalar.
         var pred = new ContainsPredicate("description", "abc");
 
-        var (_, bindings) = Invoke("constraints", pred, pinnedId: null);
+        var sql = Invoke("constraints", pred, pinnedId: null);
 
-        Assert.IsType<string>(bindings!["p0"]);
-        Assert.Equal("abc", bindings["p0"]);
+        Assert.Equal(
+            "SELECT * FROM constraints WHERE string::contains(description, \"abc\");",
+            sql);
     }
 
     [Fact]
-    public void Compile_MixedOperators_ParameteriseInOrder()
+    public void Compile_MixedOperators_ComposeInOrder()
     {
         var pred = Predicate.And(
             new RangePredicate("priority", RangeOp.Gt, 3),
-            new InPredicate("status", new object?[] { "open", "acknowledged" }),
+            new InPredicate("status", ["open", "acknowledged"]),
             new ContainsPredicate("description", "security"));
 
-        var (sql, bindings) = Invoke("issues", pred, pinnedId: null);
+        var sql = Invoke("issues", pred, pinnedId: null);
 
         Assert.Equal(
-            "SELECT * FROM issues WHERE (priority > $p0 AND status IN $p1 AND string::contains(description, $p2));",
+            "SELECT * FROM issues WHERE (priority > 3 AND status IN [\"open\", \"acknowledged\"] AND string::contains(description, \"security\"));",
             sql);
-        Assert.Equal(3, bindings!["p0"]);
-        Assert.IsAssignableFrom<IReadOnlyList<object?>>(bindings["p1"]);
-        Assert.Equal("security", bindings["p2"]);
     }
 
     [Fact]
@@ -293,7 +279,7 @@ public sealed class QueryCompilerTests
         var expr = new PropertyExpr<int>("priority");
 
         var fromParams = (InPredicate)expr.In(1, 2, 3);
-        var fromEnumerable = (InPredicate)expr.In((IEnumerable<int>)new[] { 1, 2, 3 });
+        var fromEnumerable = (InPredicate)expr.In((IEnumerable<int>)[1, 2, 3]);
 
         Assert.Equal("priority", fromParams.Field);
         Assert.Equal("priority", fromEnumerable.Field);
@@ -315,14 +301,14 @@ public sealed class QueryCompilerTests
         Assert.Equal("security", c.Substring);
     }
 
-    // ─────────────────────── PR4 traversal coverage ───────────────────────
+    // ─────────────────────── Traversal coverage ───────────────────────
 
     [Fact]
     public void Compile_InlineRefInclude_AddsFieldDotStarToProjection()
     {
         var includes = new IIncludeNode[] { new IncludeInlineRefNode("details") };
 
-        var (sql, _) = InvokeWithIncludes("constraints", filter: null, pinnedId: null, includes: includes);
+        var sql = InvokeWithIncludes("constraints", filter: null, pinnedId: null, includes: includes);
 
         Assert.Equal("SELECT *, details.* FROM constraints;", sql);
     }
@@ -336,10 +322,10 @@ public sealed class QueryCompilerTests
                 ChildTable: "constraints",
                 ParentField: "design",
                 Filter: null,
-                Nested: Array.Empty<IIncludeNode>())
+                Nested: [])
         };
 
-        var (sql, _) = InvokeWithIncludes("designs", filter: null, pinnedId: null, includes: includes);
+        var sql = InvokeWithIncludes("designs", filter: null, pinnedId: null, includes: includes);
 
         Assert.Equal(
             "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id) AS constraints FROM designs;",
@@ -354,15 +340,14 @@ public sealed class QueryCompilerTests
             new IncludeChildrenNode(
                 "constraints", "design",
                 Filter: new EqPredicate("description", "x"),
-                Nested: Array.Empty<IIncludeNode>())
+                Nested: [])
         };
 
-        var (sql, bindings) = InvokeWithIncludes("designs", filter: null, pinnedId: null, includes: includes);
+        var sql = InvokeWithIncludes("designs", filter: null, pinnedId: null, includes: includes);
 
         Assert.Equal(
-            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = $p0) AS constraints FROM designs;",
+            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = \"x\") AS constraints FROM designs;",
             sql);
-        Assert.Equal("x", bindings!["p0"]);
     }
 
     [Fact]
@@ -371,16 +356,16 @@ public sealed class QueryCompilerTests
         var grandchild = new IncludeChildrenNode(
             "acceptance_criteria", "user_story",
             Filter: null,
-            Nested: Array.Empty<IIncludeNode>());
+            Nested: []);
 
         var child = new IncludeChildrenNode(
             "user_stories", "feature",
             Filter: null,
-            Nested: new IIncludeNode[] { grandchild });
+            Nested: [grandchild]);
 
         var includes = new IIncludeNode[] { child };
 
-        var (sql, _) = InvokeWithIncludes("features", filter: null, pinnedId: null, includes: includes);
+        var sql = InvokeWithIncludes("features", filter: null, pinnedId: null, includes: includes);
 
         Assert.Equal(
             "SELECT *, "
@@ -394,16 +379,15 @@ public sealed class QueryCompilerTests
     [Fact]
     public void Compile_NestedInlineRefAndChildren_AppearInDeterministicOrder()
     {
-        // Inline-refs come before subselects in the projection list — this keeps the
-        // wire SQL's "scalar half" adjacent to the SELECT, which is much easier to scan
-        // when debugging via transport logs.
+        // Inline-refs come before subselects in the projection list — keeps the SQL's
+        // scalar half adjacent to the SELECT, easier to scan in transport logs.
         var includes = new IIncludeNode[]
         {
-            new IncludeChildrenNode("constraints", "design", null, Array.Empty<IIncludeNode>()),
+            new IncludeChildrenNode("constraints", "design", null, []),
             new IncludeInlineRefNode("details"),
         };
 
-        var (sql, _) = InvokeWithIncludes("designs", filter: null, pinnedId: null, includes: includes);
+        var sql = InvokeWithIncludes("designs", filter: null, pinnedId: null, includes: includes);
 
         Assert.Equal(
             "SELECT *, details.*, (SELECT * FROM constraints WHERE design = $parent.id) AS constraints FROM designs;",
@@ -411,30 +395,27 @@ public sealed class QueryCompilerTests
     }
 
     [Fact]
-    public void Compile_TopLevelFilterAndChildrenFilter_DontShareParameterSpace_ButCounterIsGlobal()
+    public void Compile_TopLevelFilterAndChildrenFilter_ComposeIndependently()
     {
-        // Each predicate slot pulls a new $pN; the counter is shared across the whole
-        // statement so an inner filter doesn't accidentally collide with outer params.
+        // No shared parameter space — each filter inlines its own literal in place.
         var includes = new IIncludeNode[]
         {
             new IncludeChildrenNode(
                 "constraints", "design",
                 new EqPredicate("description", "inner"),
-                Array.Empty<IIncludeNode>())
+                [])
         };
 
-        var (sql, bindings) = InvokeWithIncludes(
+        var sql = InvokeWithIncludes(
             "designs",
             filter: new EqPredicate("description", "outer"),
             pinnedId: null,
             includes: includes);
 
         Assert.Equal(
-            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = $p0) AS constraints "
-            + "FROM designs WHERE description = $p1;",
+            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = \"inner\") AS constraints "
+            + "FROM designs WHERE description = \"outer\";",
             sql);
-        Assert.Equal("inner", bindings!["p0"]);
-        Assert.Equal("outer", bindings["p1"]);
     }
 
     [Fact]
@@ -442,7 +423,7 @@ public sealed class QueryCompilerTests
     {
         var includes = new IIncludeNode[]
         {
-            new IncludeChildrenNode("123-bad", "design", null, Array.Empty<IIncludeNode>())
+            new IncludeChildrenNode("123-bad", "design", null, [])
         };
 
         Assert.Throws<SurrealFormatException>(() =>
@@ -454,7 +435,7 @@ public sealed class QueryCompilerTests
     {
         var includes = new IIncludeNode[]
         {
-            new IncludeChildrenNode("constraints", "has-dash", null, Array.Empty<IIncludeNode>())
+            new IncludeChildrenNode("constraints", "has-dash", null, [])
         };
 
         Assert.Throws<SurrealFormatException>(() =>
@@ -467,23 +448,19 @@ public sealed class QueryCompilerTests
     /// suite honest about that boundary without forcing an InternalsVisibleTo on the
     /// runtime assembly.
     /// </summary>
-    private static (string Sql, IReadOnlyDictionary<string, object?>? Bindings) Invoke(
-        string table, IPredicate? filter, RecordId? pinnedId)
+    private static string Invoke(string table, IPredicate? filter, RecordId? pinnedId)
     {
-        // Two Compile overloads exist (with and without an IIncludeNode list); GetMethod
-        // needs the parameter-type array to disambiguate.
         var method = typeof(IPredicate).Assembly
             .GetType("Disruptor.Surface.Runtime.Query.QueryCompiler", throwOnError: true)!
             .GetMethod(
                 "Compile",
                 System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic,
                 binder: null,
-                types: new[] { typeof(string), typeof(IPredicate), typeof(RecordId?) },
+                types: [typeof(string), typeof(IPredicate), typeof(RecordId?)],
                 modifiers: null)!;
         try
         {
-            var result = method.Invoke(null, new object?[] { table, filter, pinnedId });
-            return ((string, IReadOnlyDictionary<string, object?>?))result!;
+            return (string)method.Invoke(null, [table, filter, pinnedId])!;
         }
         catch (System.Reflection.TargetInvocationException tie) when (tie.InnerException is not null)
         {
@@ -491,7 +468,7 @@ public sealed class QueryCompilerTests
         }
     }
 
-    private static (string Sql, IReadOnlyDictionary<string, object?>? Bindings) InvokeWithIncludes(
+    private static string InvokeWithIncludes(
         string table, IPredicate? filter, RecordId? pinnedId, IReadOnlyList<IIncludeNode> includes)
     {
         var method = typeof(IPredicate).Assembly
@@ -500,12 +477,11 @@ public sealed class QueryCompilerTests
                 "Compile",
                 System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic,
                 binder: null,
-                types: new[] { typeof(string), typeof(IPredicate), typeof(RecordId?), typeof(IReadOnlyList<IIncludeNode>) },
+                types: [typeof(string), typeof(IPredicate), typeof(RecordId?), typeof(IReadOnlyList<IIncludeNode>)],
                 modifiers: null)!;
         try
         {
-            var result = method.Invoke(null, new object?[] { table, filter, pinnedId, includes });
-            return ((string, IReadOnlyDictionary<string, object?>?))result!;
+            return (string)method.Invoke(null, [table, filter, pinnedId, includes])!;
         }
         catch (System.Reflection.TargetInvocationException tie) when (tie.InnerException is not null)
         {

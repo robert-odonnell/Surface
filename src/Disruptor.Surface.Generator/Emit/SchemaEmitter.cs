@@ -81,7 +81,7 @@ internal static class SchemaEmitter
         sb.Append(memberIndent).AppendLine("{");
         sb.Append(memberIndent).AppendLine("    foreach (var chunk in Schema)");
         sb.Append(memberIndent).AppendLine("    {");
-        sb.Append(memberIndent).AppendLine("        await transport.ExecuteAsync(chunk, null, ct);");
+        sb.Append(memberIndent).AppendLine("        await transport.ExecuteAsync(chunk, ct);");
         sb.Append(memberIndent).AppendLine("    }");
         sb.Append(memberIndent).AppendLine("}");
         sb.Append(indent).AppendLine("}");

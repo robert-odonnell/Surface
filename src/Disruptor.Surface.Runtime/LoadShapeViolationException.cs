@@ -12,19 +12,12 @@ namespace Disruptor.Surface.Runtime;
 /// extend the load shape (e.g. <c>"Workspace.Query.Designs.WithId(designId).IncludeConstraints(...)"</c>).
 /// </para>
 /// </summary>
-public sealed class LoadShapeViolationException : InvalidOperationException
+public sealed class LoadShapeViolationException(RecordId owner, string field, string fetchHint)
+    : InvalidOperationException(BuildMessage(owner, field, fetchHint))
 {
-    public RecordId Owner { get; }
-    public string Field { get; }
-    public string FetchHint { get; }
-
-    public LoadShapeViolationException(RecordId owner, string field, string fetchHint)
-        : base(BuildMessage(owner, field, fetchHint))
-    {
-        Owner = owner;
-        Field = field;
-        FetchHint = fetchHint;
-    }
+    public RecordId Owner { get; } = owner;
+    public string Field { get; } = field;
+    public string FetchHint { get; } = fetchHint;
 
     private static string BuildMessage(RecordId owner, string field, string fetchHint)
         => $"Slice {owner}.{field} was not loaded. Extend the load shape via session.FetchAsync({fetchHint}).";

@@ -13,7 +13,7 @@ namespace Disruptor.Surface.Tests.Runtime.Query;
 public sealed class QueryExecutionTests
 {
     [Fact]
-    public async Task ExecuteAsync_SendsCompiledSqlAndBindings()
+    public async Task ExecuteAsync_SendsCompiledSqlWithInlinedLiterals()
     {
         var transport = new RecordingTransport().ScriptResponse(EmptyResultEnvelope);
 
@@ -22,10 +22,9 @@ public sealed class QueryExecutionTests
             .ExecuteAsync(transport);
 
         Assert.Single(transport.SqlSeen);
-        Assert.Equal("SELECT * FROM test_entities WHERE description = $p0;", transport.SqlSeen[0]);
-
-        var vars = Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(transport.VarsSeen[0]);
-        Assert.Equal("hello", vars["p0"]);
+        Assert.Equal(
+            "SELECT * FROM test_entities WHERE description = \"hello\";",
+            transport.SqlSeen[0]);
     }
 
     [Fact]
@@ -38,12 +37,10 @@ public sealed class QueryExecutionTests
             .WithId(typed)
             .ExecuteAsync(transport);
 
-        Assert.Equal("SELECT * FROM test_entities WHERE id = $p0;", transport.SqlSeen[0]);
-
-        var vars = (IReadOnlyDictionary<string, object?>)transport.VarsSeen[0]!;
-        var bound = Assert.IsType<RecordId>(vars["p0"]);
-        Assert.Equal("test_entities", bound.Table);
-        Assert.Equal("01HX7AF5", bound.Value);
+        // Typed id collapses to the canonical record literal at compile time.
+        Assert.Equal(
+            "SELECT * FROM test_entities WHERE id = test_entities:01HX7AF5;",
+            transport.SqlSeen[0]);
     }
 
     [Fact]
@@ -89,18 +86,15 @@ public sealed class QueryExecutionTests
             ChildTable: "constraints",
             ParentField: "design",
             Filter: new EqPredicate("description", "x"),
-            Nested: Array.Empty<IIncludeNode>());
+            Nested: []);
 
         await new Query<TestEntity>("designs")
             .WithInclude(children)
             .ExecuteAsync(transport);
 
         Assert.Equal(
-            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = $p0) AS constraints FROM designs;",
+            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = \"x\") AS constraints FROM designs;",
             transport.SqlSeen[0]);
-
-        var bindings = (IReadOnlyDictionary<string, object?>)transport.VarsSeen[0]!;
-        Assert.Equal("x", bindings["p0"]);
     }
 
     [Fact]
@@ -122,17 +116,17 @@ public sealed class QueryExecutionTests
         var pin = new RecordId("designs", "01HX7AF5");
 
         var children = new IncludeChildrenNode(
-            "constraints", "design", Filter: null, Nested: Array.Empty<IIncludeNode>());
+            "constraints", "design", Filter: null, Nested: []);
 
         await new Query<TestEntity>("designs")
             .WithId(pin)
             .WithInclude(children)
             .ExecuteAsync(transport);
 
-        // The root pinning binds first ($p0); no extra params for children since the
-        // nested SELECT only carries the static "design = $parent.id" link.
+        // Root pinning inlines the record literal; the nested SELECT carries the static
+        // `design = $parent.id` link, no other bindings to render.
         Assert.Equal(
-            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id) AS constraints FROM designs WHERE id = $p0;",
+            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id) AS constraints FROM designs WHERE id = designs:01HX7AF5;",
             transport.SqlSeen[0]);
     }
 
@@ -196,8 +190,7 @@ public sealed class QueryExecutionTests
     {
         private readonly Queue<string> responses = new();
 
-        public List<string> SqlSeen { get; } = new();
-        public List<object?> VarsSeen { get; } = new();
+        public List<string> SqlSeen { get; } = [];
 
         public RecordingTransport ScriptResponse(string json)
         {
@@ -205,10 +198,9 @@ public sealed class QueryExecutionTests
             return this;
         }
 
-        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
         {
             SqlSeen.Add(sql);
-            VarsSeen.Add(vars);
             var json = responses.Count > 0 ? responses.Dequeue() : "[{\"result\":[],\"status\":\"OK\"}]";
             return Task.FromResult(JsonDocument.Parse(json));
         }

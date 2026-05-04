@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -43,30 +42,27 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
         return ValueTask.CompletedTask;
     }
 
-    public async Task<SurrealResultSet> SqlAsync(string surrealQl, IReadOnlyDictionary<string, object?>? vars = null, CancellationToken cancellationToken = default)
+    public async Task<SurrealResultSet> SqlAsync(string surrealQl, CancellationToken cancellationToken = default)
     {
-        var normalized = await SendAndNormalizeAsync(surrealQl, vars, cancellationToken);
+        var normalized = await SendAndNormalizeAsync(surrealQl, cancellationToken);
         return new SurrealResultSet(normalized);
     }
 
-    public Task<SurrealResultSet> SqlAsync(string surrealQl, object bindings, CancellationToken cancellationToken = default)
-        => SqlAsync(surrealQl, BindingsFromObject(bindings), cancellationToken);
-
-    public async Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+    public async Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
     {
-        var normalized = await SendAndNormalizeAsync(sql, BindingsFromVars(vars), ct);
+        var normalized = await SendAndNormalizeAsync(sql, ct);
         return WrapElementAsDocument(normalized);
     }
 
 
-    private async Task<JsonElement> SendAndNormalizeAsync(string surrealQl, IReadOnlyDictionary<string, object?>? vars, CancellationToken cancellationToken)
+    private async Task<JsonElement> SendAndNormalizeAsync(string surrealQl, CancellationToken cancellationToken)
     {
         const int maxAttempts = 3;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
-                using var response = await SendRpcQueryAsync(surrealQl, vars, cancellationToken);
+                using var response = await SendRpcQueryAsync(surrealQl, cancellationToken);
                 var payload = await response.Content.ReadAsStringAsync(cancellationToken);
                 using var doc = JsonDocument.Parse(payload);
                 var normalized = ExtractRpcResult(doc.RootElement);
@@ -81,34 +77,11 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
 
         throw new SurrealException("SurrealDB query failed after retries.", retryable: false);
     }
-
-    private static IReadOnlyDictionary<string, object?>? BindingsFromVars(object? vars) => vars switch
-    {
-        null => null,
-        IReadOnlyDictionary<string, object?> d => d,
-        _ => BindingsFromObject(vars)
-    };
-
+    
     private static JsonDocument WrapElementAsDocument(JsonElement element)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(element);
         return JsonDocument.Parse(bytes);
-    }
-
-    private static IReadOnlyDictionary<string, object?> BindingsFromObject(object bindings)
-    {
-        if (bindings is IReadOnlyDictionary<string, object?> dict)
-        {
-            return dict;
-        }
-
-        var props = bindings.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance);
-        var result = new Dictionary<string, object?>(props.Length, StringComparer.Ordinal);
-        foreach (var p in props)
-        {
-            result[p.Name] = p.GetValue(bindings);
-        }
-        return result;
     }
 
     /// <summary>
@@ -119,11 +92,11 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
     /// values use the canonical <c>{ "tb", "id" }</c> Thing form so SurrealDB types them
     /// correctly when comparing against schema-typed columns.
     /// </summary>
-    private async Task<HttpResponseMessage> SendRpcQueryAsync(string sql, IReadOnlyDictionary<string, object?>? vars, CancellationToken ct)
+    private async Task<HttpResponseMessage> SendRpcQueryAsync(string sql, CancellationToken ct)
     {
         await EnsureSignedInAsync(force: false, ct);
 
-        var body = BuildRpcQueryBody(sql, vars);
+        var body = BuildRpcQueryBody(sql);
 
         var response = await SendRpcRequestAsync(body, ct);
 
@@ -185,57 +158,13 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
     /// preserves type. <c>params[1]</c> stays as an empty object because SurrealDB's
     /// <c>query</c> method signature requires the slot.
     /// </summary>
-    private static string BuildRpcQueryBody(string sql, IReadOnlyDictionary<string, object?>? vars)
+    private static string BuildRpcQueryBody(string sql)
     {
-        var inlinedSql = vars is null || vars.Count == 0 ? sql : InlineVars(sql, vars);
-        var payload = new RpcRequest("disruptor", "query", new object?[] { inlinedSql, EmptyVars });
+        var payload = new RpcRequest("disruptor", "query", [sql, EmptyVars]);
         return JsonSerializer.Serialize(payload, RpcSerializerOptions);
     }
 
     private static readonly Dictionary<string, object?> EmptyVars = new(StringComparer.Ordinal);
-
-    /// <summary>
-    /// Substitute every <c>$pN</c> reference in <paramref name="sql"/> with its
-    /// rendered SurrealQL literal. Iteration order is longest-key-first so <c>$p10</c>
-    /// substitution doesn't accidentally consume the <c>$p1</c> prefix.
-    /// </summary>
-    private static string InlineVars(string sql, IReadOnlyDictionary<string, object?> vars)
-    {
-        foreach (var kv in vars.OrderByDescending(k => k.Key.Length).ThenBy(k => k.Key, StringComparer.Ordinal))
-        {
-            var literal = RenderSurrealLiteral(kv.Value);
-            sql = System.Text.RegularExpressions.Regex.Replace(sql, $@"\${kv.Key}\b", _ => literal);
-        }
-        return sql;
-    }
-
-    /// <summary>
-    /// Render a binding value as a SurrealQL literal. Strings/dates/enums route through
-    /// <see cref="SurrealFormatter.StringLiteral"/> for proper escaping; record ids use
-    /// <see cref="SurrealFormatter.RecordId"/> for the bare-or-bracketed form;
-    /// enumerables become array literals; everything else falls through to JSON for
-    /// generic objects (rare, mostly diagnostics).
-    /// </summary>
-    private static string RenderSurrealLiteral(object? value) => value switch
-    {
-        null => "NONE",
-        bool b => b ? "true" : "false",
-        sbyte or byte or short or ushort or int or uint or long or ulong => value.ToString()!,
-        float f => f.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-        double d => d.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-        decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
-        string s => SurrealFormatter.StringLiteral(s),
-        RecordId rid => SurrealFormatter.RecordId(rid),
-        IEntity v => SurrealFormatter.RecordId(v.Id),
-        IRecordId r => SurrealFormatter.RecordId(RecordId.From(r)),
-        Guid g => SurrealFormatter.StringLiteral(g.ToString()),
-        Ulid u => SurrealFormatter.StringLiteral(u.ToString()),
-        DateTime dt => SurrealFormatter.StringLiteral(dt.ToUniversalTime().ToString("O")),
-        DateTimeOffset dto => SurrealFormatter.StringLiteral(dto.ToString("O")),
-        Enum e => SurrealFormatter.StringLiteral(e.ToString()),
-        System.Collections.IEnumerable e => "[" + string.Join(", ", e.Cast<object?>().Select(RenderSurrealLiteral)) + "]",
-        _ => JsonSerializer.Serialize(value, SurrealJson.SerializerOptions),
-    };
 
     /// <summary>JSON-RPC 2.0 envelope shape SurrealDB's <c>/rpc</c> endpoint accepts.</summary>
     private readonly record struct RpcRequest(

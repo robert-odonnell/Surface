@@ -32,7 +32,7 @@ public sealed class Query<T>
     public IReadOnlyList<IIncludeNode> Includes { get; }
 
     /// <summary>Generator entry point. <paramref name="table"/> is the snake-cased SurrealDB table name.</summary>
-    public Query(string table) : this(table, filter: null, pinnedId: null, includes: Array.Empty<IIncludeNode>()) { }
+    public Query(string table) : this(table, filter: null, pinnedId: null, includes: []) { }
 
     private Query(string table, IPredicate? filter, RecordId? pinnedId, IReadOnlyList<IIncludeNode> includes)
     {
@@ -90,7 +90,7 @@ public sealed class Query<T>
     /// <see cref="SurrealSession.FetchAsync{T}"/> and any other caller that wants to
     /// inspect or splice the rendered query before sending.
     /// </summary>
-    public (string Sql, IReadOnlyDictionary<string, object?>? Bindings) Compile()
+    public string Compile()
         => QueryCompiler.Compile(Table, Filter, PinnedId, Includes);
 
     /// <summary>
@@ -112,10 +112,10 @@ public sealed class Query<T>
         ISurrealTransport transport,
         CancellationToken ct = default)
     {
-        var (sql, bindings) = QueryCompiler.Compile(Table, Filter, PinnedId, Includes);
-        using var doc = await transport.ExecuteAsync(sql, bindings, ct);
+        var sql = QueryCompiler.Compile(Table, Filter, PinnedId, Includes);
+        using var doc = await transport.ExecuteAsync(sql, ct);
         var rs = new SurrealResultSet(doc.RootElement);
-        var rows = rs.ResultAt(0);
+        var rows = rs.ResultAt();
 
         IHydrationSink sink = session;
 
@@ -152,7 +152,7 @@ public sealed class Query<T>
         static T HydrateOne(JsonElement row, IHydrationSink sink)
         {
             var entity = new T();
-            ((IEntity)entity).Hydrate(row, sink);
+            entity.Hydrate(row, sink);
             return entity;
         }
     }

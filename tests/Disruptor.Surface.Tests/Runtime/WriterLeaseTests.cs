@@ -214,10 +214,9 @@ public sealed class WriterLeaseTests
     private const string EmptySuccessResponse = "[{\"result\":null,\"status\":\"OK\"}]";
 
     /// <summary>Test-only entity — stand-in for a generated [Table] partial.</summary>
-    private sealed class StubEntity : IEntity
+    private sealed class StubEntity(RecordId id) : IEntity
     {
-        public StubEntity(RecordId id) => Id = id;
-        public RecordId Id { get; }
+        public RecordId Id { get; } = id;
         public SurrealSession? Session { get; private set; }
         public void Bind(SurrealSession session) => Session = session;
         public void Initialize(SurrealSession session) { }
@@ -236,8 +235,8 @@ public sealed class WriterLeaseTests
     {
         private readonly Queue<Func<JsonDocument>> responses = new();
 
-        public List<string> SqlSeen { get; } = new();
-        public List<object?> VarsSeen { get; } = new();
+        public List<string> SqlSeen { get; } = [];
+        public List<object?> VarsSeen { get; } = [];
 
         public RecordingTransport ScriptResponse(string json)
             => ScriptResponse(() => JsonDocument.Parse(json));
@@ -254,10 +253,9 @@ public sealed class WriterLeaseTests
             return this;
         }
 
-        public Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default)
+        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
         {
             SqlSeen.Add(sql);
-            VarsSeen.Add(vars);
             if (responses.Count == 0)
             {
                 return Task.FromResult(JsonDocument.Parse("[]"));

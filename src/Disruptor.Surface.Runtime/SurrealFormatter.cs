@@ -1,3 +1,6 @@
+using System.Collections;
+using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace Disruptor.Surface.Runtime;
@@ -23,11 +26,39 @@ public static partial class SurrealFormatter
     private static readonly Regex BareValuePattern = BareValuePatternRegex();
 
     /// <summary>
+    /// Render a binding value as a SurrealQL literal. Strings/dates/enums route through
+    /// <see cref="SurrealFormatter.StringLiteral"/> for proper escaping; record ids use
+    /// <see cref="SurrealFormatter.RecordId"/> for the bare-or-bracketed form;
+    /// enumerables become array literals; everything else falls through to JSON for
+    /// generic objects (rare, mostly diagnostics).
+    /// </summary>
+    public static string RenderSurrealLiteral(this object? value) => value switch
+    {
+        null => "NONE",
+        bool b => b ? "true" : "false",
+        sbyte or byte or short or ushort or int or uint or long or ulong => value.ToString()!,
+        float f => f.ToString("R", CultureInfo.InvariantCulture),
+        double d => d.ToString("R", CultureInfo.InvariantCulture),
+        decimal m => m.ToString(CultureInfo.InvariantCulture),
+        string s => s.StringLiteral(),
+        RecordId rid => rid.RecordId(),
+        IEntity v => v.Id.RecordId(),
+        IRecordId r => Runtime.RecordId.From(r).RecordId(),
+        Guid g => g.ToString().StringLiteral(),
+        Ulid u => u.ToString().StringLiteral(),
+        DateTime dt => dt.ToUniversalTime().ToString("O").StringLiteral(),
+        DateTimeOffset dto => dto.ToString("O").StringLiteral(),
+        Enum e => e.ToString().StringLiteral(),
+        IEnumerable e => "[" + string.Join(", ", e.Cast<object?>().Select(RenderSurrealLiteral)) + "]",
+        _ => JsonSerializer.Serialize(value, SurrealJson.SerializerOptions),
+    };
+
+    /// <summary>
     /// Validates a generator-emitted identifier (table name, field name, edge name) and
     /// returns it. Throws if the identifier doesn't match the strict regex — the emitter
     /// is the only legitimate caller and a failure means an upstream bug, not user input.
     /// </summary>
-    public static string Identifier(string name)
+    public static string Identifier(this string name)
     {
         if (string.IsNullOrEmpty(name) || !IdentifierPattern.IsMatch(name))
         {
@@ -42,9 +73,9 @@ public static partial class SurrealFormatter
     /// <c>table:⟨value⟩</c> using Surreal's angle-bracket escape. Throws if the value
     /// contains the closing-bracket character itself (no two-level escape exists).
     /// </summary>
-    public static string RecordId(RecordId id)
+    public static string RecordId(this RecordId id)
     {
-        var table = Identifier(id.Table);
+        var table = id.Table.Identifier();
         var value = id.Value;
 
         if (BareValuePattern.IsMatch(value))
@@ -64,7 +95,7 @@ public static partial class SurrealFormatter
     /// standard backslash escapes. Used by the <c>LET $...</c> renderer for scalar
     /// values where Surreal expects a string literal.
     /// </summary>
-    public static string StringLiteral(string value)
+    public static string StringLiteral(this string value)
     {
         var escaped = value
             .Replace("\\", "\\\\", StringComparison.Ordinal)

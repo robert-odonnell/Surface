@@ -76,7 +76,7 @@ public sealed class WriterLease : IAsyncDisposable, IDisposable
         RecordIdFormat.Validate(aggregateName);
 
         var sql = $"SELECT seq FROM writer_lease:{aggregateName};";
-        using var doc = await transport.ExecuteAsync(sql, null, ct);
+        using var doc = await transport.ExecuteAsync(sql, ct);
         var seq = ParseSequence(doc);
         return new WriterLease(aggregateName, seq);
     }
