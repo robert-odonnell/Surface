@@ -1,4 +1,5 @@
 using Disruptor.Surface.Runtime;
+using Disruptor.Surface.Runtime.Query;
 using Disruptor.Surface.Sample;
 using Disruptor.Surface.Sample.Models;
 using Disruptor.Surface.Sample.Relations;
@@ -6,7 +7,7 @@ using Disruptor.Surface.Sample.Relations;
 const string designAggregate = "design";
 const string reviewAggregate = "review";
 
-// Mirror of: surreal start --bind 127.0.0.1:8000 --default-namespace project-brain
+// Mirror of: surreal start --bind 127.0.0.1:8000 --default-namespace project-brain 
 //                          --default-database workspace --username root --password secret
 var config = new SurrealConfig(
     Url: new Uri("http://127.0.0.1:8000"),
@@ -38,7 +39,7 @@ await transport.ExecuteAsync("DELETE writer_lease;");
 // ── 2. Seed three Design aggregates. Each pass acquires + releases its own writer
 //    lease so the per-aggregate granularity is exercised.
 var seededDesignIds = new List<DesignId>();
-for (var i = 0; i < 3; i++)
+for (var i = 0; i < 10; i++)
 {
     seededDesignIds.Add(await SeedAndCommitDesign($"seed-{i}", transport));
 }
@@ -54,7 +55,12 @@ var reviewId = await SeedAndCommitReview(seededDesignIds[2], transport);
 await ReloadAndPrintDesign(seededDesignIds[2], transport);
 await ReloadAndPrintReview(reviewId, transport);
 
-// ── 5. Lease theft demo — acquire a lease, simulate theft via direct DELETE, then
+// ── 5. Query layer demo — exercises the unified read+load surface end-to-end:
+//    flat predicates, traversal projections, edge queries, filtered LoadAsync,
+//    LoadShapeViolationException on unloaded reads, and FetchAsync top-up.
+await DemoQueryLayer(seededDesignIds, transport);
+
+// ── 6. Lease theft demo — acquire a lease, simulate theft via direct DELETE, then
 //    attempt commit and observe the typed exception.
 await DemoLeaseTheft(seededDesignIds[2], transport);
 
@@ -85,7 +91,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
         Description = $"design.constraint.description: {text}"
     });
 
-    for (var i = 0; i < 2; i++)
+    for (var i = 0; i < 5; i++)
     {
         var epic = session.Track(new Epic
         {
@@ -94,7 +100,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
             Description = $"design.epic.{i}.description: {text}"
         });
 
-        for (var j = 0; j < 2; j++)
+        for (var j = 0; j < 5; j++)
         {
             var feature = session.Track(new Feature
             {
@@ -104,7 +110,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
                 Description = $"design.epic.{i}.feature.{j}.description: {text}"
             });
 
-            for (var k = 0; k < 2; k++)
+            for (var k = 0; k < 5; k++)
             {
                 var userStory = session.Track(new UserStory
                 {
@@ -116,7 +122,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
                     SoThat = $"so that {text}"
                 });
 
-                for (var l = 0; l < 2; l++)
+                for (var l = 0; l < 5; l++)
                 {
                     var ac = session.Track(new AcceptanceCriteria
                     {
@@ -140,7 +146,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
                     // `restricts` for the within-aggregate edge surface.
                     session.Relate<Validates>(test, ac);
 
-                    for (var m = 0; m < 3; m++)
+                    for (var m = 0; m < 5; m++)
                     {
                         ac.Scenarios.Add(new Scenario(
                             $"scenario.{m}.kind",
@@ -320,6 +326,90 @@ async Task ReloadAndPrintReview(ReviewId reloadId, SurrealHttpClient db)
         {
             Console.WriteLine($"    - {id}");
         }
+    }
+
+    Console.WriteLine();
+}
+
+async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SurrealHttpClient db)
+{
+    Console.WriteLine("--- Query layer demo ---");
+
+    // (a) Flat read-mode query: predicate factory + ExecuteAsync. No session, no lease.
+    //     Constraint.Description was seeded with the seed name; pin to one batch.
+    var seedTwoConstraints = await Workspace.Query.Constraints
+        .Where(ConstraintQ.Description.Contains("seed-2"))
+        .ExecuteAsync(db);
+    Console.WriteLine($"  flat predicate: {seedTwoConstraints.Count} constraints with 'seed-2' in description");
+    foreach (var c in seedTwoConstraints.Take(2))
+    {
+        Console.WriteLine($"    - {c.Id}  '{c.Description}'");
+    }
+
+    // (b) Read-mode traversal: pin a single design, include its details + constraints.
+    //     Returns root entities; navigation through .Constraints walks the implicit
+    //     internal session populated during hydration.
+    var targetId = designIds[2];
+    var designsWithConstraints = await Workspace.Query.Designs
+        .WithId(targetId)
+        .IncludeDetails()
+        .IncludeConstraints(c => c.IncludeDetails())
+        .ExecuteAsync(db);
+    var queriedDesign = designsWithConstraints.Single();
+    Console.WriteLine($"  traversal read: design '{queriedDesign.Description}' → {queriedDesign.Constraints.Count} constraint(s)");
+    foreach (var c in queriedDesign.Constraints.Take(2))
+    {
+        Console.WriteLine($"    - {c.Id}  details.header='{c.Details?.Header}'");
+    }
+
+    // (c) Edge query: enumerate `restricts` edges originating at the constraints we just
+    //     read. Returns flat (source, target) pairs — useful for UI listings without
+    //     materialising either side's entity.
+    var constraintIds = queriedDesign.Constraints.Select(c => c.Id).ToList();
+    var restrictPairs = await Workspace.Query.Edges.Restricts
+        .WhereIn(constraintIds)
+        .ExecuteAsync(db);
+    Console.WriteLine($"  edge query: {restrictPairs.Count} restricts edges from these constraints");
+    foreach (var pair in restrictPairs.Take(3))
+    {
+        Console.WriteLine($"    - {pair.Source} → {pair.Target}");
+    }
+
+    // (d) Compiler-driven LoadAsync (filtered slice): only Constraints get loaded.
+    //     Same query AST as (b) — only the terminal verb differs. The session it returns
+    //     is mutable / committable; we don't commit here.
+    await using var lease = await WriterLease.AcquireAsync(db, designAggregate);
+    var slicedSession = await Workspace.Query.Designs
+        .WithId(targetId)
+        .IncludeDetails()
+        .IncludeConstraints(c => c.IncludeDetails())
+        .LoadAsync(db, lease);
+    var slicedDesign = slicedSession.Get<Design>(targetId)!;
+    Console.WriteLine($"  filtered LoadAsync: {slicedDesign.Constraints.Count} constraints loaded into a write-mode session");
+
+    // (e) LoadShapeViolationException: reading a slice that wasn't included throws.
+    //     Strict-with-escape — the message points at FetchAsync as the way out.
+    try
+    {
+        _ = slicedDesign.Epics.Count;
+        Console.WriteLine("  ⚠  reading Epics succeeded — unexpected");
+    }
+    catch (LoadShapeViolationException ex)
+    {
+        Console.WriteLine($"  caught LoadShapeViolationException for slice '{ex.Field}'");
+    }
+
+    // (f) FetchAsync top-up: extend the loaded slice to include Epics. After this,
+    //     reads of design.Epics succeed against the same session.
+    await slicedSession.FetchAsync(
+        Workspace.Query.Designs.WithId(targetId).IncludeEpics(e => e.IncludeDetails()),
+        db);
+    Console.WriteLine($"  FetchAsync top-up: design now sees {slicedDesign.Epics.Count} epic(s)");
+    foreach (var e in slicedDesign.Epics.Take(2))
+    {
+        // Epic doesn't declare a public [Id] partial; the IEntity.Id is explicit-impl,
+        // reach it through the interface for diagnostics.
+        Console.WriteLine($"    - {((IEntity)e).Id}  '{e.Description}'");
     }
 
     Console.WriteLine();

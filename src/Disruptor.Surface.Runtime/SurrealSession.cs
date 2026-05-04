@@ -468,19 +468,19 @@ public sealed class SurrealSession : IHydrationSink
         var (sql, bindings) = query.Compile();
         using var doc = await transport.ExecuteAsync(sql, bindings, ct);
         var rs = new SurrealResultSet(doc.RootElement);
-        var rows = rs.ResultAt(0);
+        var rows = rs.ResultAt();
 
         IHydrationSink sink = this;
 
         switch (rows.ValueKind)
         {
-            case System.Text.Json.JsonValueKind.Array:
+            case JsonValueKind.Array:
                 foreach (var row in rows.EnumerateArray())
                 {
                     HydrateMergingRoot<T>(row, sink, query.Includes);
                 }
                 break;
-            case System.Text.Json.JsonValueKind.Object:
+            case JsonValueKind.Object:
                 HydrateMergingRoot<T>(rows, sink, query.Includes);
                 break;
             // Null / Undefined / scalar — nothing to merge.
@@ -492,7 +492,7 @@ public sealed class SurrealSession : IHydrationSink
     /// entities receive HydratePartial (uncommitted writes preserved); new entities get
     /// the full Hydrate via <c>new T()</c>.
     /// </summary>
-    private void HydrateMergingRoot<T>(System.Text.Json.JsonElement row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes)
+    private void HydrateMergingRoot<T>(JsonElement row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes)
         where T : class, IEntity, new()
     {
         if (!HydrationJson.TryReadRecordId(row, "id", out var id)) return;
@@ -504,7 +504,7 @@ public sealed class SurrealSession : IHydrationSink
         else
         {
             var entity = new T();
-            ((IEntity)entity).Hydrate(row, sink);
+            entity.Hydrate(row, sink);
         }
 
         HydrateMergingNested(row, includes, sink);
@@ -517,7 +517,7 @@ public sealed class SurrealSession : IHydrationSink
     /// instead of the include's full-hydrate <see cref="IncludeChildrenNode.Hydrator"/>
     /// callback. Slice marking is identical to the read-mode path.
     /// </summary>
-    private void HydrateMergingNested(System.Text.Json.JsonElement row, IReadOnlyList<Query.IIncludeNode> nodes, IHydrationSink sink)
+    private void HydrateMergingNested(JsonElement row, IReadOnlyList<Query.IIncludeNode> nodes, IHydrationSink sink)
     {
         var hasOwnerId = HydrationJson.TryReadRecordId(row, "id", out var ownerId);
 
@@ -538,11 +538,11 @@ public sealed class SurrealSession : IHydrationSink
                         sink.MarkSliceLoaded(ownerId, sliceKey);
                     }
                     if (!row.TryGetProperty(children.ChildTable, out var arr)) continue;
-                    if (arr.ValueKind != System.Text.Json.JsonValueKind.Array) continue;
+                    if (arr.ValueKind != JsonValueKind.Array) continue;
 
                     foreach (var childRow in arr.EnumerateArray())
                     {
-                        if (childRow.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+                        if (childRow.ValueKind != JsonValueKind.Object) continue;
                         if (HydrationJson.TryReadRecordId(childRow, "id", out var childId)
                             && entities.TryGetValue(childId, out var existingChild))
                         {

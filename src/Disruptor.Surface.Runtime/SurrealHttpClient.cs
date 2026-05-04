@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Disruptor.Surface.Runtime;
 
@@ -60,18 +61,15 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
 
     private async Task<JsonElement> SendAndNormalizeAsync(string surrealQl, IReadOnlyDictionary<string, object?>? vars, CancellationToken cancellationToken)
     {
-        var letCount = vars?.Count ?? 0;
-        var query = BuildLetPrefix(vars) + surrealQl;
-
         const int maxAttempts = 3;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
-                using var response = await SendSqlAsync(query, cancellationToken);
+                using var response = await SendRpcQueryAsync(surrealQl, vars, cancellationToken);
                 var payload = await response.Content.ReadAsStringAsync(cancellationToken);
                 using var doc = JsonDocument.Parse(payload);
-                var normalized = NormalizeStatementResults(doc.RootElement, letCount);
+                var normalized = ExtractRpcResult(doc.RootElement);
                 ValidateSqlStatuses(normalized);
                 return normalized;
             }
@@ -113,21 +111,57 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
         return result;
     }
 
-    private async Task<HttpResponseMessage> SendSqlAsync(string query, CancellationToken ct)
+    /// <summary>
+    /// POST a SurrealDB JSON-RPC <c>query</c> call to <c>/rpc</c>. The SQL travels
+    /// unmodified in <c>params[0]</c>; the binding dictionary travels in
+    /// <c>params[1]</c> and SurrealDB binds it server-side — no <c>LET</c> prefix
+    /// stitched into the query text, no parameter substitution at the client. Record-id
+    /// values use the canonical <c>{ "tb", "id" }</c> Thing form so SurrealDB types them
+    /// correctly when comparing against schema-typed columns.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendRpcQueryAsync(string sql, IReadOnlyDictionary<string, object?>? vars, CancellationToken ct)
     {
         await EnsureSignedInAsync(force: false, ct);
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, "sql")
+        var body = BuildRpcQueryBody(sql, vars);
+
+        var response = await SendRpcRequestAsync(body, ct);
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
-            Content = new StringContent(query, Encoding.UTF8, "text/plain")
+            response.Dispose();
+            await EnsureSignedInAsync(force: true, ct);
+            response = await SendRpcRequestAsync(body, ct);
+
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                response.Dispose();
+                throw new SurrealException("SurrealDB unauthorized after re-auth retry.", retryable: false);
+            }
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errBody = await response.Content.ReadAsStringAsync(ct);
+            response.Dispose();
+            throw new SurrealException($"SurrealDB /rpc failed: {(int)response.StatusCode} {errBody}", retryable: false);
+        }
+
+        return response;
+    }
+
+    private async Task<HttpResponseMessage> SendRpcRequestAsync(string body, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "rpc")
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
         };
         ApplySqlHeaders(request);
         ApplyAuthHeader(request);
 
-        HttpResponseMessage response;
         try
         {
-            response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            return await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         }
         catch (TaskCanceledException ex)
         {
@@ -139,35 +173,104 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
             var detail = string.IsNullOrWhiteSpace(inner) ? ex.Message : $"{ex.Message} | inner: {inner}";
             throw new SurrealException($"HTTP request failed: {detail}", retryable: true);
         }
+    }
 
-        if (response.StatusCode == HttpStatusCode.Unauthorized)
+    /// <summary>
+    /// Render the JSON-RPC envelope for SurrealDB's <c>query</c> method. Bindings are
+    /// inlined into the SQL via <see cref="SurrealFormatter"/> rather than passed as
+    /// JSON-RPC vars — SurrealDB's JSON binder treats record-shaped objects (and strings
+    /// that happen to look like record ids) as generic Object/Strand values rather than
+    /// Things, so a query like <c>WHERE id = $p0</c> bound with a record never matches.
+    /// SurrealQL literal syntax (<c>table:value</c>) is parsed at the query level and
+    /// preserves type. <c>params[1]</c> stays as an empty object because SurrealDB's
+    /// <c>query</c> method signature requires the slot.
+    /// </summary>
+    private static string BuildRpcQueryBody(string sql, IReadOnlyDictionary<string, object?>? vars)
+    {
+        var inlinedSql = vars is null || vars.Count == 0 ? sql : InlineVars(sql, vars);
+        var payload = new RpcRequest("disruptor", "query", new object?[] { inlinedSql, EmptyVars });
+        return JsonSerializer.Serialize(payload, RpcSerializerOptions);
+    }
+
+    private static readonly Dictionary<string, object?> EmptyVars = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Substitute every <c>$pN</c> reference in <paramref name="sql"/> with its
+    /// rendered SurrealQL literal. Iteration order is longest-key-first so <c>$p10</c>
+    /// substitution doesn't accidentally consume the <c>$p1</c> prefix.
+    /// </summary>
+    private static string InlineVars(string sql, IReadOnlyDictionary<string, object?> vars)
+    {
+        foreach (var kv in vars.OrderByDescending(k => k.Key.Length).ThenBy(k => k.Key, StringComparer.Ordinal))
         {
-            response.Dispose();
-            await EnsureSignedInAsync(force: true, ct);
+            var literal = RenderSurrealLiteral(kv.Value);
+            sql = System.Text.RegularExpressions.Regex.Replace(sql, $@"\${kv.Key}\b", _ => literal);
+        }
+        return sql;
+    }
 
-            using var retry = new HttpRequestMessage(HttpMethod.Post, "sql")
-            {
-                Content = new StringContent(query, Encoding.UTF8, "text/plain")
-            };
-            ApplySqlHeaders(retry);
-            ApplyAuthHeader(retry);
-            response = await httpClient.SendAsync(retry, HttpCompletionOption.ResponseHeadersRead, ct);
+    /// <summary>
+    /// Render a binding value as a SurrealQL literal. Strings/dates/enums route through
+    /// <see cref="SurrealFormatter.StringLiteral"/> for proper escaping; record ids use
+    /// <see cref="SurrealFormatter.RecordId"/> for the bare-or-bracketed form;
+    /// enumerables become array literals; everything else falls through to JSON for
+    /// generic objects (rare, mostly diagnostics).
+    /// </summary>
+    private static string RenderSurrealLiteral(object? value) => value switch
+    {
+        null => "NONE",
+        bool b => b ? "true" : "false",
+        sbyte or byte or short or ushort or int or uint or long or ulong => value.ToString()!,
+        float f => f.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+        double d => d.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+        decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        string s => SurrealFormatter.StringLiteral(s),
+        RecordId rid => SurrealFormatter.RecordId(rid),
+        IEntity v => SurrealFormatter.RecordId(v.Id),
+        IRecordId r => SurrealFormatter.RecordId(RecordId.From(r)),
+        Guid g => SurrealFormatter.StringLiteral(g.ToString()),
+        Ulid u => SurrealFormatter.StringLiteral(u.ToString()),
+        DateTime dt => SurrealFormatter.StringLiteral(dt.ToUniversalTime().ToString("O")),
+        DateTimeOffset dto => SurrealFormatter.StringLiteral(dto.ToString("O")),
+        Enum e => SurrealFormatter.StringLiteral(e.ToString()),
+        System.Collections.IEnumerable e => "[" + string.Join(", ", e.Cast<object?>().Select(RenderSurrealLiteral)) + "]",
+        _ => JsonSerializer.Serialize(value, SurrealJson.SerializerOptions),
+    };
 
-            if (response.StatusCode == HttpStatusCode.Unauthorized)
-            {
-                response.Dispose();
-                throw new SurrealException("SurrealDB unauthorized after re-auth retry.", retryable: false);
-            }
+    /// <summary>JSON-RPC 2.0 envelope shape SurrealDB's <c>/rpc</c> endpoint accepts.</summary>
+    private readonly record struct RpcRequest(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("method")] string Method,
+        [property: JsonPropertyName("params")] object?[] Params);
+
+    private static readonly JsonSerializerOptions RpcSerializerOptions = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.Never,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    /// <summary>
+    /// Pull the <c>result</c> field out of SurrealDB's RPC response envelope:
+    /// <c>{ "id": "...", "result": [statements...] }</c> on success, or
+    /// <c>{ "id": "...", "error": { ... } }</c> on failure.
+    /// </summary>
+    private static JsonElement ExtractRpcResult(JsonElement root)
+    {
+        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var errorElem))
+        {
+            var errMessage = errorElem.ValueKind == JsonValueKind.Object && errorElem.TryGetProperty("message", out var msg)
+                ? msg.GetString()
+                : errorElem.GetRawText();
+            throw new SurrealException($"SurrealDB RPC error: {errMessage}", retryable: false);
         }
 
-        if (!response.IsSuccessStatusCode)
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("result", out var resultElem))
         {
-            var body = await response.Content.ReadAsStringAsync(ct);
-            response.Dispose();
-            throw new SurrealException($"SurrealDB /sql failed: {(int)response.StatusCode} {body}", retryable: false);
+            throw new SurrealProtocolException(
+                $"Expected a JSON-RPC envelope with a 'result' or 'error' field; got {root.ValueKind}.");
         }
 
-        return response;
+        return resultElem.Clone();
     }
 
     private async Task EnsureSignedInAsync(bool force, CancellationToken ct)
@@ -258,78 +361,6 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
         return trimmed;
     }
 
-    public static string BuildLetPrefix(IReadOnlyDictionary<string, object?>? vars)
-    {
-        if (vars is null || vars.Count == 0)
-        {
-            return string.Empty;
-        }
-
-        var sb = new StringBuilder();
-        foreach (var kv in vars.OrderBy(k => k.Key, StringComparer.Ordinal))
-        {
-            sb.Append("LET $").Append(kv.Key).Append(" = ")
-              .Append(RenderValue(kv.Value)).Append(";\n");
-        }
-        return sb.ToString();
-    }
-
-    private static string RenderValue(object? value)
-    {
-        if (value is null)
-        {
-            return "NONE";
-        }
-
-        return value switch
-        {
-            bool b => b ? "true" : "false",
-            int or long or short or byte or uint or ulong or ushort or sbyte => value.ToString()!,
-            float f => f.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-            double d => d.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-            decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            string s => SurrealFormatter.StringLiteral(s),
-            RecordId rid => SurrealFormatter.RecordId(rid),
-            Guid g => SurrealFormatter.StringLiteral(g.ToString()),
-            Ulid u => SurrealFormatter.StringLiteral(u.ToString()),
-            DateTime dt => SurrealFormatter.StringLiteral(dt.ToUniversalTime().ToString("O")),
-            DateTimeOffset dto => SurrealFormatter.StringLiteral(dto.ToString("O")),
-            Enum e => SurrealFormatter.StringLiteral(e.ToString()),
-            IEntity v => SurrealFormatter.RecordId(v.Id),
-            System.Collections.IEnumerable e => $"[{string.Join(", ", e.Cast<object?>().Select(RenderValue))}]",
-            _ => JsonSerializer.Serialize(value, SurrealJson.SerializerOptions)
-        };
-    }
-
-    private static JsonElement NormalizeStatementResults(JsonElement root, int letCount)
-    {
-        var statements = new List<JsonElement>();
-        if (root.ValueKind == JsonValueKind.Array)
-        {
-            statements.AddRange(root.EnumerateArray().Select(i => i.Clone()));
-        }
-        else if (root.ValueKind == JsonValueKind.Object)
-        {
-            statements.Add(root.Clone());
-        }
-        else
-        {
-            return root.Clone();
-        }
-
-        if (letCount > 0 && statements.Count > letCount)
-        {
-            statements = statements.Skip(letCount).ToList();
-        }
-        else if (letCount >= statements.Count)
-        {
-            statements.Clear();
-        }
-
-        using var filtered = JsonDocument.Parse(JsonSerializer.Serialize(statements));
-        return filtered.RootElement.Clone();
-    }
-
     private static void ValidateSqlStatuses(JsonElement response)
     {
         if (response.ValueKind != JsonValueKind.Array)
@@ -366,6 +397,7 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
             throw new SurrealException($"SurrealDB statement failed: {details}", retryable);
         }
     }
+
 }
 
 public sealed class SurrealException(string message, bool retryable) : Exception(message)

@@ -9,8 +9,8 @@ namespace Disruptor.Surface.Runtime.Query;
 /// The struct's role is to keep the compile-time type of the value flowing into the
 /// predicate — <c>Eq(T value)</c> rejects mismatched types at the call site instead of
 /// silently boxing them. Once a predicate node is constructed the type tag is dropped:
-/// the AST stores <c>object?</c> values and the runtime parameter renderer (transport's
-/// <c>BuildLetPrefix</c>) figures out the shape.
+/// the AST stores <c>object?</c> values; the transport's RPC layer serialises each
+/// binding into the JSON-RPC payload and SurrealDB binds them server-side.
 /// </para>
 /// </summary>
 public readonly record struct PropertyExpr<T>(string Field)
