@@ -205,6 +205,7 @@ public sealed class ModelGenerator : IIncrementalGenerator
         SchemaEmitter.Emit(spc, graph);
         QueryRootEmitter.Emit(spc, graph);
         EdgeQueryRootEmitter.Emit(spc, graph);
+        LoadEntryEmitter.Emit(spc, graph);
 
         foreach (var table in graph.Tables)
         {

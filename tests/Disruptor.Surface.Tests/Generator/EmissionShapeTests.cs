@@ -378,6 +378,56 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
+    public void Emits_LoadAsync_OnlyOnAggregateRoots()
+    {
+        // Design is [AggregateRoot] → DesignQueryLoad is emitted.
+        // Constraint is not → no ConstraintQueryLoad. The query layer's "load mode is
+        // single-aggregate-rooted" rule lives in the generator, not in a runtime check;
+        // a non-root Query<T> simply has no LoadAsync extension visible.
+        var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        Assert.Contains("public static class DesignQueryLoad", allSrc);
+        Assert.Contains("LoadAsync(this global::Disruptor.Surface.Runtime.Query.Query<global::M.Design>", allSrc);
+        Assert.DoesNotContain("ConstraintQueryLoad", allSrc);
+    }
+
+    [Fact]
+    public void LoadAsync_DelegatesTo_AggregateLoader_PopulateAsync()
+    {
+        // PR5 contract: LoadAsync v1 is a thin shim over the existing aggregate loader.
+        // The body constructs a typed root id from the canonical RecordId, news up a
+        // SurrealSession with the user's ReferenceRegistry, and forwards. PR6 replaces
+        // this shim with a compiler-driven path when Includes are present.
+        var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
+        var loadFile = GeneratorHarness.FindGeneratedFile(result, "DesignQueryLoad");
+        Assert.NotNull(loadFile);
+
+        var src = loadFile!.ToString();
+        Assert.Contains("global::Disruptor.Surface.Runtime.DesignAggregateLoader.PopulateAsync", src);
+        Assert.Contains("new global::Disruptor.Surface.Runtime.SurrealSession(global::M.Workspace.ReferenceRegistry)", src);
+        Assert.Contains("new global::M.DesignId(query.PinnedId.Value.Value)", src);
+    }
+
+    [Fact]
+    public void LoadAsync_RejectsFilteredQueries_AndUnpinnedQueries()
+    {
+        // Two preconditions encoded into the body: traversal Includes still throw NIE
+        // (gate for PR6), and a missing WithId throws InvalidOperationException with a
+        // hint at the right call.
+        var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
+        var loadFile = GeneratorHarness.FindGeneratedFile(result, "DesignQueryLoad");
+        Assert.NotNull(loadFile);
+
+        var src = loadFile!.ToString();
+        Assert.Contains("if (query.Includes.Count > 0)", src);
+        Assert.Contains("throw new global::System.NotImplementedException", src);
+        Assert.Contains("if (query.PinnedId is null)", src);
+        Assert.Contains("throw new global::System.InvalidOperationException", src);
+        Assert.Contains(".WithId(DesignId)", src);
+    }
+
+    [Fact]
     public void TraversalBuilder_LeafTable_StillEmitsBuilder_WithJustWhere()
     {
         // A table with no traversable members (no [Children], no [Reference, Inline])

@@ -19,20 +19,27 @@ namespace Disruptor.Surface.Runtime.Query;
 public sealed class Query<T>
     where T : class, IEntity, new()
 {
-    private readonly string table;
-    private readonly IPredicate? filter;
-    private readonly RecordId? pinnedId;
-    private readonly IReadOnlyList<IIncludeNode> includes;
+    /// <summary>Snake-cased SurrealDB table name this query targets.</summary>
+    public string Table { get; }
+
+    /// <summary>Accumulated WHERE-clause predicate, or <c>null</c> when no filter is set.</summary>
+    public IPredicate? Filter { get; }
+
+    /// <summary>Single-record pin set via <see cref="WithId"/>, or <c>null</c> when unpinned.</summary>
+    public RecordId? PinnedId { get; }
+
+    /// <summary>Traversal nodes added via <see cref="WithInclude"/>. Empty when the query is flat.</summary>
+    public IReadOnlyList<IIncludeNode> Includes { get; }
 
     /// <summary>Generator entry point. <paramref name="table"/> is the snake-cased SurrealDB table name.</summary>
     public Query(string table) : this(table, filter: null, pinnedId: null, includes: Array.Empty<IIncludeNode>()) { }
 
     private Query(string table, IPredicate? filter, RecordId? pinnedId, IReadOnlyList<IIncludeNode> includes)
     {
-        this.table = table;
-        this.filter = filter;
-        this.pinnedId = pinnedId;
-        this.includes = includes;
+        Table = table;
+        Filter = filter;
+        PinnedId = pinnedId;
+        Includes = includes;
     }
 
     /// <summary>
@@ -42,8 +49,8 @@ public sealed class Query<T>
     /// </summary>
     public Query<T> Where(IPredicate predicate)
     {
-        var combined = filter is null ? predicate : Predicate.And(filter, predicate);
-        return new Query<T>(table, combined, pinnedId, includes);
+        var combined = Filter is null ? predicate : Predicate.And(Filter, predicate);
+        return new Query<T>(Table, combined, PinnedId, Includes);
     }
 
     /// <summary>
@@ -51,7 +58,7 @@ public sealed class Query<T>
     /// apply, AND-merged with the id pin.
     /// </summary>
     public Query<T> WithId(IRecordId id)
-        => new(table, filter, RecordId.From(id), includes);
+        => new(Table, Filter, RecordId.From(id), Includes);
 
     /// <summary>
     /// Adds a traversal node to the query. The generated <c>Include*</c> extension
@@ -60,13 +67,13 @@ public sealed class Query<T>
     /// </summary>
     public Query<T> WithInclude(IIncludeNode node)
     {
-        var next = new IIncludeNode[includes.Count + 1];
-        for (var i = 0; i < includes.Count; i++)
+        var next = new IIncludeNode[Includes.Count + 1];
+        for (var i = 0; i < Includes.Count; i++)
         {
-            next[i] = includes[i];
+            next[i] = Includes[i];
         }
-        next[includes.Count] = node;
-        return new Query<T>(table, filter, pinnedId, next);
+        next[Includes.Count] = node;
+        return new Query<T>(Table, Filter, PinnedId, next);
     }
 
     /// <summary>
@@ -77,7 +84,7 @@ public sealed class Query<T>
     /// </summary>
     public async Task<IReadOnlyList<T>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
     {
-        var (sql, bindings) = QueryCompiler.Compile(table, filter, pinnedId, includes);
+        var (sql, bindings) = QueryCompiler.Compile(Table, Filter, PinnedId, Includes);
         using var doc = await transport.ExecuteAsync(sql, bindings, ct);
         var rs = new SurrealResultSet(doc.RootElement);
         var rows = rs.ResultAt(0);
@@ -110,7 +117,7 @@ public sealed class Query<T>
             var rowJson = rows.ValueKind == JsonValueKind.Array
                 ? GetRowAt(rows, i)
                 : rows;
-            HydrateNested(rowJson, includes, sink);
+            HydrateNested(rowJson, Includes, sink);
         }
 
         return list;
