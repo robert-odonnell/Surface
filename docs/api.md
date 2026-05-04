@@ -123,13 +123,178 @@ public static Task ApplySchemaAsync(
 
 public static IReferenceRegistry ReferenceRegistry { get; }
 
+public static GeneratedQueryRoot Query { get; }
+
 public Task<SurrealSession> LoadDesignAsync(
     ISurrealTransport transport,
     DesignId rootId,
     CancellationToken ct = default);
 ```
 
-There is one `Load{Root}Async` method per `[AggregateRoot]`.
+There is one `Load{Root}Async` method per `[AggregateRoot]`. The legacy load path remains alongside the unified `Workspace.Query.{Root}.WithId(...).LoadAsync(...)` shape — both produce the same hydrated session for a no-`Include*` call.
+
+## Query API
+
+Two terminal verbs share one query AST:
+
+- `ExecuteAsync(transport, ct)` — read mode. Returns hydrated entities; the supporting session is internal and never exposed.
+- `LoadAsync(transport, lease, ct)` — write mode. Returns a `SurrealSession` you mutate and commit. Only emitted on `Query<TRoot>` where `TRoot.IsAggregateRoot`.
+
+### `Workspace.Query`
+
+The user's `[CompositionRoot]` partial gains a static `Query` accessor returning `GeneratedQueryRoot`, with one property per `[Table]` and an `Edges` sub-root:
+
+```csharp
+Workspace.Query.Designs       // Query<Design>
+Workspace.Query.Constraints   // Query<Constraint>
+Workspace.Query.UserStories   // Query<UserStory>     (pluralised PascalCase)
+Workspace.Query.Edges.Restricts  // EdgeQuery<ConstraintId, IRestrictedById>
+```
+
+### Predicate factories — `{Name}Q`
+
+Per `[Table]` the generator emits a sibling static class with one `PropertyExpr<T>` per `[Id]`/`[Property]`:
+
+```csharp
+public static class ConstraintQ
+{
+    public static readonly PropertyExpr<ConstraintId> Id = new("id");
+    public static readonly PropertyExpr<string> Description = new("description");
+}
+```
+
+`PropertyExpr<T>` exposes:
+
+| Method | SurrealQL output |
+| --- | --- |
+| `Eq(T value)` | `field = $pN` |
+| `Lt`/`Le`/`Gt`/`Ge(T value)` | `field {<,<=,>,>=} $pN` |
+| `In(params T[] values)` / `In(IEnumerable<T>)` | `field IN $pN` |
+| `Contains(string substring)` (extension on `PropertyExpr<string>`) | `string::contains(field, $pN)` |
+
+Compose via `Predicate.And(...)`, `Predicate.Or(...)`, `Predicate.Not(...)`.
+
+### `Query<T>`
+
+```csharp
+public sealed class Query<T> where T : class, IEntity, new()
+{
+    public string Table { get; }
+    public IPredicate? Filter { get; }
+    public RecordId? PinnedId { get; }
+    public IReadOnlyList<IIncludeNode> Includes { get; }
+
+    public Query<T> Where(IPredicate predicate);
+    public Query<T> WithId(IRecordId id);
+    public Query<T> WithInclude(IIncludeNode node);
+
+    public Task<IReadOnlyList<T>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default);
+    public Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(SurrealSession session, ISurrealTransport transport, CancellationToken ct = default);
+    public (string Sql, IReadOnlyDictionary<string, object?>? Bindings) Compile();
+}
+```
+
+`Where` AND-merges across calls. `WithId` overwrites. `WithInclude` is the primitive the generated `Include*` extensions call into.
+
+### Traversal — `{Name}TraversalBuilder` and `{Name}QueryIncludes`
+
+For each `[Table]` with traversable members (`[Children]` or `[Reference, Inline]`), the generator emits two siblings:
+
+- A traversal-builder type (`DesignTraversalBuilder`) with `.Where(IPredicate)` plus one `IncludeX(Action<{Child}TraversalBuilder>?)` per member. This is the type passed as the `configure` argument inside a parent's `Include*` lambda.
+- A static extensions class (`DesignQueryIncludes`) that exposes the same `Include*` shape as extension methods on `Query<Design>` — the root-level entry point.
+
+```csharp
+var rows = await Workspace.Query.Designs
+    .WithId(designId)
+    .IncludeDetails()                                    // [Reference, Inline] → field.* projection
+    .IncludeConstraints(c => c                          // [Children] → nested SELECT
+        .Where(ConstraintQ.Description.Contains("security"))
+        .IncludeDetails())
+    .IncludeEpics(e => e.IncludeFeatures(f =>
+        f.Where(FeatureQ.Description.Contains("auth"))))
+    .ExecuteAsync(transport);
+```
+
+Forward/inverse relation traversals and plain (non-`Inline`) `[Reference]` traversals are not exposed — relation traversal needs a different SurrealQL shape and lands in a later release.
+
+### Edge queries — `Workspace.Query.Edges.{Kind}`
+
+Per forward relation kind, `EdgeQuery<TIn, TOut>` returns flat `(Source, Target)` pairs:
+
+```csharp
+public sealed class EdgeQuery<TIn, TOut>
+    where TIn : IRecordId
+    where TOut : IRecordId
+{
+    public EdgeQuery<TIn, TOut> WhereIn(IEnumerable<TIn> ids);
+    public EdgeQuery<TIn, TOut> WhereOut(IEnumerable<TOut> ids);
+    public EdgeQuery<TIn, TOut> Where(IPredicate predicate);
+    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default);
+}
+
+public readonly record struct EdgeRow(RecordId Source, RecordId Target);
+```
+
+`TIn` and `TOut` are id-side types — the concrete `{Name}Id` for single-member sides, or the generated id-side union marker (`IRestrictedById`, `IReferencedById`, …) when 2+ tables participate.
+
+### `LoadAsync`
+
+For aggregate-root tables, the generator emits:
+
+```csharp
+public static Task<SurrealSession> LoadAsync(
+    this Query<Design> query,
+    ISurrealTransport transport,
+    WriterLease lease,
+    CancellationToken ct = default);
+```
+
+Body:
+
+- Throws `InvalidOperationException` when `WithId` wasn't called — load mode is single-aggregate-rooted.
+- With no `Include*` calls, delegates to the legacy `{Root}AggregateLoader.PopulateAsync` for the full-aggregate hydrate.
+- With `Include*` calls, runs the compiler-driven nested SELECT and hydrates only the chosen slice. Slices outside the load shape throw `LoadShapeViolationException` on read.
+
+The lease is a write-mode marker — the user holds it and passes the same handle into `session.CommitAsync(transport, lease)`.
+
+### Strict-with-escape: `LoadShapeViolationException` and `Fetch`
+
+A filtered `LoadAsync` only marks the user-Included slices as loaded. Reads against `[Children]`/`[Reference]`/`[Parent]`/relation properties whose slice wasn't loaded throw:
+
+```csharp
+public sealed class LoadShapeViolationException : InvalidOperationException
+{
+    public RecordId Owner { get; }
+    public string Field { get; }
+    public string FetchHint { get; }
+}
+```
+
+The exception message points at `session.FetchAsync(...)` — the top-up extension query that hydrates additional slices into the existing session:
+
+```csharp
+try
+{
+    var notes = design.Notes;        // throws — Notes wasn't included
+}
+catch (LoadShapeViolationException)
+{
+    await session.FetchAsync(
+        Workspace.Query.Designs.WithId(design.Id).IncludeNotes(),
+        transport);
+    var notes = design.Notes;        // works
+}
+```
+
+`FetchAsync` runs a partial-merge hydration: existing entities in the session receive `IEntity.HydratePartial` (skips fields the user has already mutated since load — pending writes always win); brand-new entities get the full `IEntity.Hydrate`. Slices listed in the extension query's `Includes` are marked loaded. Closed sessions throw `InvalidOperationException`.
+
+```csharp
+public Task FetchAsync<T>(
+    Query<T> query,
+    ISurrealTransport transport,
+    CancellationToken ct = default)
+    where T : class, IEntity, new();
+```
 
 ## Relations
 
@@ -180,7 +345,7 @@ Implement this if you want a custom transport. Most users use `SurrealHttpClient
 
 ### `SurrealHttpClient`
 
-HTTP transport for SurrealDB:
+HTTP transport for SurrealDB. Uses the `/rpc` endpoint with JSON-RPC 2.0 envelopes; bindings are inlined into the SurrealQL via `SurrealFormatter` rather than passed in `params[1]` (SurrealDB's JSON binder doesn't preserve `Thing` types over the wire — record-id comparisons would silently miss).
 
 ```csharp
 await using var transport = new SurrealHttpClient(config, httpClient);
@@ -192,9 +357,8 @@ var resultSet = await transport.SqlAsync("SELECT * FROM designs;");
 Useful members:
 
 - `Config`: the `SurrealConfig` used by the client.
-- `ExecuteAsync(sql, vars, ct)`: transport contract used by generated loaders and commits.
+- `ExecuteAsync(sql, vars, ct)`: transport contract used by generated loaders, commits, and the query layer. Vars get inlined as SurrealQL literals — strings via `StringLiteral`, record ids via `RecordId` (bare or angle-escaped), enumerables expanded into array literals.
 - `SqlAsync(sql, vars, ct)`: returns `SurrealResultSet` for direct SQL use.
-- `BuildLetPrefix(vars)`: renders bindings as SurrealQL `LET` statements.
 
 ### `SurrealConfig`
 

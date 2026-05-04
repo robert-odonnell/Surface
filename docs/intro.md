@@ -53,6 +53,7 @@ For that model, the generator contributes:
 - Typed ids such as `DesignId` and `ConstraintId`.
 - Implementations for the partial properties.
 - `Workspace.LoadDesignAsync(transport, designId, ct)`, which hydrates the aggregate into a `SurrealSession`.
+- `Workspace.Query` — a typed query surface with predicate factories (`ConstraintQ.Description.Contains("…")`), traversal builders (`IncludeConstraints(c => c.Where(...))`), edge query roots (`Workspace.Query.Edges.Restricts.WhereIn(...)`), and unified `ExecuteAsync` (read mode) / `LoadAsync` (write mode) terminals.
 - `Workspace.Schema` and `Workspace.ApplySchemaAsync(transport)`.
 - `Workspace.ReferenceRegistry`, used by commit planning.
 - Relation marker types for user-defined relation attributes.
@@ -74,10 +75,14 @@ The main runtime concepts are:
 The usual flow is:
 
 1. Apply generated schema at startup.
-2. Load an aggregate with the generated `Load{Root}Async` method, or create a fresh `SurrealSession` for new aggregates.
+2. Read or load:
+   - **Read mode** — `Workspace.Query.{Table}.Where(...).ExecuteAsync(transport)` for surgical projections without aggregate hydration; `Workspace.Query.Edges.{Kind}.WhereIn(...).ExecuteAsync(transport)` for flat edge pairs.
+   - **Load mode** — `Workspace.LoadDesignAsync(transport, id)` (legacy) or `Workspace.Query.Designs.WithId(id).Include*(...).LoadAsync(transport, lease)` (filtered) for a write-mode `SurrealSession`.
 3. Read and mutate entities through normal properties and methods.
 4. Acquire a `WriterLease` for writes when cross-process coordination matters.
 5. Call `session.CommitAsync(transport, lease, ct)`.
+
+Filtered loads enforce strict-with-escape: reads of slices the user didn't include throw `LoadShapeViolationException`; `session.FetchAsync(...)` is the typed escape hatch that hydrates an additional slice into the existing session, preserving any in-flight user mutations.
 
 ## What It Is Not
 

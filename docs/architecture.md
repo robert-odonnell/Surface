@@ -51,13 +51,18 @@ Main emitter responsibilities:
 | Emitter | Output |
 | --- | --- |
 | `IdEmitter` | `{Table}Id` typed record structs implementing `IRecordId`. |
-| `PartialEmitter` | Entity partial implementations, generated property bodies, session binding, hydration hooks, delete hooks. |
+| `PartialEmitter` | Entity partial implementations, generated property bodies, session binding, hydration hooks (`Hydrate` + `HydratePartial`), `MarkAllSlicesLoaded`, delete hooks, and slice-guard read paths. |
 | `RelationKindEmitter` | `IRelationKind` marker class per forward relation attribute. |
 | `UnionInterfaceEmitter` | Shared interfaces for relation target/source unions when one relation can point at multiple table types. |
-| `AggregateLoaderEmitter` | Internal loader per aggregate root. |
+| `AggregateLoaderEmitter` | Internal loader per aggregate root (legacy full-aggregate path). |
 | `CompositionRootEmitter` | `Load{Root}Async` methods on the user's composition root. |
 | `SchemaEmitter` | Ordered idempotent SurrealDB DDL chunks and `ApplySchemaAsync`. |
 | `ReferenceRegistryEmitter` | Model-scoped reference metadata for delete planning. |
+| `QueryRootEmitter` | `Workspace.Query` accessor + per-table `Query<T>` roots. |
+| `EdgeQueryRootEmitter` | `Workspace.Query.Edges.{Kind}` accessors with id-side type parameters. |
+| `PredicateFactoryEmitter` | Per-table `{Name}Q` static class — typed `PropertyExpr<T>` per scalar column. |
+| `TraversalBuilderEmitter` | Per-table `{Name}TraversalBuilder` plus the `{Name}QueryIncludes` extensions on `Query<T>`. |
+| `LoadEntryEmitter` | `LoadAsync` extension on `Query<TRoot>` for aggregate roots — delegates to the legacy loader for empty-`Includes`, runs the compiler-driven path otherwise. |
 
 ## Model Mapping
 
@@ -116,6 +121,32 @@ The loader performs one nested SurrealQL query rooted at the aggregate id:
 - Edge tables touching the aggregate are loaded into edge arrays.
 
 Hydration is routed through `IHydrationSink`, an explicit interface on `SurrealSession`. This keeps loader-only operations out of the normal session surface while letting generated code populate entities, parent links, references, and edges without recording writes.
+
+## Query+Load Surface
+
+Two terminal verbs share one query AST:
+
+- `ExecuteAsync(transport)` — read mode. Compiles the predicate + traversal AST to SurrealQL, executes it, hydrates root entities (and any traversed children) into an internal `SurrealSession`. Returns the root list; the session is opaque.
+- `LoadAsync(transport, lease)` — write mode, only on aggregate roots. Same compile-and-hydrate path against a session built with `Workspace.ReferenceRegistry`. Returns the session for mutation + commit. With no `Include*` calls, delegates to the legacy `{Root}AggregateLoader` so the full-aggregate path keeps its single-query shape.
+
+Compilation:
+
+```text
+Predicate AST + Includes AST + PinnedId
+        |
+        v
+QueryCompiler.Compile
+        |
+        +--> SurrealQL: SELECT *, field.*, (SELECT … FROM child WHERE parent = $parent.id) AS …
+        +--> Bindings dict: $p0 → "x", $p1 → recordId, …
+        |
+        v
+SurrealHttpClient (inlines bindings, posts JSON-RPC)
+```
+
+Generator-emitted hydrator delegates on each `IncludeChildrenNode` capture the right concrete `new TChild()` + `Hydrate` at codegen time, so the runtime walks the JSON without reflection. `Fetch` reuses the same compile-and-hydrate path but dispatches to `IEntity.HydratePartial` when an entity is already tracked — pending writes survive a top-up via the `IHydrationSink.HasPendingWrite` guard.
+
+Strict-with-escape: filtered loads only mark the user-`Include`d slices loaded; reads outside the slice throw `LoadShapeViolationException` with a hint at `session.FetchAsync(...)`. The legacy aggregate-loader path marks every slice on every loaded entity, so existing code stays unaffected.
 
 ## Session Lifecycle
 
@@ -224,10 +255,11 @@ Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationTok
 
 `SurrealHttpClient` is the included implementation. It:
 
-- Signs in to SurrealDB.
-- Posts SQL to `/sql`.
+- Signs in to SurrealDB via `/signin` and caches the bearer token.
+- Posts JSON-RPC 2.0 envelopes (`{"method": "query", "params": [<sql>, {}]}`) to `/rpc`.
+- Inlines the supplied `vars` into the SurrealQL via `SurrealFormatter` rather than passing them in `params[1]`. SurrealDB's JSON-RPC binder treats record-shaped objects as generic `Object`s, not `Thing`s, so a query like `WHERE id = $p0` bound through JSON vars never matches; SurrealQL literal syntax (`table:value`) is parsed at the query level and preserves type. The bypass also lifts the per-batch statement ceiling that `LET $p0 = …;` prefixes hit on large commits.
 - Applies namespace and database headers.
-- Normalizes statement results.
+- Extracts `result` from the RPC response envelope; surfaces typed errors via `SurrealException` / `WriterLeaseStolenException`.
 - Retries selected retryable transport failures.
 - Provides `SqlAsync` and `SurrealResultSet` for direct SQL use.
 

@@ -47,13 +47,14 @@ The generator emits everything needed to make this work end-to-end:
 
 - Per-table `{Name}Id` `readonly record struct` with implicit conversion to the canonical `RecordId`
 - A `Workspace.LoadDesignAsync(transport, id, ct)` instance method (grafted onto your `[CompositionRoot]` partial) that hydrates the whole aggregate from SurrealDB in a single nested-`SELECT`
+- A unified query+load surface — `Workspace.Query.Designs.Where(DesignQ.Description.Contains("…")).ExecuteAsync(transport)` for surgical projections, `…WithId(id).IncludeConstraints(c => c.Where(...)).LoadAsync(transport, lease)` for filtered write-mode loads, `Workspace.Query.Edges.Restricts.WhereIn(...).ExecuteAsync(transport)` for flat edge pairs. Strict-with-escape on filtered loads — unloaded slices throw `LoadShapeViolationException`, `session.FetchAsync(...)` extends the slice in place
 - A `SurrealSession` surface with sync reads (`design.Description`, `design.Constraints`) and mutations queued to a dirty batch
 - `SurrealSession.CommitAsync(transport, lease?)` rendering the dirty batch as a single SurrealQL script
 - A `Restricts : IRelationKind` marker class per forward relation attribute, so `session.Relate<Restricts>(constraint, userStory)` is type-checked at compile time
 - Directional read primitives (`Session.QueryOutgoing<TKind, T>(this)`, `Session.QueryIncoming<TKind, T>(this)`) — no ambiguity on self-referential edges
 - `Workspace.Schema` (`IReadOnlyList<string>` of idempotent DDL chunks) and `Workspace.ApplySchemaAsync(transport)` — model-scoped, no process globals
 - `Workspace.ReferenceRegistry` carrying the per-model `[Reference]` field metadata (delete behaviour) the commit planner reads through
-- Diagnostics (CG001-CG021) that catch model-level mistakes at compile time
+- Diagnostics (CG001-CG024) that catch model-level mistakes at compile time
 
 The library promise is **minimal intrusion**: the generator never forces a base class, ctor, or
 inherited member on you. The `[CompositionRoot]` partial is yours — wire transport, caches,
@@ -85,6 +86,12 @@ var workspace = new Workspace();
 var ro = await workspace.LoadDesignAsync(transport, designId);
 foreach (var c in ro.Get<Design>(designId)!.Constraints)
     Console.WriteLine($"{c.Id}: {c.Description}");
+
+// Surgical read — no aggregate hydration, no session, runs the predicate
+// straight on SurrealDB.
+var matches = await Workspace.Query.Constraints
+    .Where(ConstraintQ.Description.Contains("security"))
+    .ExecuteAsync(transport);
 
 // Write session — caller composes lease + session + commit.
 await using var lease = await WriterLease.AcquireAsync(transport, "design");
@@ -226,28 +233,30 @@ Plus aggregate / relation marker attributes:
 
 ## Diagnostics
 
-The generator emits CG001-CG021 covering: missing `partial` modifier, duplicate `[Id]`,
-invalid relation method shape, `[Children]` element-type mistakes,
-multiple-aggregate ownership, reference-delete behavior validation, cascade cycles,
-dangling-`Ignore` warnings, multiple `[CompositionRoot]` declarations, and
-non-partial `[CompositionRoot]`, and `[Children]` member without a `[Parent]` path
-back to the aggregate root, and `[Reference]` fields that cross aggregate boundaries.
-Full list in
-`src/Disruptor.Surface.Generator/Pipeline/Diagnostics.cs`.
+The generator emits CG001-CG024 covering: missing `partial` modifier, duplicate `[Id]`,
+`[Children]` element-type mistakes, multiple-aggregate ownership, reference-delete
+behavior validation, cascade cycles, dangling-`Ignore` warnings, multiple
+`[CompositionRoot]` declarations, non-partial `[CompositionRoot]`, `[Children]`
+members without a `[Parent]` path back to the aggregate root, `[Reference]` fields
+that cross aggregate boundaries, non-partial annotated members, and conflicting role
+attributes. Full list in `src/Disruptor.Surface.Generator/Pipeline/Diagnostics.cs`
+(rendered into the API reference under `docs/api.md`).
 
 ## Status
 
-Functional first cut. The `Disruptor.Surface.Sample` harness round-trips Design aggregates
-against a live SurrealDB instance — schema bootstrap, lease acquisition, commit,
-reload, in-memory reads — and is the validation harness for the SurrealQL paths.
+Functional first cut. The `Disruptor.Surface.Sample` harness round-trips Design + Review
+aggregates against a live SurrealDB instance — schema bootstrap, lease acquisition,
+commit, reload, in-memory reads, query-layer projections, filtered loads with Fetch
+top-up, lease-theft detection — and is the validation harness for the SurrealQL paths.
 
-What's exercised end-to-end: scalar properties, `[Reference]` mandatory + optional
-(with inline `field.*` re-hydration), `[Parent]`/`[Children]`, OnCreate hooks,
-writer lease, full aggregate hydration, typed relation kinds.
+What's exercised end-to-end: scalar properties, `SurrealArray<T>` round-trip, `[Reference]`
+mandatory + optional (with inline `field.*` re-hydration), `[Parent]`/`[Children]`,
+`OnCreate` hooks, writer-lease acquisition + theft detection, full aggregate hydration,
+typed relation kinds (forward + inverse, within-aggregate + cross-aggregate), the
+unified query+load surface (predicates, traversals, edges, `Fetch` strict-with-escape).
 
-What's defined but not yet exercised in the harness: `SurrealArray<T>` round-trip,
-within-aggregate and cross-aggregate edge mutations beyond `Restricts`, `[Cascade]`
-reference-delete chains, Review aggregate, `WriterLeaseStolenException` recovery flow.
+What's defined but not yet exercised in the harness: `[Cascade]` reference-delete
+chains end-to-end, `WriterLeaseStolenException` reload-and-retry flow.
 
 Not production-tested. The Surreal HTTP client, SurrealQL emission, and writer lease
 are validated against the harness and one Surreal version, not against a load test

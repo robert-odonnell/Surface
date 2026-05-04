@@ -184,7 +184,85 @@ await writeSession.CommitAsync(transport, lease);
 
 A `SurrealSession` is one-shot. After `CommitAsync` or `AbandonAsync`, the session closes and further reads or writes throw. Load a new session for the next unit of work.
 
-## 7. Add Relations
+## 7. Query Without Loading An Aggregate
+
+For projection-style reads — UI lists, dashboards, single-entity lookups — the generated query layer skips full-aggregate hydration. Each `[Table]` gets a sibling predicate factory (`{Name}Q`) and a query root on `Workspace.Query`:
+
+```csharp
+// Find constraints whose description contains "security" — no session, no lease.
+var matches = await Workspace.Query.Constraints
+    .Where(ConstraintQ.Description.Contains("security"))
+    .ExecuteAsync(transport);
+foreach (var c in matches)
+{
+    Console.WriteLine($"{c.Id}: {c.Description}");
+}
+```
+
+Predicate operators on `PropertyExpr<T>`: `Eq`, `Lt`/`Le`/`Gt`/`Ge`, `In(...)`, plus the string-only `Contains` extension. Compose multiple predicates with `Predicate.And/Or/Not`.
+
+Pin a single record by id and pull traversed slices in the same call:
+
+```csharp
+var rows = await Workspace.Query.Designs
+    .WithId(designId)
+    .IncludeDetails()                            // [Reference, Inline] — field.* projection
+    .IncludeConstraints(c => c                  // [Children] — nested SELECT
+        .Where(ConstraintQ.Description.Contains("security"))
+        .IncludeDetails())
+    .ExecuteAsync(transport);
+
+var design = rows.Single();
+foreach (var c in design.Constraints)
+    Console.WriteLine(c.Description);
+```
+
+Edges have their own root for flat `(source, target)` pair reads:
+
+```csharp
+var pairs = await Workspace.Query.Edges.Restricts
+    .WhereIn(constraintIds)
+    .ExecuteAsync(transport);
+
+foreach (var (src, dst) in pairs.Select(p => (p.Source, p.Target)))
+    Console.WriteLine($"{src} → {dst}");
+```
+
+## 8. Filtered Loads And Top-Up Fetch
+
+Switch the terminal verb from `ExecuteAsync` to `LoadAsync` to get a write-mode session for the same query AST. Aggregate-root tables only — non-roots compile-error if you try.
+
+```csharp
+await using var lease = await WriterLease.AcquireAsync(transport, "design");
+var session = await Workspace.Query.Designs
+    .WithId(designId)
+    .IncludeDetails()
+    .IncludeConstraints(c => c.IncludeDetails())
+    .LoadAsync(transport, lease);
+
+var design = session.Get<Design>(designId)!;
+foreach (var c in design.Constraints) { /* works — Included */ }
+```
+
+Reads against slices that weren't included throw `LoadShapeViolationException`. The exception's message points at `session.FetchAsync(...)` — a top-up extension query that hydrates additional slices into the existing session:
+
+```csharp
+try
+{
+    var epics = design.Epics;
+}
+catch (LoadShapeViolationException)
+{
+    await session.FetchAsync(
+        Workspace.Query.Designs.WithId(designId).IncludeEpics(e => e.IncludeDetails()),
+        transport);
+    var epics = design.Epics;            // works — slice now loaded
+}
+```
+
+`Fetch` preserves uncommitted user mutations: if the user has already written to `design.Description` since load, a Fetch that re-hydrates the same row leaves the pending value alone (a `HasPendingWrite` guard skips field-level overwrites).
+
+## 9. Add Relations
 
 Declare a forward relation attribute and its inverse:
 
@@ -235,7 +313,7 @@ public partial class UserStory
 
 The generator emits `Restricts : IRelationKind`. Use `Session.Relate<Restricts>(...)`, `Session.Unrelate<Restricts>(...)`, `Session.QueryOutgoing<Restricts, T>(...)`, and `Session.QueryIncoming<Restricts, T>(...)` instead of string edge names.
 
-## 8. Run The Repository Sample
+## 10. Run The Repository Sample
 
 From this repository:
 
