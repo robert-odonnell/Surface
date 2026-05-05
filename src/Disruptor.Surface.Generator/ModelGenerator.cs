@@ -243,6 +243,7 @@ public sealed class ModelGenerator : IIncrementalGenerator
 
             IdEmitter.Emit(spc, table, graph);
             PredicateFactoryEmitter.Emit(spc, table);
+            IdsAsyncEmitter.Emit(spc, table);
             TraversalBuilderEmitter.Emit(spc, table, graph);
 
             var valid = true;

@@ -141,8 +141,9 @@ There is one `Load{Root}Async` method per `[AggregateRoot]`. The legacy load pat
 
 ## Query API
 
-Two terminal verbs share one query AST:
+Three terminal verbs share one query AST:
 
+- `IdsAsync(transport, ct)` — id-only selection. Returns `IReadOnlyList<{Table}Id>`; no entity hydration, no session. Generator-emitted per `[Table]`.
 - `ExecuteAsync(transport, ct)` — read mode. Returns hydrated entities; the supporting session is internal and never exposed.
 - `LoadAsync(transport, lease, ct)` — write mode. Returns a `SurrealSession` you mutate and commit. Only emitted on `Query<TRoot>` where `TRoot.IsAggregateRoot`.
 
@@ -208,10 +209,27 @@ public sealed class Query<T> where T : class, IEntity, new()
     public Task<IReadOnlyList<T>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default);
     public Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(SurrealSession session, ISurrealTransport transport, CancellationToken ct = default);
     public string Compile();
+    public string CompileIdsOnly();   // SELECT id FROM table …; throws if Includes present
 }
 ```
 
 `Where` AND-merges across calls. `WithId` overwrites. `WithInclude` is the primitive the generated `Include*` extensions call into. `Compile()` renders the AST to a SurrealQL string with every binding inlined as a literal via `SurrealFormatter` — no separate parameter dictionary.
+
+### Id-only selection — `IdsAsync`
+
+The id-only terminal is a generator-emitted extension on `Query<{Table}>`:
+
+```csharp
+IReadOnlyList<CodeSymbolId> ids = await workspace.Query.CodeSymbols
+    .Where(CodeSymbolQ.Name.Contains("Parser"))
+    .OrderBy(CodeSymbolQ.QualifiedName)
+    .Limit(50)
+    .IdsAsync(transport, ct);
+```
+
+Compiles to `SELECT id FROM code_symbols WHERE … ORDER BY … LIMIT … START …` and projects each returned `RecordId` into the typed `{Table}Id`. Useful when you want to identify the records first, then decide whether to hydrate (via the upcoming `Hydrate.{Table}(ids)` flow) or pass the ids around for any other purpose.
+
+`Include*` calls are rejected — id-only selection is flat by definition. Use `ExecuteAsync` if you need traversal.
 
 `Limit` / `Start` / `OrderBy` push search-shape semantics server-side. SurrealQL's clause order is fixed (`WHERE → ORDER BY → LIMIT → START`); the compiler emits in that order regardless of which chain method ran first. Multiple `Limit` / `Start` calls overwrite (last wins); `OrderBy` and `ThenBy` are equivalent — both append a clause — and chain commas in declaration order. Typical search-tool shape:
 

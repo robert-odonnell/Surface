@@ -613,25 +613,14 @@ public sealed class QueryCompilerTests
     /// suite honest about that boundary without forcing an InternalsVisibleTo on the
     /// runtime assembly.
     /// </summary>
+    /// <summary>
+    /// Convenience wrapper for the include-free <c>Compile</c> overload — defers to
+    /// <see cref="InvokeWithIncludes"/> with an empty include list. The QueryCompiler
+    /// signature took on optional ORDER BY / LIMIT / START params after preview.21,
+    /// so the reflection lookup must always match the full 7-parameter shape.
+    /// </summary>
     private static string Invoke(string table, IPredicate? filter, RecordId? pinnedId)
-    {
-        var method = typeof(IPredicate).Assembly
-            .GetType("Disruptor.Surface.Runtime.Query.QueryCompiler", throwOnError: true)!
-            .GetMethod(
-                "Compile",
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic,
-                binder: null,
-                types: [typeof(string), typeof(IPredicate), typeof(RecordId?)],
-                modifiers: null)!;
-        try
-        {
-            return (string)method.Invoke(null, [table, filter, pinnedId])!;
-        }
-        catch (System.Reflection.TargetInvocationException tie) when (tie.InnerException is not null)
-        {
-            throw tie.InnerException;
-        }
-    }
+        => InvokeWithIncludes(table, filter, pinnedId, []);
 
     [Fact]
     public void Compile_WithLimit_AppendsLimitClauseAtTheEnd()
@@ -702,6 +691,54 @@ public sealed class QueryCompilerTests
         var sql = new Query<TestTable>("symbols").Limit(10).Limit(0).Compile();
 
         Assert.Equal("SELECT * FROM symbols;", sql);
+    }
+
+    [Fact]
+    public void CompileIdsOnly_NoFilter_NoPin_EmitsBareIdSelect()
+    {
+        var sql = new Query<TestTable>("symbols").CompileIdsOnly();
+
+        Assert.Equal("SELECT id FROM symbols;", sql);
+    }
+
+    [Fact]
+    public void CompileIdsOnly_WithWhereOrderLimitStart_RendersCanonicalClauseOrder()
+    {
+        var sql = new Query<TestTable>("symbols")
+            .Where(new PropertyExpr<string>("kind").Eq("method"))
+            .OrderBy(new PropertyExpr<string>("name"))
+            .Limit(20)
+            .Start(40)
+            .CompileIdsOnly();
+
+        Assert.Equal(
+            "SELECT id FROM symbols WHERE kind = \"method\" ORDER BY name ASC LIMIT 20 START 40;",
+            sql);
+    }
+
+    [Fact]
+    public void CompileIdsOnly_PinnedId_InlinesRecordLiteral()
+    {
+        var pin = new RecordId("constraints", "01HX7AF5");
+
+        var sql = new Query<TestTable>("constraints").WithId(pin).CompileIdsOnly();
+
+        Assert.Equal("SELECT id FROM constraints WHERE id = constraints:01HX7AF5;", sql);
+    }
+
+    [Fact]
+    public void CompileIdsOnly_WithIncludes_Throws()
+    {
+        // Id-only selection is flat by definition; Include* would silently ignore them
+        // otherwise and trick the caller into thinking nested data was loaded.
+        var include = new IncludeChildrenNode(
+            ChildTable: "constraints",
+            ParentField: "design",
+            Filter: null,
+            Nested: []);
+        var query = new Query<TestTable>("designs").WithInclude(include);
+
+        Assert.Throws<InvalidOperationException>(() => query.CompileIdsOnly());
     }
 
     /// <summary>Test stand-in for a generated entity — minimal IEntity shape so Query&lt;T&gt; can construct.</summary>

@@ -601,6 +601,22 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
+    public void Emits_QueryIds_PerTable_WithIdsAsyncExtension()
+    {
+        // IdsAsync is the "Load = ID selection" terminal: returns IReadOnlyList<{Table}Id>
+        // typed at the consumer site so callers don't pivot through canonical RecordId.
+        var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        Assert.Contains("public static class DesignQueryIds", allSrc);
+        Assert.Contains("public static class ConstraintQueryIds", allSrc);
+        Assert.Contains("IdsAsync(this global::Disruptor.Surface.Runtime.Query.Query<global::M.Design>", allSrc);
+        Assert.Contains("IReadOnlyList<global::M.DesignId>", allSrc);
+        Assert.Contains("IReadOnlyList<global::M.ConstraintId>", allSrc);
+        Assert.Contains("var sql = query.CompileIdsOnly();", allSrc);
+    }
+
+    [Fact]
     public void BareForwardRelation_Emits_NoEdgeQ_Factory()
     {
         // Regression: a forward kind without a payload should not produce an empty

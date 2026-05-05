@@ -36,9 +36,45 @@ internal static class QueryCompiler
         var sb = new StringBuilder();
 
         var projection = BuildProjection(includes);
-
         sb.Append("SELECT ").Append(projection).Append(" FROM ").Append(table.Identifier());
 
+        AppendWhereOrderLimitStart(sb, filter, pinnedId, orderClauses, limit, start);
+        sb.Append(';');
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Build the SurrealQL for an id-only selection: <c>SELECT id FROM table …</c>.
+    /// The terminal verb on <see cref="Query{T}"/> for "load just the matching ids,
+    /// nothing else" — paired with the per-table generator-emitted <c>IdsAsync</c>
+    /// extension, which casts each returned <see cref="RecordId"/> to its typed
+    /// <c>{Table}Id</c>. Includes are not supported on this path: id-only selection
+    /// is flat by definition; the caller meant to call <see cref="Compile"/> if they
+    /// wanted traversal.
+    /// </summary>
+    public static string CompileIdsOnly(
+        string table,
+        IPredicate? filter,
+        RecordId? pinnedId,
+        IReadOnlyList<OrderClause>? orderClauses = null,
+        int? limit = null,
+        int? start = null)
+    {
+        var sb = new StringBuilder();
+        sb.Append("SELECT id FROM ").Append(table.Identifier());
+        AppendWhereOrderLimitStart(sb, filter, pinnedId, orderClauses, limit, start);
+        sb.Append(';');
+        return sb.ToString();
+    }
+
+    private static void AppendWhereOrderLimitStart(
+        StringBuilder sb,
+        IPredicate? filter,
+        RecordId? pinnedId,
+        IReadOnlyList<OrderClause>? orderClauses,
+        int? limit,
+        int? start)
+    {
         var clauses = new List<string>(2);
         if (pinnedId is { } id)
         {
@@ -58,10 +94,6 @@ internal static class QueryCompiler
         AppendOrderBy(sb, orderClauses);
         AppendLimit(sb, limit);
         AppendStart(sb, start);
-
-        sb.Append(';');
-
-        return sb.ToString();
     }
 
     private static void AppendOrderBy(StringBuilder sb, IReadOnlyList<OrderClause>? clauses)

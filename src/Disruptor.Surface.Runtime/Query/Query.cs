@@ -167,6 +167,23 @@ public sealed class Query<T>
         => QueryCompiler.Compile(Table, Filter, PinnedId, Includes, OrderClauses, LimitCount, StartAt);
 
     /// <summary>
+    /// Compile this query as an id-only selection: <c>SELECT id FROM table …</c>. The
+    /// runtime entry point for the generator-emitted <c>{Table}QueryIds.IdsAsync</c>
+    /// extension; exposed here so the consumer-side generator output can render the SQL
+    /// without taking a dependency on the internal <see cref="QueryCompiler"/>. Throws
+    /// when <see cref="Includes"/> are present — id-only selection is flat by definition.
+    /// </summary>
+    public string CompileIdsOnly()
+    {
+        if (Includes.Count > 0)
+        {
+            throw new InvalidOperationException(
+                "CompileIdsOnly does not support Include* calls. Drop the includes, or use Compile if you need traversal.");
+        }
+        return QueryCompiler.CompileIdsOnly(Table, Filter, PinnedId, OrderClauses, LimitCount, StartAt);
+    }
+
+    /// <summary>
     /// Compile, execute, and hydrate the query against a caller-supplied
     /// <see cref="SurrealSession"/>. The session receives every traversed slice
     /// (root rows, inline-ref expansions, nested children) through
