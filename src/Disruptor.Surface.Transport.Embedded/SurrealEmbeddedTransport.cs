@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Dahomey.Cbor;
 using Disruptor.Surface.Runtime;
 using SurrealDb.Embedded.Options;
 using SurrealDb.Embedded.RocksDb;
@@ -94,8 +93,7 @@ public sealed class SurrealEmbeddedTransport : ISurrealTransport
         try
         {
             var response = await client.RawQuery(sql, parameters: null, ct).ConfigureAwait(false);
-            var cborOptions = ResolveCborOptions(client);
-            return CborJsonProjection.BuildEnvelope(response, cborOptions);
+            return CborJsonProjection.BuildEnvelope(response);
         }
         finally
         {
@@ -138,30 +136,4 @@ public sealed class SurrealEmbeddedTransport : ISurrealTransport
         return sql.AsSpan(i).StartsWith(TransactionPrefix.AsSpan(), StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>
-    /// Pull the CBOR options out of the SDK client. Used to feed the projection layer
-    /// so the same converter set drives encode and decode. The SDK exposes options via
-    /// <c>BaseSurrealDbClient.GetCborOptions()</c> internally; we reach for that
-    /// reflectively rather than duplicating the option set.
-    /// </summary>
-    private static CborOptions ResolveCborOptions(ISurrealDbClient client)
-    {
-        var clientType = client.GetType();
-        // Walk up to BaseSurrealDbClient where the options field lives.
-        for (var t = clientType; t is not null; t = t.BaseType)
-        {
-            var field = t.GetField("_cborOptions",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            if (field?.GetValue(client) is CborOptions options)
-            {
-                return options;
-            }
-        }
-
-        // Last-resort: a default option set. Tagged-type round-tripping for SurrealDB
-        // values won't work, but the projection layer already coerces the most common
-        // tagged types via type-pattern matching, so primitive-only payloads still go
-        // through cleanly.
-        return new CborOptions();
-    }
 }

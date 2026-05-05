@@ -1,7 +1,8 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using Dahomey.Cbor;
-using SurrealDb.Net.Models;
+using Dahomey.Cbor.Serialization;
 using SurrealDb.Net.Models.Response;
 
 namespace Disruptor.Surface.Transport.Embedded;
@@ -19,11 +20,14 @@ namespace Disruptor.Surface.Transport.Embedded;
 /// returns, so the rest of the runtime stays transport-agnostic.
 /// </para>
 /// <para>
-/// The bridge owns its tagged-type rendering — Things become <c>"table:value"</c>
-/// strings (matching the form <c>HydrationJson.ReadRecordId</c> expects), datetimes
-/// become ISO 8601, decimals become string-quoted numerics. Anything else falls
-/// through the default CBOR-to-CLR-primitive mapping (Dahomey.Cbor produces nested
-/// <c>Dictionary&lt;object, object?&gt;</c> / <c>object?[]</c>).
+/// Walks the CBOR stream with <see cref="CborReader"/> directly rather than going
+/// through the converter system. The SDK's typed converters (<c>RecordIdConverter</c>,
+/// <c>DateTimeConverter</c>, …) are tuned for typed deserialization into CLR types
+/// the consumer asked for — using them for "give me whatever's there as JSON" trips
+/// up on shapes like top-level integers, arrays, or null payloads. Direct stream
+/// walking handles every CBOR shape SurrealDB emits: scalars, arrays, maps, and
+/// the SurrealDB-specific tagged values (record ids, datetimes, durations, decimals,
+/// uuids).
 /// </para>
 /// </summary>
 internal static class CborJsonProjection
@@ -32,10 +36,9 @@ internal static class CborJsonProjection
     /// Build a <see cref="JsonDocument"/> matching the JSON-RPC response envelope
     /// from <paramref name="response"/>. Caller owns the document and disposes it.
     /// </summary>
-    public static JsonDocument BuildEnvelope(SurrealDbResponse response, CborOptions cborOptions)
+    public static JsonDocument BuildEnvelope(SurrealDbResponse response)
     {
         ArgumentNullException.ThrowIfNull(response);
-        ArgumentNullException.ThrowIfNull(cborOptions);
 
         using var stream = new MemoryStream(capacity: 256);
         using (var writer = new Utf8JsonWriter(stream))
@@ -43,7 +46,7 @@ internal static class CborJsonProjection
             writer.WriteStartArray();
             foreach (var result in response)
             {
-                WriteStatement(writer, result, cborOptions);
+                WriteStatement(writer, result);
             }
             writer.WriteEndArray();
         }
@@ -51,219 +54,330 @@ internal static class CborJsonProjection
         return JsonDocument.Parse(stream);
     }
 
-    private static void WriteStatement(Utf8JsonWriter writer, ISurrealDbResult result, CborOptions cborOptions)
+    private static void WriteStatement(Utf8JsonWriter writer, ISurrealDbResult result)
     {
         writer.WriteStartObject();
 
         if (result is SurrealDbOkResult ok)
         {
             writer.WritePropertyName("result");
-            // SDK carries the result as raw CBOR bytes. Deserialize to a generic CLR
-            // tree (object/Dictionary/List/primitives + SurrealDB-typed instances for
-            // tagged values), then walk that tree emitting JSON. Going via `object?`
-            // keeps us out of the SDK's strongly-typed serializer paths — we don't
-            // know the destination type at this layer.
-            var value = DeserializeOkResult(ok, cborOptions);
-            WriteValue(writer, value);
+            var binary = ExtractBinaryResult(ok);
+            if (binary.IsEmpty)
+            {
+                writer.WriteNullValue();
+            }
+            else
+            {
+                var reader = new CborReader(binary.Span);
+                WriteValue(writer, ref reader);
+            }
             writer.WriteString("status", "OK");
         }
         else if (result is ISurrealDbErrorResult err)
         {
-            // Disruptor.Surface's NormalizeStatementResults reads `result` as raw text
-            // for ERR statements. The SDK exposes the error message directly; mirror
-            // SurrealDB's wire form by writing it as a JSON string under "result".
             writer.WriteString("result", DescribeError(err));
             writer.WriteString("status", "ERR");
         }
         else
         {
-            // Unknown SDK result subtype — write status only so the runtime can still
-            // walk the envelope without throwing on a missing property.
             writer.WriteString("status", "ERR");
         }
 
         writer.WriteEndObject();
     }
 
-    private static object? DeserializeOkResult(SurrealDbOkResult ok, CborOptions cborOptions)
+    /// <summary>
+    /// Pull the raw CBOR bytes off the SDK's <see cref="SurrealDbOkResult"/>. The SDK
+    /// keeps the field private; we reach for it reflectively so we can drive a typeless
+    /// decode rather than going through <c>GetValue&lt;T&gt;</c> which needs a target
+    /// CLR type the projection layer doesn't have.
+    /// </summary>
+    private static ReadOnlyMemory<byte> ExtractBinaryResult(SurrealDbOkResult ok)
     {
-        // Reflection access: SurrealDbOkResult holds `_binaryResult` (ReadOnlyMemory<byte>?)
-        // and `_cborOptions` as private fields — the SDK's GetValue<T> goes through them.
-        // We need raw CBOR bytes plus the options to drive a generic deserialize.
-        var resultType = typeof(SurrealDbOkResult);
-        var binaryField = resultType.GetField("_binaryResult", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        if (binaryField?.GetValue(ok) is not ReadOnlyMemory<byte> binary)
-        {
-            return null;
-        }
-
-        return CborSerializer.Deserialize<object?>(binary.Span, cborOptions);
+        var field = typeof(SurrealDbOkResult).GetField("_binaryResult",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        var raw = field?.GetValue(ok);
+        return raw is ReadOnlyMemory<byte> bytes ? bytes : ReadOnlyMemory<byte>.Empty;
     }
 
     /// <summary>
-    /// Walk a generic CBOR-decoded tree and emit it as JSON. Recurses through
-    /// dictionaries and lists; defers to <see cref="WriteScalar"/> for leaves.
+    /// Read one CBOR data item from <paramref name="reader"/> and emit equivalent JSON.
+    /// Recurses through arrays and maps; collapses SurrealDB-tagged values to the
+    /// scalar string forms the runtime parsers handle.
     /// </summary>
-    private static void WriteValue(Utf8JsonWriter writer, object? value)
+    private static void WriteValue(Utf8JsonWriter writer, ref CborReader reader)
     {
-        switch (value)
+        // Semantic tags wrap a payload of a known shape — drain the tag first, then
+        // either render via the tag-specific path or fall through to the type-driven
+        // dispatch below for unrecognised tags (renders the payload as plain CBOR).
+        if (reader.TryReadSemanticTag(out var tag))
         {
-            case null:
+            if (TryWriteTagged(writer, ref reader, tag))
+            {
+                return;
+            }
+            // Unknown tag — fall through; the next read consumes the payload as-is.
+        }
+
+        var dataType = reader.GetCurrentDataItemType();
+        switch (dataType)
+        {
+            case CborDataItemType.Null:
+                reader.ReadNull();
                 writer.WriteNullValue();
-                return;
+                break;
 
-            case RecordId recordId:
-                writer.WriteStringValue(FormatRecordId(recordId));
-                return;
+            case CborDataItemType.Boolean:
+                writer.WriteBooleanValue(reader.ReadBoolean());
+                break;
 
-            case IReadOnlyDictionary<string, object?> map:
-                writer.WriteStartObject();
-                foreach (var (k, v) in map)
-                {
-                    writer.WritePropertyName(k);
-                    WriteValue(writer, v);
-                }
-                writer.WriteEndObject();
-                return;
+            case CborDataItemType.Unsigned:
+                writer.WriteNumberValue(reader.ReadUInt64());
+                break;
 
-            case IDictionary<object, object?> objectMap:
-                // Dahomey.Cbor's default object-mode produces IDictionary<object, object?>
-                // with object keys (CBOR allows any key type). Coerce keys to strings —
-                // SurrealDB's response objects all use string keys in practice.
-                writer.WriteStartObject();
-                foreach (var entry in objectMap)
-                {
-                    writer.WritePropertyName(Convert.ToString(entry.Key, CultureInfo.InvariantCulture) ?? string.Empty);
-                    WriteValue(writer, entry.Value);
-                }
-                writer.WriteEndObject();
-                return;
+            case CborDataItemType.Signed:
+                writer.WriteNumberValue(reader.ReadInt64());
+                break;
 
-            case System.Collections.IDictionary genericMap:
-                writer.WriteStartObject();
-                foreach (System.Collections.DictionaryEntry entry in genericMap)
-                {
-                    writer.WritePropertyName(Convert.ToString(entry.Key, CultureInfo.InvariantCulture) ?? string.Empty);
-                    WriteValue(writer, entry.Value);
-                }
-                writer.WriteEndObject();
-                return;
+            case CborDataItemType.Single:
+                writer.WriteNumberValue(reader.ReadSingle());
+                break;
 
-            case string str:
-                writer.WriteStringValue(str);
-                return;
+            case CborDataItemType.Double:
+                writer.WriteNumberValue(reader.ReadDouble());
+                break;
 
-            case System.Collections.IEnumerable enumerable:
+            case CborDataItemType.Decimal:
+                writer.WriteStringValue(reader.ReadDecimal().ToString(CultureInfo.InvariantCulture));
+                break;
+
+            case CborDataItemType.String:
+                writer.WriteStringValue(reader.ReadString());
+                break;
+
+            case CborDataItemType.ByteString:
+                writer.WriteBase64StringValue(reader.ReadByteString());
+                break;
+
+            case CborDataItemType.Array:
+                reader.ReadBeginArray();
+                var arrSize = reader.ReadSize();
                 writer.WriteStartArray();
-                foreach (var item in enumerable)
+                for (var i = 0; i < arrSize; i++)
                 {
-                    WriteValue(writer, item);
+                    WriteValue(writer, ref reader);
                 }
                 writer.WriteEndArray();
-                return;
+                break;
+
+            case CborDataItemType.Map:
+                reader.ReadBeginMap();
+                var mapSize = reader.ReadSize();
+                writer.WriteStartObject();
+                for (var i = 0; i < mapSize; i++)
+                {
+                    var key = ReadKey(ref reader);
+                    writer.WritePropertyName(key);
+                    WriteValue(writer, ref reader);
+                }
+                writer.WriteEndObject();
+                break;
 
             default:
-                WriteScalar(writer, value);
-                return;
-        }
-    }
-
-    private static void WriteScalar(Utf8JsonWriter writer, object value)
-    {
-        switch (value)
-        {
-            case bool b:
-                writer.WriteBooleanValue(b);
-                break;
-            case sbyte i8:
-                writer.WriteNumberValue(i8);
-                break;
-            case short i16:
-                writer.WriteNumberValue(i16);
-                break;
-            case int i32:
-                writer.WriteNumberValue(i32);
-                break;
-            case long i64:
-                writer.WriteNumberValue(i64);
-                break;
-            case byte u8:
-                writer.WriteNumberValue(u8);
-                break;
-            case ushort u16:
-                writer.WriteNumberValue(u16);
-                break;
-            case uint u32:
-                writer.WriteNumberValue(u32);
-                break;
-            case ulong u64:
-                writer.WriteNumberValue(u64);
-                break;
-            case float f32:
-                writer.WriteNumberValue(f32);
-                break;
-            case double f64:
-                writer.WriteNumberValue(f64);
-                break;
-            case decimal dec:
-                // SurrealDB decimals serialise as strings on the wire so precision is
-                // preserved across JSON; HydrationJson reads them back as strings then
-                // re-parses. Match that.
-                writer.WriteStringValue(dec.ToString(CultureInfo.InvariantCulture));
-                break;
-            case DateTime dt:
-                writer.WriteStringValue(dt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
-                break;
-            case DateTimeOffset dto:
-                writer.WriteStringValue(dto.ToString("O", CultureInfo.InvariantCulture));
-                break;
-            case TimeSpan ts:
-                // SurrealDB durations serialise as `Pn` ISO-8601-ish strings; use the
-                // round-trip TimeSpan format. Consumers parsing these explicitly is rare
-                // — most code reads scalars or record links, not durations.
-                writer.WriteStringValue(ts.ToString("c", CultureInfo.InvariantCulture));
-                break;
-            case Guid guid:
-                writer.WriteStringValue(guid.ToString("D"));
-                break;
-            case byte[] bytes:
-                writer.WriteBase64StringValue(bytes);
-                break;
-            default:
-                // Last-resort: stringify whatever it is. Beats throwing — diagnostic
-                // value is preserved and the runtime's JSON parsers won't blow up on
-                // a string they don't recognise.
-                writer.WriteStringValue(Convert.ToString(value, CultureInfo.InvariantCulture));
+                // Break / unsupported — skip and emit null so the envelope shape stays
+                // intact. Better than throwing on diagnostic edge cases.
+                reader.SkipDataItem();
+                writer.WriteNullValue();
                 break;
         }
     }
 
     /// <summary>
-    /// Render a SurrealDB <see cref="RecordId"/> as <c>"table:value"</c> — the canonical
-    /// form Disruptor.Surface's <c>HydrationJson.ReadRecordId</c> parses. The SDK's
-    /// <c>RecordIdJsonConverter</c> writes just the id portion which doesn't match
-    /// what the runtime expects, so we go around it.
+    /// Render a SurrealDB-tagged CBOR payload to JSON. Returns <c>true</c> when the tag
+    /// was understood; <c>false</c> means the caller should treat the payload as plain
+    /// CBOR. Tag list is mirrored from the SDK's <c>CborTagConstants</c>.
     /// </summary>
-    private static string FormatRecordId(RecordId id)
+    private static bool TryWriteTagged(Utf8JsonWriter writer, ref CborReader reader, ulong tag)
     {
-        var idValue = id switch
+        switch (tag)
         {
-            RecordIdOfString s => s.Id,
-            _ => id.DeserializeId<object>()?.ToString() ?? string.Empty,
-        };
-        return $"{id.Table}:{idValue}";
+            case SurrealCborTag.None:
+                // SurrealDB's NONE wraps a null payload — semantically `null`.
+                reader.ReadNull();
+                writer.WriteNullValue();
+                return true;
+
+            case SurrealCborTag.RecordId:
+                WriteRecordId(writer, ref reader);
+                return true;
+
+            case SurrealCborTag.StringDecimal:
+                writer.WriteStringValue(reader.ReadString());
+                return true;
+
+            case SurrealCborTag.CustomDateTime:
+                WriteDateTime(writer, ref reader);
+                return true;
+
+            case SurrealCborTag.CustomDuration:
+                WriteDuration(writer, ref reader);
+                return true;
+
+            case SurrealCborTag.Uuid:
+                WriteUuid(writer, ref reader);
+                return true;
+
+            default:
+                return false;
+        }
     }
 
-    private static string DescribeError(ISurrealDbErrorResult err)
+    /// <summary>
+    /// Record ids encode as a 2-element CBOR array <c>[table, idValue]</c>. We render
+    /// <c>"table:value"</c> matching <see cref="HydrationJson.ReadRecordId"/>'s
+    /// expected shape — string and integer ids inlined, anything more exotic falls
+    /// back to a stringified form.
+    /// </summary>
+    private static void WriteRecordId(Utf8JsonWriter writer, ref CborReader reader)
     {
-        // ISurrealDbErrorResult shapes: SurrealDbErrorResult (string Details),
-        // SurrealDbProtocolErrorResult, SurrealDbUnknownResult. Reflect the most
-        // useful field per type. The runtime's NormalizeStatementResults treats the
-        // result text as a free-form diagnostic — exact format isn't load-bearing.
-        return err switch
+        reader.ReadBeginArray();
+        var size = reader.ReadSize();
+        if (size < 2)
         {
-            SurrealDbErrorResult e => e.Details ?? string.Empty,
-            _ => err.ToString() ?? string.Empty,
+            // Malformed — drain whatever remains so the outer reader stays balanced.
+            for (var i = 0; i < size; i++)
+            {
+                reader.SkipDataItem();
+            }
+            writer.WriteNullValue();
+            return;
+        }
+
+        var table = reader.ReadString() ?? string.Empty;
+
+        var idType = reader.GetCurrentDataItemType();
+        string id = idType switch
+        {
+            CborDataItemType.String => reader.ReadString() ?? string.Empty,
+            CborDataItemType.Unsigned => reader.ReadUInt64().ToString(CultureInfo.InvariantCulture),
+            CborDataItemType.Signed => reader.ReadInt64().ToString(CultureInfo.InvariantCulture),
+            _ => StringifyOpaque(ref reader),
         };
+
+        // Drain any extra elements (defensive — the SDK's RecordIdConverter rejects
+        // size != 2, but we don't want to leave the reader unbalanced if it ever
+        // comes back as a longer tuple).
+        for (var i = 2; i < size; i++)
+        {
+            reader.SkipDataItem();
+        }
+
+        writer.WriteStringValue($"{table}:{id}");
+    }
+
+    /// <summary>
+    /// Datetimes encode as <c>[seconds, nanos]</c>. Re-emit as ISO 8601 UTC so
+    /// HydrationJson can read them with <c>JsonElement.GetDateTime</c>.
+    /// </summary>
+    private static void WriteDateTime(Utf8JsonWriter writer, ref CborReader reader)
+    {
+        reader.ReadBeginArray();
+        var size = reader.ReadSize();
+        var seconds = size > 0 ? ReadInt64Loose(ref reader) : 0;
+        var nanos = size > 1 ? ReadInt64Loose(ref reader) : 0;
+        for (var i = 2; i < size; i++)
+        {
+            reader.SkipDataItem();
+        }
+        var dt = DateTimeOffset.FromUnixTimeSeconds(seconds).AddTicks(nanos / 100);
+        writer.WriteStringValue(dt.UtcDateTime.ToString("O", CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// Durations encode as <c>[seconds, nanos]</c>. Rendered with <see cref="TimeSpan"/>'s
+    /// round-trip format ("c") — the runtime doesn't currently parse these directly, so
+    /// the format is mostly for diagnostic legibility.
+    /// </summary>
+    private static void WriteDuration(Utf8JsonWriter writer, ref CborReader reader)
+    {
+        reader.ReadBeginArray();
+        var size = reader.ReadSize();
+        var seconds = size > 0 ? ReadInt64Loose(ref reader) : 0;
+        var nanos = size > 1 ? ReadInt64Loose(ref reader) : 0;
+        for (var i = 2; i < size; i++)
+        {
+            reader.SkipDataItem();
+        }
+        var ts = TimeSpan.FromSeconds(seconds) + TimeSpan.FromTicks(nanos / 100);
+        writer.WriteStringValue(ts.ToString("c", CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// UUIDs encode as 16-byte byte strings (with semantic tag 37 already drained).
+    /// </summary>
+    private static void WriteUuid(Utf8JsonWriter writer, ref CborReader reader)
+    {
+        var bytes = reader.ReadByteString();
+        writer.WriteStringValue(bytes.Length == 16
+            ? new Guid(bytes).ToString("D")
+            : Convert.ToHexStringLower(bytes));
+    }
+
+    /// <summary>
+    /// Read a CBOR map key as a string. SurrealDB's CBOR responses use string keys
+    /// throughout; if we ever see something exotic, stringify defensively.
+    /// </summary>
+    private static string ReadKey(ref CborReader reader) => reader.GetCurrentDataItemType() switch
+    {
+        CborDataItemType.String => reader.ReadString() ?? string.Empty,
+        CborDataItemType.Unsigned => reader.ReadUInt64().ToString(CultureInfo.InvariantCulture),
+        CborDataItemType.Signed => reader.ReadInt64().ToString(CultureInfo.InvariantCulture),
+        _ => StringifyOpaque(ref reader),
+    };
+
+    /// <summary>
+    /// Loose integer read — accepts both signed and unsigned CBOR ints.
+    /// </summary>
+    private static long ReadInt64Loose(ref CborReader reader) => reader.GetCurrentDataItemType() switch
+    {
+        CborDataItemType.Unsigned => (long)reader.ReadUInt64(),
+        CborDataItemType.Signed => reader.ReadInt64(),
+        _ => 0,
+    };
+
+    /// <summary>
+    /// Last-resort scalarisation — captures the raw bytes of a data item and renders
+    /// them as a hex string. Used for record-id parts and map keys we can't decode
+    /// natively (rare; SurrealDB uses string ids and string keys in practice).
+    /// </summary>
+    private static string StringifyOpaque(ref CborReader reader)
+    {
+        var raw = reader.ReadDataItem(false);
+        var sb = new StringBuilder(raw.Length * 2);
+        foreach (var b in raw)
+        {
+            sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+        }
+        return sb.ToString();
+    }
+
+    private static string DescribeError(ISurrealDbErrorResult err) => err switch
+    {
+        SurrealDbErrorResult e => e.Details ?? string.Empty,
+        _ => err.ToString() ?? string.Empty,
+    };
+
+    /// <summary>
+    /// SurrealDB CBOR semantic tags. Mirrored from the SDK's internal
+    /// <c>CborTagConstants</c> so we don't reflect into a non-public type.
+    /// </summary>
+    private static class SurrealCborTag
+    {
+        public const ulong None = 6;
+        public const ulong RecordId = 8;
+        public const ulong StringDecimal = 10;
+        public const ulong CustomDateTime = 12;
+        public const ulong CustomDuration = 14;
+        public const ulong Uuid = 37;
     }
 }
