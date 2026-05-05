@@ -276,4 +276,97 @@ public sealed class DiagnosticsTests
         // No CGxxx errors. (Warnings — like CG017 — are allowed; the model has none here.)
         Assert.DoesNotContain(runDiags, d => d.Severity == DiagnosticSeverity.Error);
     }
+
+    [Fact]
+    public void CG025_PropertyTypeNotMappable()
+    {
+        // Uri has no SurrealDB scalar mapping. Without the diagnostic, SchemaEmitter
+        // would silently comment out the field and reads/writes would fail at the DB.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System;
+            namespace M;
+            [Table] public partial class Bad {
+                [Id] public partial BadId Id { get; set; }
+                [Property] public partial Uri Endpoint { get; set; }
+            }
+            """;
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.Contains(runDiags, d => d.Id == "CG025");
+    }
+
+    [Fact]
+    public void CG025_DoesNotFire_OnSurrealArrayProperty()
+    {
+        // SurrealArray<T> goes through the array<object> + sub-field schema path; it's
+        // not a scalar but it's mappable — CG025 must not flag it.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+            public sealed record Scenario(string Kind, string Description);
+            [Table] public partial class Holder {
+                [Id] public partial HolderId Id { get; set; }
+                [Property] public partial SurrealArray<Scenario> Scenarios { get; }
+            }
+            """;
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.DoesNotContain(runDiags, d => d.Id == "CG025");
+    }
+
+    [Fact]
+    public void CG026_ChildrenElementMustBeTable()
+    {
+        // [Children]<string> — concrete element, but not a [Table]. Without the
+        // diagnostic, the emitted Session.QueryChildren<string>(...) would surface
+        // as a generic-constraint CS error in generated code (T : IEntity, new()).
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+            [Table] public partial class Bad {
+                [Id] public partial BadId Id { get; set; }
+                [Children] public partial IReadOnlyCollection<string> Tags { get; }
+            }
+            """;
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.Contains(runDiags, d => d.Id == "CG026");
+    }
+
+    [Fact]
+    public void CG027_ParentMustTargetTable()
+    {
+        // [Parent] target must be a [Table] — pointing at a plain class would emit
+        // Session.GetParent<T>(this) where T isn't IEntity.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            namespace M;
+            public sealed class NotATable { }
+            [Table] public partial class Bad {
+                [Id] public partial BadId Id { get; set; }
+                [Parent] public partial NotATable Parent { get; set; }
+            }
+            """;
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.Contains(runDiags, d => d.Id == "CG027");
+    }
+
+    [Fact]
+    public void CG028_AnnotatedMemberMustNotBeStatic()
+    {
+        // Static partial properties don't fit the per-instance emit shape (backing
+        // field, _session, identity-map). The diagnostic catches the mistake at the
+        // model boundary instead of letting confusing CS errors surface from the
+        // generated partial.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            namespace M;
+            [Table] public partial class Bad {
+                [Id] public partial BadId Id { get; set; }
+                [Property] public static partial string Greeting { get; set; }
+            }
+            """;
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.Contains(runDiags, d => d.Id == "CG028");
+    }
 }

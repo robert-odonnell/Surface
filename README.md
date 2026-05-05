@@ -54,7 +54,7 @@ The generator emits everything needed to make this work end-to-end:
 - Directional read primitives (`Session.QueryOutgoing<TKind, T>(this)`, `Session.QueryIncoming<TKind, T>(this)`) — no ambiguity on self-referential edges
 - `Workspace.Schema` (`IReadOnlyList<string>` of idempotent DDL chunks) and `Workspace.ApplySchemaAsync(transport)` — model-scoped, no process globals
 - `Workspace.ReferenceRegistry` carrying the per-model `[Reference]` field metadata (delete behaviour) the commit planner reads through
-- Diagnostics (CG001-CG024) that catch model-level mistakes at compile time
+- Diagnostics (CG001-CG028) that catch model-level mistakes at compile time
 
 The library promise is **minimal intrusion**: the generator never forces a base class, ctor, or
 inherited member on you. The `[CompositionRoot]` partial is yours — wire transport, caches,
@@ -222,10 +222,15 @@ Plus aggregate / relation marker attributes:
 - **Safe SQL formatting.** All record ids, identifiers, and string literals route through
   `SurrealFormatter` — bare `table:value` when safe, Surreal's `table:⟨value⟩` escape
   when not. Especially relevant if you set `[assembly: RecordIdValue<string>]`.
-- **Writer lease.** A per-aggregate row in `writer_lease` with a 5-minute TTL. The
-  caller acquires it before committing and passes it into `CommitAsync` for renewal;
-  theft surfaces as `WriterLeaseStolenException` so the commit aborts cleanly. Stale
-  leases expire and become stealable, capping crash recovery to one TTL window.
+- **Writer lease.** Optimistic CAS on a monotonic `seq` counter, one
+  `writer_lease:<aggregate>` row per aggregate. `AcquireAsync` reads the current `seq`
+  and captures it on the lease; `CommitAsync` splices a transactional CAS check + `seq + 1`
+  upsert around the data writes — atomic with the data, throws
+  `WriterLeaseStolenException` if another writer advanced `seq` first. No TTL, no
+  holder id, no theft-recovery timer; crashed writers leave their captured seq in
+  memory only and the next acquirer reads the current seq fresh. Suits the library's
+  one-shot session character: load → mutate → commit happens fast enough that races are
+  rare and retries are cheap.
 - **Commit pipeline.** Recorded commands → `PendingState` (compacted indexed view, plus
   per-field `ReferenceTransition` snapshots) → `CommitPlanner` (three-phase reference-
   delete resolve: cascade/unset to fixpoint, then collect Reject blockers) →
@@ -233,14 +238,17 @@ Plus aggregate / relation marker attributes:
 
 ## Diagnostics
 
-The generator emits CG001-CG024 covering: missing `partial` modifier, duplicate `[Id]`,
-`[Children]` element-type mistakes, multiple-aggregate ownership, reference-delete
-behavior validation, cascade cycles, dangling-`Ignore` warnings, multiple
-`[CompositionRoot]` declarations, non-partial `[CompositionRoot]`, `[Children]`
-members without a `[Parent]` path back to the aggregate root, `[Reference]` fields
-that cross aggregate boundaries, non-partial annotated members, and conflicting role
-attributes. Full list in `src/Disruptor.Surface.Generator/Pipeline/Diagnostics.cs`
-(rendered into the API reference under `docs/api.md`).
+The generator emits CG001-CG028 covering: missing `partial` modifier, duplicate `[Id]`,
+`[Children]` element-type mistakes (type-parameter and not-a-`[Table]`),
+multiple-aggregate ownership, reference-delete behavior validation, cascade cycles,
+dangling-`Ignore` warnings, multiple `[CompositionRoot]` declarations, non-partial
+`[CompositionRoot]`, `[Children]` members without a `[Parent]` path back to the
+aggregate root, `[Reference]` fields that cross aggregate boundaries, non-partial
+annotated members, conflicting role attributes, `[Property]` types without a
+SurrealDB scalar mapping, `[Parent]` targets that aren't `[Table]`s, and
+`static` annotated members. Full list in
+`src/Disruptor.Surface.Generator/Pipeline/Diagnostics.cs` (rendered into the API
+reference under `docs/api.md`).
 
 ## Status
 

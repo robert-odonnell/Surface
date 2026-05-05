@@ -555,5 +555,9 @@ The generator emits diagnostics for invalid model shapes:
 | `CG021` | `[Reference]` crosses aggregate boundaries; use a relation instead. |
 | `CG022` | Annotated property (`[Id]/[Property]/[Parent]/[Reference]/[Children]`) must be declared `partial`. |
 | `CG024` | Property has multiple role attributes; the five role attributes are mutually exclusive. |
+| `CG025` | `[Property]` type has no SurrealDB scalar mapping. |
+| `CG026` | `[Children]` element type must be a `[Table]` (concrete-but-not-Table case; `CG009` covers type-parameter element). |
+| `CG027` | `[Parent]` target must be a `[Table]`. |
+| `CG028` | Annotated property must not be declared `static`. |
 
 Some older relation-method diagnostics remain in the codebase for retired shapes, but normal user-facing relation writes should go through `Session.Relate<TKind>` and related methods.

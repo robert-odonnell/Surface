@@ -162,4 +162,36 @@ internal static class Diagnostics
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor PropertyTypeNotMappable = new(
+        id: "CG025",
+        title: "[Property] type has no SurrealDB scalar mapping",
+        messageFormat: "[Property] '{0}.{1}' has type '{2}' which has no SurrealDB scalar mapping; the schema would omit the field and reads/writes would fail at the database. Map the type to one of: string, int/long, bool, float/double, decimal, DateTime/DateTimeOffset, Guid, Ulid — or mark this as a [Reference]/[Children] if it's a record.",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor ChildrenElementMustBeTable = new(
+        id: "CG026",
+        title: "[Children] element type must be a [Table]",
+        messageFormat: "[Children] property '{0}.{1}' uses element type '{2}' which is not a [Table] class; the generated <c>QueryChildren&lt;T&gt;</c> body requires <c>T : IEntity, new()</c>",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor ParentMustTargetTable = new(
+        id: "CG027",
+        title: "[Parent] target must be a [Table]",
+        messageFormat: "[Parent] property '{0}.{1}' targets type '{2}' which is not a [Table] class; parent links must point at another aggregate-graph entity",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor AnnotatedMemberMustNotBeStatic = new(
+        id: "CG028",
+        title: "Annotated property must not be static",
+        messageFormat: "'{0}.{1}' carries [{2}] but is declared static; annotations only apply to instance members — the emitted backing field, session-binding, and identity-map plumbing are all per-instance",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }

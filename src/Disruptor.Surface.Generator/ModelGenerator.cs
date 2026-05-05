@@ -300,8 +300,24 @@ public sealed class ModelGenerator : IIncrementalGenerator
                 var element = content.ElementType ?? content;
                 if (element.IsTypeParameter)
                 {
+                    // CG009 — type-parameter element. The child's concrete type isn't
+                    // known at codegen time, so the loader can't pick the row-hydrator.
                     spc.ReportDiagnostic(Diagnostic.Create(
                         Diagnostics.ChildrenElementMustBeConcrete,
+                        Location.None,
+                        table.FullName,
+                        memberName,
+                        element.DisplayName));
+                    valid = false;
+                }
+                else if (!element.IsTableType)
+                {
+                    // CG026 — concrete-but-not-a-Table element (e.g. IReadOnlyCollection<string>).
+                    // The emitted Session.QueryChildren<T>(...) call has `where T : IEntity, new()`,
+                    // so this would surface as a generic-constraint CS error in generated code
+                    // without the diagnostic.
+                    spc.ReportDiagnostic(Diagnostic.Create(
+                        Diagnostics.ChildrenElementMustBeTable,
                         Location.None,
                         table.FullName,
                         memberName,
@@ -323,6 +339,61 @@ public sealed class ModelGenerator : IIncrementalGenerator
                     valid = false;
                 }
             }
+
+            // CG027 — [Parent] target must be a [Table]. Same family as CG010 / CG026
+            // (generic constraint violation in emitted code without the diagnostic).
+            foreach (var p in table.Properties)
+            {
+                if (!p.Kinds.HasFlag(PropertyKind.Parent)) continue;
+                if (p.Type.IsTableType) continue;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.ParentMustTargetTable,
+                    Location.None,
+                    table.FullName,
+                    p.Name,
+                    p.Type.DisplayName));
+                valid = false;
+            }
+
+            // CG028 — annotated property must not be static. Every emit shape (backing
+            // field, _session reference, identity-map plumbing, hydrate body) is
+            // per-instance; a static partial property would compile to `static partial T
+            // Foo` and the generator's emitted instance backing field wouldn't match.
+            foreach (var p in table.Properties)
+            {
+                if (!p.IsStatic) continue;
+                var attrName = AnnotationLabel(p);
+                if (attrName is null) continue;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.AnnotatedMemberMustNotBeStatic,
+                    Location.None,
+                    table.FullName,
+                    p.Name,
+                    attrName));
+                valid = false;
+            }
+
+            // CG025 — [Property] type must map to a SurrealDB scalar. Unmapped types
+            // (Uri, TimeSpan, custom value objects, …) compile fine on the CLR side but
+            // SchemaEmitter would silently omit the field, so reads/writes would fail at
+            // the database, not at build time. Skip SurrealArray<T> (handled separately
+            // in SchemaEmitter via the array<object> + sub-field path) and skip relation
+            // role overlay (they don't take the scalar-emission code path).
+            foreach (var p in table.Properties)
+            {
+                if (!p.Kinds.HasFlag(PropertyKind.Property)) continue;
+                if (p.RelationRole != RelationRole.None) continue;
+                if (p.Type.MetadataName == "Disruptor.Surface.Runtime.SurrealArray`1") continue;
+                if (SchemaEmitter.IsMappableScalar(p.Type)) continue;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.PropertyTypeNotMappable,
+                    Location.None,
+                    table.FullName,
+                    p.Name,
+                    p.Type.FullyQualifiedName));
+                valid = false;
+            }
+
             if (!valid)
             {
                 continue;
@@ -408,4 +479,19 @@ public sealed class ModelGenerator : IIncrementalGenerator
             }
         }
     }
+
+    /// <summary>
+    /// Best-fit attribute label for diagnostic messages — picks the role attribute the
+    /// user's property carries, falling back to "Relation" for forward/inverse-relation
+    /// members or null when the property has no model annotation.
+    /// </summary>
+    private static string? AnnotationLabel(PropertyModel p) => p.Kinds switch
+    {
+        var k when k.HasFlag(PropertyKind.Id)        => "Id",
+        var k when k.HasFlag(PropertyKind.Property)  => "Property",
+        var k when k.HasFlag(PropertyKind.Parent)    => "Parent",
+        var k when k.HasFlag(PropertyKind.Children)  => "Children",
+        var k when k.HasFlag(PropertyKind.Reference) => "Reference",
+        _ => p.RelationRole != RelationRole.None ? "Relation" : null,
+    };
 }

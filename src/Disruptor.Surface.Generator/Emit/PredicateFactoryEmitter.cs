@@ -116,6 +116,11 @@ internal static class PredicateFactoryEmitter
             // collection-aware predicate (Contains-element, Length, …).
             if (p.Type.MetadataName == SurrealArrayMetadata) continue;
 
+            // Unmapped scalar types are flagged at validation time (CG025); skip them
+            // here too so a `PropertyExpr<Uri>` doesn't show up in IntelliSense even
+            // when the user has temporarily suppressed the diagnostic.
+            if (!SchemaEmitter.IsMappableScalar(p.Type)) continue;
+
             result.Add((p.Name, SurrealNaming.ToFieldName(p.Name), p.Type.FullyQualifiedName));
         }
 

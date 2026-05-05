@@ -328,7 +328,16 @@ internal static class SchemaEmitter
         sb.AppendLine(";");
     }
 
-    private static (string? Type, string? Default) MapScalarType(TypeRef type)
+    /// <summary>
+    /// True iff <paramref name="type"/> has a SurrealDB scalar mapping (string, int,
+    /// float, decimal, bool, datetime, ulid, …). Validation passes call this from
+    /// <see cref="ModelGenerator.Emit"/> to flag <c>[Property]</c> fields whose type
+    /// would otherwise compile as CLR but produce no schema column — the query/write
+    /// path would then fail only at the database, not at build time.
+    /// </summary>
+    public static bool IsMappableScalar(TypeRef type) => MapScalarType(type).Type is not null;
+
+    internal static (string? Type, string? Default) MapScalarType(TypeRef type)
     {
         var fqn = StripGlobal(type.FullyQualifiedName);
         if (fqn.EndsWith("?")) fqn = fqn[..^1];
