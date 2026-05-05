@@ -412,6 +412,28 @@ internal static class SchemaEmitter
           .Append("FROM ").AppendLine(string.Join("|", sourceTables))
           .Append("TO ").AppendLine(string.Join("|", targetTables))
           .AppendLine("ENFORCED;");
+
+        // Edge payload fields (only present for ForwardRelation<TPayload> kinds).
+        // Mirrors the per-property emission for entity tables — same scalar-type
+        // mapper, same `IF NOT EXISTS` idempotency, same DEFAULT seeding so untouched
+        // fields don't break SCHEMAFULL inserts. Keeps relation tables write-safe via
+        // either RELATE … CONTENT { … } or session.RelateOnce(...) with a payload dict.
+        foreach (var field in fwdKind.PayloadFields)
+        {
+            var (fieldType, fieldDefault) = MapScalarType(field.Type);
+            if (fieldType is null) continue;
+
+            sb.Append("DEFINE FIELD IF NOT EXISTS ").Append(field.FieldName)
+              .Append(" ON ").Append(edgeName)
+              .Append(" TYPE ").Append(fieldType);
+
+            if (fieldDefault is not null)
+            {
+                sb.Append(" DEFAULT ").Append(fieldDefault);
+            }
+
+            sb.AppendLine(";");
+        }
     }
 
     private static List<TableModel> FindSourceTables(ModelGraph graph, string fwdKindFullName)

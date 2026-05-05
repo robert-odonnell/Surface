@@ -190,6 +190,11 @@ Plus aggregate / relation marker attributes:
   `IReadOnlyCollection<IRecordId>`. Mutations go through the typed
   `Session.Relate<TKind>(src, tgt)` etc. — no auto-emitted `Add{X}` / `Remove{X}` /
   `Clear{X}` methods; write a one-line domain-verb passthrough if you want one.
+- For relations that carry edge data, derive from `ForwardRelation<TPayload>` —
+  the generator walks `TPayload`'s public scalar properties and emits a
+  `DEFINE FIELD` on the relation table for each. Same scalar mapping as `[Property]`
+  fields on entity tables; pass payload data through `session.Relate<TKind>(src,
+  tgt, payload)` or `session.RelateOnce<TKind>(src, tgt, payload)`.
 - `[Reject]`, `[Unset]`, `[Cascade]`, `[Ignore]` on `[Reference]` properties drive
   the commit-time delete planner. `[Reject]` is the default.
 

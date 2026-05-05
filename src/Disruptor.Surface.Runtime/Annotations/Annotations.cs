@@ -59,6 +59,28 @@ public abstract class RelationAttribute : Attribute { }
 /// <summary>Abstract base for forward-direction relation attributes. Derive directly: <c>public sealed class RestrictsAttribute : ForwardRelation;</c>. Inheritance from this base IS the discoverability signal — no marker attribute needed.</summary>
 public abstract class ForwardRelation : RelationAttribute { }
 
+/// <summary>
+/// Forward-direction relation attribute that carries a typed payload — derive when the
+/// edge table needs schema-defined fields (confidence, run id, source location, …).
+/// The generator walks <typeparamref name="TPayload"/>'s public properties and emits a
+/// <c>DEFINE FIELD</c> on the relation table for each scalar property, mirroring how
+/// <c>[Property]</c> fields are emitted on entity tables. <typeparamref name="TPayload"/>
+/// is a plain POCO — no <c>[Property]</c> annotations needed; public get/set scalar
+/// properties are picked up automatically.
+/// <para>
+/// Derive directly:
+/// <c>public sealed class UsesAttribute : ForwardRelation&lt;UsesPayload&gt;;</c>.
+/// Pass payload data at write time via <c>session.Relate&lt;Uses&gt;(src, tgt, payload)</c>
+/// (the dictionary overload) — typed-payload runtime overloads can be layered on later
+/// without changing the schema contract.
+/// </para>
+/// </summary>
+public abstract class ForwardRelation<TPayload> : ForwardRelation
+    where TPayload : class
+{
+    public Type PayloadType => typeof(TPayload);
+}
+
 /// <summary>Abstract base for inverse-direction relation attributes. The type parameter points at the forward kind this inverse mirrors. Derive directly: <c>public sealed class RestrictedByAttribute : InverseRelation&lt;RestrictsAttribute&gt;;</c>.</summary>
 public abstract class InverseRelation<TForward> : RelationAttribute
     where TForward : ForwardRelation

@@ -25,5 +25,6 @@ internal static class AnnotationsMetadata
     public const string Ignore               = $"{Namespace}.IgnoreAttribute";
     public const string RelationAttribute    = $"{Namespace}.RelationAttribute";
     public const string ForwardRelation      = $"{Namespace}.ForwardRelation";
+    public const string ForwardRelationOfT   = $"{Namespace}.ForwardRelation`1";
     public const string InverseRelation      = $"{Namespace}.InverseRelation`1";
 }

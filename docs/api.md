@@ -26,7 +26,8 @@ This is a user-facing API map for the generated surface and the runtime types mo
 | `[Unset]` | with nullable `[Reference]` | Clears this reference when the target is deleted. |
 | `[Cascade]` | with `[Reference]` | Deletes the referencing record when the target is deleted. |
 | `[Ignore]` | with `[Reference]` | Leaves the reference unchanged when the target is deleted. |
-| `ForwardRelation` | base class | Base for user-defined forward relation attributes. |
+| `ForwardRelation` | base class | Base for user-defined forward relation attributes (no edge payload). |
+| `ForwardRelation<TPayload>` | base class | Forward relation attribute with a typed edge payload. The generator emits a `DEFINE FIELD` on the relation table for each public scalar property of `TPayload`. |
 | `InverseRelation<TForward>` | base class | Base for user-defined inverse relation attributes. |
 
 ## Generated Entity API
@@ -359,6 +360,53 @@ session.QueryIncoming<Restricts, Constraint>(story);
 session.QueryRelatedIds<Restricts>(sourceEntity);
 session.QueryInverseRelatedIds<Restricts>(targetEntity);
 ```
+
+### Typed edge payloads — `ForwardRelation<TPayload>`
+
+When the relation itself carries data (confidence scores, run id, source location, …), declare the forward attribute with a payload type. The generator walks the payload's public scalar properties and emits a `DEFINE FIELD` on the relation table for each, mirroring how `[Property]` fields are emitted on entity tables. Same scalar coverage (`SchemaEmitter.MapScalarType`), same `IF NOT EXISTS` idempotency, same `DEFAULT` seeding so untouched fields don't break SCHEMAFULL inserts.
+
+```csharp
+public sealed class UsesPayload
+{
+    public string Kind { get; set; } = "";
+    public string FilePath { get; set; } = "";
+    public int Line { get; set; }
+    public string RunId { get; set; } = "";
+}
+
+public sealed class UsesAttribute : ForwardRelation<UsesPayload>;
+public sealed class UsedByAttribute : InverseRelation<UsesAttribute>;
+```
+
+Generated schema for the `uses` table:
+
+```sql
+DEFINE TABLE IF NOT EXISTS uses SCHEMAFULL
+TYPE RELATION
+FROM code_symbols
+TO code_symbols
+ENFORCED;
+DEFINE FIELD IF NOT EXISTS kind ON uses TYPE string DEFAULT "";
+DEFINE FIELD IF NOT EXISTS file_path ON uses TYPE string DEFAULT "";
+DEFINE FIELD IF NOT EXISTS line ON uses TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS run_id ON uses TYPE string DEFAULT "";
+```
+
+The payload class is a plain POCO — no `[Property]` annotations needed; public scalar properties (`string`, `int`/`long`, `bool`, `float`/`double`/`decimal`, `DateTime`/`DateTimeOffset`, `Guid`, `Ulid`) are picked up automatically. Anything else is silently skipped. Static, indexer, write-only, and inherited-already-seen properties are not emitted as fields.
+
+At write time, pass payload data through the dictionary overload of `Relate` / `RelateOnce`:
+
+```csharp
+session.RelateOnce<Uses>(source, target, new Dictionary<string, object?>
+{
+    ["kind"]      = "call",
+    ["file_path"] = "src/Foo.cs",
+    ["line"]      = 42,
+    ["run_id"]    = currentRunId,
+});
+```
+
+Field names in the dictionary use the snake-cased SurrealDB form (matching what the schema declared), not the C# property name. The bare `ForwardRelation` (no `<TPayload>`) keeps the pre-feature schema unchanged — no extra fields emitted on the relation table.
 
 Within-aggregate relation properties hydrate entity instances. Cross-aggregate relation properties expose `IRecordId` endpoints because the other aggregate is not part of the current snapshot.
 

@@ -42,7 +42,7 @@ The generator scans the compilation for:
 - `[AggregateRoot]` markers.
 - `[CompositionRoot]` class.
 - Properties with `[Id]`, `[Property]`, `[Reference]`, `[Parent]`, `[Children]`, and relation attributes.
-- Relation attribute classes deriving from `ForwardRelation` or `InverseRelation<TForward>`.
+- Relation attribute classes deriving from `ForwardRelation`, `ForwardRelation<TPayload>`, or `InverseRelation<TForward>`. Generic forwards carry a payload type whose public scalar properties are harvested at extraction time and emitted as `DEFINE FIELD` lines on the relation table.
 
 It builds a model graph containing tables, properties, aggregate membership, relation kinds, relation unions, and reference metadata. Diagnostics are reported before emission when the model shape cannot be generated safely.
 

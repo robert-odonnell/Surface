@@ -471,4 +471,88 @@ public sealed class EmissionShapeTests
         // No sibling extension class either.
         Assert.DoesNotContain("LeafQueryIncludes", s);
     }
+
+    [Fact]
+    public void TypedEdgePayload_EmitsSchemaFieldsOnRelationTable()
+    {
+        // ForwardRelation<TPayload> tells the schema emitter to walk TPayload's public
+        // scalar properties and emit DEFINE FIELD for each on the relation table. Same
+        // pattern as [Property] fields on entity tables: snake_case name, scalar type
+        // mapping, IF NOT EXISTS for re-applying. The bare ForwardRelation case stays
+        // unchanged — no payload, no extra fields.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            public sealed class UsesPayload
+            {
+                public string Kind { get; set; } = "";
+                public string FilePath { get; set; } = "";
+                public int Line { get; set; }
+                public string RunId { get; set; } = "";
+            }
+
+            public sealed class UsesAttribute : ForwardRelation<UsesPayload>;
+            public sealed class UsedByAttribute : InverseRelation<UsesAttribute>;
+
+            [Table, AggregateRoot] public partial class CodeSymbol {
+                [Id] public partial CodeSymbolId Id { get; set; }
+                [Property] public partial string Name { get; set; }
+                [Uses] public partial IReadOnlyCollection<CodeSymbol> UsedSymbols { get; }
+                [UsedBy] public partial IReadOnlyCollection<CodeSymbol> UsersOfMe { get; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, _) = GeneratorHarness.Run(src);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        // The relation table itself still emits the standard TYPE RELATION header.
+        Assert.Contains("DEFINE TABLE IF NOT EXISTS uses SCHEMAFULL", allSrc);
+        Assert.Contains("TYPE RELATION", allSrc);
+
+        // Each public scalar property on UsesPayload becomes a snake-cased edge field
+        // with the same scalar mapping `[Property]` would get. Defaults match
+        // SchemaEmitter.MapScalarType — strings get "" so SCHEMAFULL inserts that omit
+        // the field don't fail.
+        Assert.Contains("DEFINE FIELD IF NOT EXISTS kind ON uses TYPE string DEFAULT \"\";", allSrc);
+        Assert.Contains("DEFINE FIELD IF NOT EXISTS file_path ON uses TYPE string DEFAULT \"\";", allSrc);
+        Assert.Contains("DEFINE FIELD IF NOT EXISTS line ON uses TYPE int DEFAULT 0;", allSrc);
+        Assert.Contains("DEFINE FIELD IF NOT EXISTS run_id ON uses TYPE string DEFAULT \"\";", allSrc);
+    }
+
+    [Fact]
+    public void BareForwardRelation_EmitsNoPayloadFields()
+    {
+        // Regression: forward relations declared via the non-generic ForwardRelation
+        // base must NOT pick up phantom payload fields. The pre-payload schema shape
+        // is preserved verbatim.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            public sealed class CallsAttribute : ForwardRelation;
+            public sealed class CalledByAttribute : InverseRelation<CallsAttribute>;
+
+            [Table, AggregateRoot] public partial class Symbol {
+                [Id] public partial SymbolId Id { get; set; }
+                [Calls] public partial IReadOnlyCollection<Symbol> CalledSymbols { get; }
+                [CalledBy] public partial IReadOnlyCollection<Symbol> CallingSymbols { get; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, _) = GeneratorHarness.Run(src);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        Assert.Contains("DEFINE TABLE IF NOT EXISTS calls SCHEMAFULL", allSrc);
+        // No DEFINE FIELD lines for the calls table — payloadless edge keeps the
+        // pre-feature schema.
+        Assert.DoesNotContain("DEFINE FIELD IF NOT EXISTS kind ON calls", allSrc);
+        Assert.DoesNotContain("DEFINE FIELD IF NOT EXISTS run_id ON calls", allSrc);
+    }
 }
