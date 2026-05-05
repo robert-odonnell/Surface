@@ -217,8 +217,8 @@ public static class CommitPlanner
 
         foreach (var rec in pending.Records.Values)
         {
-            // Sets on a not-surviving record are dropped at emit; ignore them.
-            if (!rec.ExistsAtEnd) continue;
+            // Sets on a final-segment delete are dropped at emit; ignore them.
+            if (rec.Current.Deleted) continue;
 
             foreach (var kv in rec.Current.Sets)
             {
