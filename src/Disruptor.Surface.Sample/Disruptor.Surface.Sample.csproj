@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Disruptor.Surface.Runtime\Disruptor.Surface.Runtime.csproj" />
+    <ProjectReference Include="..\Disruptor.Surface.Transport.Http\Disruptor.Surface.Transport.Http.csproj" />
     <ProjectReference Include="..\Disruptor.Surface.Generator\Disruptor.Surface.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 

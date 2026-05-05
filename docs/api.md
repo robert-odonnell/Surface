@@ -4,10 +4,11 @@ This is a user-facing API map for the generated surface and the runtime types mo
 
 ## Packages And Namespaces
 
-- `Disruptor.Surface.Runtime`: runtime package with annotations, transport, sessions, ids, leases, and commit pipeline.
+- `Disruptor.Surface.Runtime`: runtime core — `SurrealSession`, `IEntity`, `RecordId`, `WriterLease`, `CommitPlanner`, `HydrationJson`, `ISurrealTransport`, `SurrealException`, … No transport implementation lives here; pick one of the sibling packages or write your own against `ISurrealTransport`.
+- `Disruptor.Surface.Transport.Http`: over-the-network transport — `SurrealHttpClient`, `SurrealConfig`. Talks to a remote SurrealDB via `/rpc` + JSON-RPC. The default for multi-host / multi-process deployments.
+- `Disruptor.Surface.Transport.Embedded`: in-process transport — `SurrealEmbeddedTransport`. Backed by SurrealDB embedded with a RocksDB file store; side-steps the HTTP body-size ceiling that bites on large commits.
 - `Disruptor.Surface.Generator`: Roslyn source generator. Reference as a private analyzer dependency.
-- `Disruptor.Surface.Annotations`: namespace for modeling attributes.
-- `Disruptor.Surface.Runtime`: namespace for runtime contracts and helpers.
+- `Disruptor.Surface.Annotations`: namespace for modeling attributes (lives inside the runtime package).
 
 ## Modeling Attributes
 
@@ -425,7 +426,7 @@ A SurrealQL string in, a `JsonDocument` out. No vars — bindings are inlined as
 
 ### `SurrealHttpClient`
 
-HTTP transport for SurrealDB. Uses the `/rpc` endpoint with JSON-RPC 2.0 envelopes (`{"method": "query", "params": [<sql>, {}]}`); the `params[1]` slot stays empty because every binding has already been inlined into the SQL. SurrealDB's JSON binder treats record-shaped objects as generic `Object`s rather than `Thing`s, so routing record ids through `params[1]` would silently miss; SurrealQL literal syntax (`table:value`) is parsed at the query level and preserves type. The bypass also lifts the per-query statement-count ceiling that a `LET $pN = …;` prefix used to hit on large commits.
+Lives in the `Disruptor.Surface.Transport.Http` package (namespace `Disruptor.Surface.Transport.Http`). HTTP transport for SurrealDB. Uses the `/rpc` endpoint with JSON-RPC 2.0 envelopes (`{"method": "query", "params": [<sql>, {}]}`); the `params[1]` slot stays empty because every binding has already been inlined into the SQL. SurrealDB's JSON binder treats record-shaped objects as generic `Object`s rather than `Thing`s, so routing record ids through `params[1]` would silently miss; SurrealQL literal syntax (`table:value`) is parsed at the query level and preserves type. The bypass also lifts the per-query statement-count ceiling that a `LET $pN = …;` prefix used to hit on large commits.
 
 ```csharp
 await using var transport = new SurrealHttpClient(config, httpClient);

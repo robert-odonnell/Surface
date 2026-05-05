@@ -118,14 +118,18 @@ await rw.CommitAsync(transport, lease);
 ```
 src/
   Disruptor.Surface.Generator/             — Roslyn source generator (netstandard2.0, analyzer)
-  Disruptor.Surface.Runtime/               — runtime library: SurrealSession, IEntity, IRelationKind,
-                                             RecordId, WriterLease, SurrealHttpClient, CommitPlanner,
-                                             HydrationJson, …
-  Disruptor.Surface.Transport.Embedded/    — optional in-process transport backed by SurrealDB
-                                             embedded with a RocksDB file store. Drop-in replacement
-                                             for SurrealHttpClient when consumers want to skip the
-                                             /rpc round-trip (large commits, code-index full
-                                             rebuilds, single-process workloads).
+  Disruptor.Surface.Runtime/               — runtime core: SurrealSession, IEntity, IRelationKind,
+                                             RecordId, WriterLease, CommitPlanner, HydrationJson,
+                                             ISurrealTransport, SurrealException, …
+                                             No transport implementation lives here — pick one of
+                                             the sibling packages below (or implement your own).
+  Disruptor.Surface.Transport.Http/        — over-the-network transport. Talks to a remote
+                                             SurrealDB via /rpc + JSON-RPC. The default for
+                                             multi-host / multi-process deployments.
+  Disruptor.Surface.Transport.Embedded/    — in-process transport backed by SurrealDB embedded
+                                             with a RocksDB file store. Side-steps the HTTP body-
+                                             size ceiling that bites large commits (code-index
+                                             full rebuilds, bulk imports). Single-process only.
   Disruptor.Surface.Sample/                — console-app harness that exercises the full pipeline
                                              against a live SurrealDB; also the canonical worked
                                              example schema

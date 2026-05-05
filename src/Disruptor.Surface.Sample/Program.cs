@@ -3,6 +3,7 @@ using Disruptor.Surface.Runtime.Query;
 using Disruptor.Surface.Sample;
 using Disruptor.Surface.Sample.Models;
 using Disruptor.Surface.Sample.Relations;
+using Disruptor.Surface.Transport.Http;
 
 // Mirror of: surreal start --bind 127.0.0.1:8000 --default-namespace project-brain
 //                          --default-database workspace --username root --password secret

@@ -1,4 +1,4 @@
-namespace Disruptor.Surface.Runtime;
+namespace Disruptor.Surface.Transport.Http;
 
 public sealed record SurrealConfig(
     Uri Url,

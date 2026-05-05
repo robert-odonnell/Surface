@@ -4,8 +4,9 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Disruptor.Surface.Runtime;
 
-namespace Disruptor.Surface.Runtime;
+namespace Disruptor.Surface.Transport.Http;
 
 public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
 {
@@ -42,16 +43,16 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
         return ValueTask.CompletedTask;
     }
 
-    public async Task<SurrealResultSet> SqlAsync(string surrealQl, CancellationToken cancellationToken = default)
-    {
-        var normalized = await SendAndNormalizeAsync(surrealQl, cancellationToken);
-        return new SurrealResultSet(normalized);
-    }
+    //public async Task<SurrealResultSet> SqlAsync(string surrealQl, CancellationToken cancellationToken = default)
+    //{
+    //    var normalized = await SendAndNormalizeAsync(surrealQl, cancellationToken);
+    //    return new SurrealResultSet(normalized);
+    //}
 
     public async Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
     {
         var normalized = await SendAndNormalizeAsync(sql, ct);
-        return WrapElementAsDocument(normalized);
+        return JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(normalized));
     }
 
 
@@ -78,12 +79,6 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
         throw new SurrealException("SurrealDB query failed after retries.", retryable: false);
     }
     
-    private static JsonDocument WrapElementAsDocument(JsonElement element)
-    {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(element);
-        return JsonDocument.Parse(bytes);
-    }
-
     /// <summary>
     /// POST a SurrealDB JSON-RPC <c>query</c> call to <c>/rpc</c>. The SQL travels
     /// unmodified in <c>params[0]</c>; the binding dictionary travels in
@@ -326,10 +321,4 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
             throw new SurrealException($"SurrealDB statement failed: {details}", retryable);
         }
     }
-
-}
-
-public sealed class SurrealException(string message, bool retryable) : Exception(message)
-{
-    public bool Retryable { get; } = retryable;
 }
