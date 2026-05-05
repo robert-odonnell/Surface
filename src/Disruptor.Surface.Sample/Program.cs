@@ -4,10 +4,7 @@ using Disruptor.Surface.Sample;
 using Disruptor.Surface.Sample.Models;
 using Disruptor.Surface.Sample.Relations;
 
-const string designAggregate = "design";
-const string reviewAggregate = "review";
-
-// Mirror of: surreal start --bind 127.0.0.1:8000 --default-namespace project-brain 
+// Mirror of: surreal start --bind 127.0.0.1:8000 --default-namespace project-brain
 //                          --default-database workspace --username root --password secret
 var config = new SurrealConfig(
     Url: new Uri("http://127.0.0.1:8000"),
@@ -69,7 +66,7 @@ return 0;
 async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
 {
     Console.WriteLine($"--- Seeding design '{text}' ---");
-    await using var lease = await WriterLease.AcquireAsync(db, designAggregate);
+    await using var lease = await workspace.AcquireWriterAsync(db);
 
     var session = new SurrealSession(Workspace.ReferenceRegistry);
     var design = session.Track(new Design
@@ -187,7 +184,7 @@ async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SurrealHttpCli
         ?? throw new InvalidOperationException($"design {targetDesignId} did not hydrate");
     var someConstraintId = design.Constraints.First().Id;
 
-    await using var lease = await WriterLease.AcquireAsync(db, reviewAggregate);
+    await using var lease = await workspace.AcquireWriterAsync(db);
     var session = new SurrealSession(Workspace.ReferenceRegistry);
 
     var review = session.Track(new Review
@@ -378,7 +375,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SurrealHttpClient d
     // (d) Compiler-driven LoadAsync (filtered slice): only Constraints get loaded.
     //     Same query AST as (b) — only the terminal verb differs. The session it returns
     //     is mutable / committable; we don't commit here.
-    await using var lease = await WriterLease.AcquireAsync(db, designAggregate);
+    await using var lease = await workspace.AcquireWriterAsync(db);
     var slicedSession = await Workspace.Query.Designs
         .WithId(targetId)
         .IncludeDetails()
@@ -418,7 +415,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SurrealHttpClient d
 async Task DemoLeaseTheft(DesignId designId, SurrealHttpClient db)
 {
     Console.WriteLine("--- Lease theft recovery demo ---");
-    await using var lease = await WriterLease.AcquireAsync(db, designAggregate);
+    await using var lease = await workspace.AcquireWriterAsync(db);
     var session = await workspace.LoadDesignAsync(db, designId);
     var design = session.Get<Design>(designId)!;
     // Mutate, but don't commit yet.
@@ -428,7 +425,7 @@ async Task DemoLeaseTheft(DesignId designId, SurrealHttpClient db)
     // Simulate another writer winning the race — direct UPSERT advances the seq past
     // the value our lease captured, so our CAS check at commit time will fail. Real
     // life: another process completed an Acquire+CommitAsync cycle in this gap.
-    await db.ExecuteAsync($"UPSERT writer_lease:{designAggregate} CONTENT {{ seq: {lease.ExpectedSequence + 99} }};");
+    await db.ExecuteAsync($"UPSERT writer_lease:main CONTENT {{ seq: {lease.ExpectedSequence + 99} }};");
     Console.WriteLine($"  simulated theft: another writer advanced seq past {lease.ExpectedSequence}");
 
     // The (now-stale) writer attempts to commit. The CAS check spliced into the

@@ -211,6 +211,47 @@ public sealed class Query<T>
                         HydrateNested(childRow, children.Nested, sink);
                     }
                     break;
+
+                case IncludeRelationNode relation:
+                    if (hasOwnerId)
+                    {
+                        sink.MarkSliceLoaded(ownerId, relation.ParentSliceKey);
+                    }
+                    if (!row.TryGetProperty(relation.ParentSliceKey, out var relArr)) continue;
+                    if (relArr.ValueKind != JsonValueKind.Array) continue;
+
+                    if (relation.IdsOnly)
+                    {
+                        // Cross-aggregate: each item is an edge row { id, in, out }. Feed
+                        // the session's edges dict directly — no entity hydration.
+                        foreach (var edgeRow in relArr.EnumerateArray())
+                        {
+                            if (edgeRow.ValueKind != JsonValueKind.Object) continue;
+                            if (!HydrationJson.TryReadRecordId(edgeRow, "in", out var src)) continue;
+                            if (!HydrationJson.TryReadRecordId(edgeRow, "out", out var dst)) continue;
+                            sink.Edge(src, relation.EdgeName, dst);
+                        }
+                    }
+                    else
+                    {
+                        // Within-aggregate: each item is a target row. Hydrate the entity
+                        // and synthesize the edge from (parentRowId, edgeName, targetId).
+                        // Direction flips source/target for inverse traversals.
+                        foreach (var targetRow in relArr.EnumerateArray())
+                        {
+                            if (targetRow.ValueKind != JsonValueKind.Object) continue;
+                            relation.Hydrator?.Invoke(targetRow, sink);
+                            if (!hasOwnerId) continue;
+                            if (!HydrationJson.TryReadRecordId(targetRow, "id", out var targetId)) continue;
+                            var src = relation.IsOutgoing ? ownerId : targetId;
+                            var dst = relation.IsOutgoing ? targetId : ownerId;
+                            sink.Edge(src, relation.EdgeName, dst);
+                            // Recurse — single-target relations may carry their own nested
+                            // includes (multi-target nodes leave Nested empty).
+                            HydrateNested(targetRow, relation.Nested, sink);
+                        }
+                    }
+                    break;
             }
         }
     }

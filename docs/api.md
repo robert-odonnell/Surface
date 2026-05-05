@@ -215,7 +215,24 @@ var rows = await Workspace.Query.Designs
     .ExecuteAsync(transport);
 ```
 
-Forward/inverse relation traversals and plain (non-`Inline`) `[Reference]` traversals are not exposed — relation traversal needs a different SurrealQL shape and lands in a later release.
+Forward and inverse relation traversals are exposed via `IncludeRelationNode` — see below. Plain (non-`Inline`) `[Reference]` traversals are not exposed; the loader pulls them as id-only and there's no v1 read shape for arbitrary record links beyond the inline form.
+
+### Relation traversal — `IncludeRelationNode`
+
+Per relation property the generator emits one `Include{Name}` method on the entity's traversal builder and a matching extension on `Query<T>`. Three shapes:
+
+| Relation kind | Method shape | SurrealQL emitted |
+| --- | --- | --- |
+| Within-aggregate, single-target | `IncludeRestrictions(Action<{Target}TraversalBuilder>? configure = null)` — supports a target-side `Where(...)` filter and nested `Include*` calls | `(->edge->target[WHERE filter].*) AS slice` (forward), `(<-edge<-source[WHERE filter].*) AS slice` (inverse) |
+| Within-aggregate, multi-target | `IncludeRestrictions()` — no configure lambda; relation includes are leaves when the target is a union | `(->edge->?.*) AS slice` (forward), `(<-edge<-?.*) AS slice` (inverse) |
+| Cross-aggregate (any arity) | `IncludeRestrictions()` — no configure lambda; ids only, no entity hydration | `(SELECT id, in, out FROM edge WHERE in = $parent.id) AS slice` (forward), `(SELECT id, in, out FROM edge WHERE out = $parent.id) AS slice` (inverse) |
+
+Hydration:
+
+- **Within-aggregate** — each projected target row is hydrated via a generator-emitted callback. Single-target uses a direct `new {Target}() + Hydrate`; multi-target uses a switch on the row's `id:<table>` prefix to dispatch to the right concrete entity. For each target, an edge is synthesised from `(parentRowId, edgeName, targetId)` (direction-aware) and recorded via `IHydrationSink.Edge`. Subsequent reads of `entity.{RelationProperty}` resolve through `Session.QueryOutgoing` / `Session.QueryIncoming` against the populated edges + entities dicts.
+- **Cross-aggregate** — each edge row's `id`/`in`/`out` is unpacked and recorded directly via `IHydrationSink.Edge`. No target entity hydration. Reads of `entity.{RelationProperty}` resolve through `Session.QueryRelatedIds` / `Session.QueryInverseRelatedIds` and return `IReadOnlyCollection<IRecordId>`, matching the entity-side surface.
+
+Multi-target relation includes are leaves by design — the target side is a union of [Table] types with no shared traversal builder, so a `configure` lambda has no single-typed receiver. Future versions may add per-target-table filter routing (`.OnTarget<Feature>(f => f.Where(...))` or similar) if real callsites warrant the extra surface.
 
 ### Edge queries — `Workspace.Query.Edges.{Kind}`
 

@@ -17,9 +17,13 @@ namespace Disruptor.Surface.Generator.Emit;
 ///   <item><c>Build()</c> (internal) — snapshots accumulated state into <c>(IPredicate? Filter, IReadOnlyList&lt;IIncludeNode&gt; Nested)</c>.</item>
 /// </list>
 /// <para>
-/// Forward-relation traversals are out of scope for v1 — they'd need a different SurrealQL
-/// shape (subselect over the edge table joined back to the target). They'll come in a
-/// later PR alongside <see cref="EdgeQuery{TIn,TOut}"/>'s richer projections.
+/// Forward and inverse relation traversals are also exposed: per relation property the
+/// builder gets one <c>Include{Name}</c> method. Single-target relations (target side
+/// has exactly one [Table]) take a <c>configure</c> lambda for the target's traversal
+/// builder and accept a target-side filter; multi-target unions are leaves with no
+/// configure argument. Cross-aggregate relations are leaves regardless of target arity
+/// and project edge ids only — matching the entity-side <c>QueryRelatedIds</c> /
+/// <c>QueryInverseRelatedIds</c> semantics.
 /// </para>
 /// </summary>
 internal static class TraversalBuilderEmitter
@@ -27,6 +31,7 @@ internal static class TraversalBuilderEmitter
     private const string IncludeNodeFqn = "global::Disruptor.Surface.Runtime.Query.IIncludeNode";
     private const string IncludeChildrenNodeFqn = "global::Disruptor.Surface.Runtime.Query.IncludeChildrenNode";
     private const string IncludeInlineRefNodeFqn = "global::Disruptor.Surface.Runtime.Query.IncludeInlineRefNode";
+    private const string IncludeRelationNodeFqn = "global::Disruptor.Surface.Runtime.Query.IncludeRelationNode";
     private const string PredicateFqn = "global::Disruptor.Surface.Runtime.Query.IPredicate";
     private const string PredicateHelperFqn = "global::Disruptor.Surface.Runtime.Query.Predicate";
 
@@ -34,6 +39,7 @@ internal static class TraversalBuilderEmitter
     {
         var inlineRefs = CollectInlineRefs(table);
         var children = CollectChildren(table, graph);
+        var relations = CollectRelations(table, graph);
 
         // Always emit the builder type — even with zero traversable members, the user can
         // still call .Where(...) on it. Keeps the codegen surface uniform across tables.
@@ -85,6 +91,11 @@ internal static class TraversalBuilderEmitter
             EmitChildrenInclude(sb, memberIndent, bodyIndent, typeName, child);
         }
 
+        foreach (var rel in relations)
+        {
+            EmitRelationInclude(sb, memberIndent, bodyIndent, typeName, rel);
+        }
+
         // Build() — snapshot accumulator state for the AST. Called by the per-table
         // Include extension on Query<T>.
         sb.AppendLine();
@@ -102,9 +113,9 @@ internal static class TraversalBuilderEmitter
         // "Workspace.Query.Designs.IncludeConstraints(...)" at the root to the
         // identically-named "...IncludeConstraints(c => c.IncludeDetails())" inside a
         // configure lambda — same vocabulary at every level.
-        if (inlineRefs.Count > 0 || children.Count > 0)
+        if (inlineRefs.Count > 0 || children.Count > 0 || relations.Count > 0)
         {
-            EmitQueryExtensions(sb, indent, memberIndent, bodyIndent, table, inlineRefs, children);
+            EmitQueryExtensions(sb, indent, memberIndent, bodyIndent, table, inlineRefs, children, relations);
         }
 
         if (hasNamespace)
@@ -131,7 +142,8 @@ internal static class TraversalBuilderEmitter
         string bodyIndent,
         TableModel table,
         IReadOnlyList<InlineRefMember> inlineRefs,
-        IReadOnlyList<ChildrenMember> children)
+        IReadOnlyList<ChildrenMember> children,
+        IReadOnlyList<RelationMember> relations)
     {
         var entityFqn = string.IsNullOrEmpty(table.Namespace)
             ? $"global::{table.Name}"
@@ -184,6 +196,13 @@ internal static class TraversalBuilderEmitter
               .Append("(\"").Append(child.ChildTable).Append("\", \"").Append(child.ParentField).Append("\", __filter, __nested, ")
               .Append(child.HydratorExpression).Append(", \"").Append(child.SliceKey).AppendLine("\"));");
             sb.Append(memberIndent).AppendLine("}");
+        }
+
+        foreach (var rel in relations)
+        {
+            if (!first) sb.AppendLine();
+            first = false;
+            EmitRelationIncludeExtension(sb, memberIndent, bodyIndent, queryFqn, rel);
         }
 
         sb.Append(indent).AppendLine("}");
@@ -286,6 +305,259 @@ internal static class TraversalBuilderEmitter
         return result;
     }
 
+    /// <summary>
+    /// Emit a relation <c>Include</c> on the traversal builder. Single-target
+    /// within-aggregate gets a <c>configure</c> lambda for the target's own builder;
+    /// multi-target (within-aggregate) and cross-aggregate are no-arg leaves.
+    /// </summary>
+    private static void EmitRelationInclude(StringBuilder sb, string memberIndent, string bodyIndent, string typeName, RelationMember rel)
+    {
+        sb.AppendLine();
+        sb.Append(memberIndent).AppendLine($"/// <summary>{RelationDocBlurb(rel)}</summary>");
+
+        if (rel.SingleTargetBuilderFqn is { } targetBuilder)
+        {
+            // Single-target within-aggregate: configure lambda + filter at target.
+            sb.Append(memberIndent)
+              .Append("public ").Append(typeName).Append(" Include").Append(rel.PropertyName)
+              .Append("(global::System.Action<").Append(targetBuilder).AppendLine(">? configure = null)");
+            sb.Append(memberIndent).AppendLine("{");
+            sb.Append(bodyIndent).Append("var __sub = new ").Append(targetBuilder).AppendLine("();");
+            sb.Append(bodyIndent).AppendLine("configure?.Invoke(__sub);");
+            sb.Append(bodyIndent).AppendLine("var (__filter, __nested) = __sub.Build();");
+            sb.Append(bodyIndent).Append("_nested.Add(new ").Append(IncludeRelationNodeFqn).Append('(');
+            EmitRelationCtorArgs(sb, rel, "__filter", "__nested");
+            sb.AppendLine("));");
+            sb.Append(bodyIndent).AppendLine("return this;");
+            sb.Append(memberIndent).AppendLine("}");
+            return;
+        }
+
+        // Multi-target or cross-aggregate: no configure lambda, no filter, no nesting.
+        sb.Append(memberIndent)
+          .Append("public ").Append(typeName).Append(" Include").Append(rel.PropertyName).AppendLine("()");
+        sb.Append(memberIndent).AppendLine("{");
+        sb.Append(bodyIndent).Append("_nested.Add(new ").Append(IncludeRelationNodeFqn).Append('(');
+        EmitRelationCtorArgs(sb, rel, "null", $"global::System.Array.Empty<{IncludeNodeFqn}>()");
+        sb.AppendLine("));");
+        sb.Append(bodyIndent).AppendLine("return this;");
+        sb.Append(memberIndent).AppendLine("}");
+    }
+
+    /// <summary>Same shape as <see cref="EmitRelationInclude"/>, but on the Query&lt;T&gt; extension class.</summary>
+    private static void EmitRelationIncludeExtension(StringBuilder sb, string memberIndent, string bodyIndent, string queryFqn, RelationMember rel)
+    {
+        sb.Append(memberIndent).AppendLine($"/// <summary>{RelationDocBlurb(rel)}</summary>");
+
+        if (rel.SingleTargetBuilderFqn is { } targetBuilder)
+        {
+            sb.Append(memberIndent)
+              .Append("public static ").Append(queryFqn).Append(" Include").Append(rel.PropertyName)
+              .Append("(this ").Append(queryFqn).Append(" query, global::System.Action<")
+              .Append(targetBuilder).AppendLine(">? configure = null)");
+            sb.Append(memberIndent).AppendLine("{");
+            sb.Append(bodyIndent).Append("var __sub = new ").Append(targetBuilder).AppendLine("();");
+            sb.Append(bodyIndent).AppendLine("configure?.Invoke(__sub);");
+            sb.Append(bodyIndent).AppendLine("var (__filter, __nested) = __sub.Build();");
+            sb.Append(bodyIndent).Append("return query.WithInclude(new ").Append(IncludeRelationNodeFqn).Append('(');
+            EmitRelationCtorArgs(sb, rel, "__filter", "__nested");
+            sb.AppendLine("));");
+            sb.Append(memberIndent).AppendLine("}");
+            return;
+        }
+
+        sb.Append(memberIndent)
+          .Append("public static ").Append(queryFqn).Append(" Include").Append(rel.PropertyName)
+          .Append("(this ").Append(queryFqn).AppendLine(" query)");
+        sb.Append(memberIndent).AppendLine("{");
+        sb.Append(bodyIndent).Append("return query.WithInclude(new ").Append(IncludeRelationNodeFqn).Append('(');
+        EmitRelationCtorArgs(sb, rel, "null", $"global::System.Array.Empty<{IncludeNodeFqn}>()");
+        sb.AppendLine("));");
+        sb.Append(memberIndent).AppendLine("}");
+    }
+
+    /// <summary>
+    /// Emit the positional ctor args for <c>IncludeRelationNode</c> — keeps the include
+    /// emission consistent between the builder and the query extension.
+    /// </summary>
+    private static void EmitRelationCtorArgs(StringBuilder sb, RelationMember rel, string filterExpr, string nestedExpr)
+    {
+        sb.Append('"').Append(rel.EdgeName).Append("\", ")
+          .Append(rel.IsOutgoing ? "true" : "false").Append(", ")
+          .Append('"').Append(rel.SliceKey).Append("\", ")
+          .Append(rel.IdsOnly ? "true" : "false").Append(", ")
+          .Append(rel.SingleTargetTable is { } t ? $"\"{t}\"" : "null").Append(", ")
+          .Append(filterExpr).Append(", ")
+          .Append(nestedExpr).Append(", ")
+          .Append(rel.HydratorExpression);
+    }
+
+    private static string RelationDocBlurb(RelationMember rel)
+    {
+        var direction = rel.IsOutgoing ? "outgoing" : "incoming";
+        var shape = rel.IdsOnly
+            ? "edges only — id-typed (cross-aggregate)"
+            : rel.SingleTargetBuilderFqn is null
+                ? "target rows (multi-target — leaf, no further nesting)"
+                : "target rows (single-target — supports nested traversal and target-side filter)";
+        return $"Pulls {direction} <c>{rel.EdgeName}</c> relation {shape}.";
+    }
+
+    /// <summary>
+    /// Relation members for traversal: every <c>[Forward]</c> / <c>[Inverse]</c>
+    /// relation property on the table. Resolves the traversed side (target for outgoing,
+    /// source for incoming), determines single vs multi target, and decides
+    /// within-aggregate (graph projection, full target hydration) vs cross-aggregate
+    /// (edge subselect, ids only).
+    /// </summary>
+    private static List<RelationMember> CollectRelations(TableModel table, ModelGraph graph)
+    {
+        var result = new List<RelationMember>();
+        foreach (var p in table.Properties)
+        {
+            if (p.RelationRole == RelationRole.None) continue;
+            if (p.RelationKindFullName is null) continue;
+
+            var memberKind = graph.FindKind(p.RelationKindFullName);
+            if (memberKind is null) continue;
+            var forward = memberKind.Direction == RelationDirection.Forward
+                ? memberKind
+                : graph.FindKind(memberKind.PairedForwardFullName);
+            if (forward is null) continue;
+
+            var isOutgoing = p.RelationRole == RelationRole.ForwardRelation;
+            var isCross = graph.IsCrossAggregate(forward.FullName);
+            var sliceKey = SurrealNaming.ToFieldName(p.Name);
+            var edgeName = SurrealNaming.ToEdgeName(forward.Name);
+
+            // Cross-aggregate: edges-only emission; no single-target metadata needed.
+            if (isCross)
+            {
+                result.Add(new RelationMember(
+                    PropertyName: p.Name,
+                    EdgeName: edgeName,
+                    IsOutgoing: isOutgoing,
+                    SliceKey: sliceKey,
+                    IdsOnly: true,
+                    SingleTargetTable: null,
+                    SingleTargetBuilderFqn: null,
+                    HydratorExpression: "null"));
+                continue;
+            }
+
+            // Within-aggregate: figure out single vs multi target from the relation
+            // unions. Direction Source = relation's source-side members (where
+            // [Forward] attribute lives); Target = inverse-side members.
+            var traversedDirection = isOutgoing ? UnionDirection.Target : UnionDirection.Source;
+            var union = graph.Unions.FirstOrDefault(u =>
+                u.Direction == traversedDirection && u.ForwardKindFullName == forward.FullName);
+
+            if (union is not null)
+            {
+                // Multi-target: emit a switch-on-id-table-prefix hydrator dispatching
+                // each row to the right concrete entity type.
+                var hydrator = BuildMultiTargetHydrator(union, graph);
+                result.Add(new RelationMember(
+                    PropertyName: p.Name,
+                    EdgeName: edgeName,
+                    IsOutgoing: isOutgoing,
+                    SliceKey: sliceKey,
+                    IdsOnly: false,
+                    SingleTargetTable: null,
+                    SingleTargetBuilderFqn: null,
+                    HydratorExpression: hydrator));
+                continue;
+            }
+
+            // Single-target (no union → exactly one member on the traversed side).
+            var single = FindSingleTraversedMember(forward.FullName, traversedDirection, graph);
+            if (single is null) continue; // No participants; skip silently.
+
+            var entityFqn = string.IsNullOrEmpty(single.Namespace)
+                ? $"global::{single.Name}"
+                : $"global::{single.Namespace}.{single.Name}";
+            var builderFqn = string.IsNullOrEmpty(single.Namespace)
+                ? $"global::{single.Name}TraversalBuilder"
+                : $"global::{single.Namespace}.{single.Name}TraversalBuilder";
+            var targetTable = SurrealNaming.ToTableName(single.Name);
+            var hydratorExpr =
+                $"static (row, sink) => {{ var __e = new {entityFqn}(); ((global::Disruptor.Surface.Runtime.IEntity)__e).Hydrate(row, sink); }}";
+
+            result.Add(new RelationMember(
+                PropertyName: p.Name,
+                EdgeName: edgeName,
+                IsOutgoing: isOutgoing,
+                SliceKey: sliceKey,
+                IdsOnly: false,
+                SingleTargetTable: targetTable,
+                SingleTargetBuilderFqn: builderFqn,
+                HydratorExpression: hydratorExpr));
+        }
+        return result;
+    }
+
+    private static TableModel? FindSingleTraversedMember(string forwardKindFullName, UnionDirection traversed, ModelGraph graph)
+    {
+        TableModel? sole = null;
+        foreach (var t in graph.Tables)
+        {
+            if (!HasRelationProperty(t, forwardKindFullName, traversed, graph)) continue;
+            if (sole is not null) return null; // ambiguous — should be a multi-member union
+            sole = t;
+        }
+        return sole;
+    }
+
+    private static bool HasRelationProperty(TableModel table, string forwardKindFullName, UnionDirection side, ModelGraph graph)
+    {
+        // Source side of the edge = forward attribute holders.
+        // Target side of the edge = inverse attribute holders (paired via the kind).
+        var role = side == UnionDirection.Source ? RelationRole.ForwardRelation : RelationRole.InverseRelation;
+        string? wanted;
+        if (side == UnionDirection.Source)
+        {
+            wanted = forwardKindFullName;
+        }
+        else
+        {
+            var inverse = graph.RelationKinds.FirstOrDefault(k =>
+                k.Direction == RelationDirection.Inverse && k.PairedForwardFullName == forwardKindFullName);
+            wanted = inverse?.FullName;
+        }
+        if (wanted is null) return false;
+        foreach (var p in table.Properties)
+        {
+            if (p.RelationRole == role && p.RelationKindFullName == wanted) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Multi-target hydrator: a single static lambda that switches on the row's
+    /// <c>id:&lt;table&gt;</c> prefix to instantiate the right entity. Each member of
+    /// the union gets a case; unmatched table prefixes silently skip (the row probably
+    /// belongs to a target the user's model doesn't include — defensive, not load-bearing).
+    /// </summary>
+    private static string BuildMultiTargetHydrator(RelationUnion union, ModelGraph graph)
+    {
+        var sb = new StringBuilder();
+        sb.Append("static (row, sink) => { ");
+        sb.Append("if (!global::Disruptor.Surface.Runtime.HydrationJson.TryReadRecordId(row, \"id\", out var __rid)) return; ");
+        sb.Append("switch (__rid.Table) { ");
+        foreach (var fqn in union.MemberFullNames)
+        {
+            var member = graph.Tables.FirstOrDefault(t => t.FullName == fqn);
+            if (member is null) continue;
+            var entityFqn = string.IsNullOrEmpty(member.Namespace)
+                ? $"global::{member.Name}"
+                : $"global::{member.Namespace}.{member.Name}";
+            var tableName = SurrealNaming.ToTableName(member.Name);
+            sb.Append($"case \"{tableName}\": {{ var __e = new {entityFqn}(); ((global::Disruptor.Surface.Runtime.IEntity)__e).Hydrate(row, sink); break; }} ");
+        }
+        sb.Append("} }");
+        return sb.ToString();
+    }
+
     private static string? FindParentFieldName(TableModel parent, TableModel child)
     {
         foreach (var cp in child.Properties)
@@ -310,4 +582,14 @@ internal static class TraversalBuilderEmitter
         string ParentField,
         string HydratorExpression,
         string SliceKey);
+
+    private readonly record struct RelationMember(
+        string PropertyName,
+        string EdgeName,
+        bool IsOutgoing,
+        string SliceKey,
+        bool IdsOnly,
+        string? SingleTargetTable,
+        string? SingleTargetBuilderFqn,
+        string HydratorExpression);
 }

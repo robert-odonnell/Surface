@@ -95,8 +95,48 @@ internal static class QueryCompiler
             {
                 sb.Append(", ").Append(BuildChildSubselect(children));
             }
+            else if (node is IncludeRelationNode relation)
+            {
+                sb.Append(", ").Append(BuildRelationSubselect(relation));
+            }
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Render an <see cref="IncludeRelationNode"/> as a SurrealQL projection element.
+    /// Two shapes:
+    /// <list type="bullet">
+    ///   <item><b>Within-aggregate</b> (<c>IdsOnly == false</c>) — graph-traversal projection
+    ///         <c>(->edge->? .*) AS slice</c>, with arrow direction flipped for inverse and
+    ///         the target step narrowed to a specific table when single-target so a
+    ///         target-side filter can attach via <c>[WHERE …]</c>.</item>
+    ///   <item><b>Cross-aggregate</b> (<c>IdsOnly == true</c>) — edge subselect
+    ///         <c>(SELECT id, in, out FROM edge WHERE in/out = $parent.id) AS slice</c>.
+    ///         Mirrors the legacy aggregate loader's edge-row shape so the runtime can
+    ///         feed the session's edges dict without hydrating target entities.</item>
+    /// </list>
+    /// </summary>
+    private static string BuildRelationSubselect(IncludeRelationNode node)
+    {
+        var alias = node.ParentSliceKey.Identifier();
+        var edge = node.EdgeName.Identifier();
+
+        if (node.IdsOnly)
+        {
+            // Cross-aggregate: edge subselect with id/in/out so the session's edges dict
+            // and (for single-target consumers) Pending.Relations can be populated.
+            var sideField = node.IsOutgoing ? "in" : "out";
+            return $"(SELECT id, in, out FROM {edge} WHERE {sideField} = $parent.id) AS {alias}";
+        }
+
+        // Within-aggregate: graph traversal. `?` matches any target type when the
+        // relation has multiple members; when a single concrete target is known, narrow
+        // to it so a target-side filter can attach.
+        var arrow = node.IsOutgoing ? "->" : "<-";
+        var step = node.SingleTargetTable is { } target ? target.Identifier() : "?";
+        var filterClause = node.Filter is null ? "" : $"[WHERE {node.Filter.CompilePredicate()}]";
+        return $"({arrow}{edge}{arrow}{step}{filterClause}.*) AS {alias}";
     }
 
     /// <summary>

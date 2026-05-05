@@ -828,6 +828,111 @@ public sealed class EmissionRoundTripTests
         public ValueTask DisposeAsync() => default;
     }
 
+    [Fact]
+    public async Task RelationTraversal_HydratesTargets_AndExposesViaQueryOutgoing()
+    {
+        // Single-target within-aggregate relation. The user-facing flow:
+        //   Workspace.Query.Constraints.WithId(c).IncludeRestrictions(...).ExecuteAsync(...)
+        // → wire SQL projects (->restricts->stories.*) AS restrictions
+        // → hydration tracks Story entities in the session AND records the (in,out) edges
+        // → constraint.Restrictions resolves through Session.QueryOutgoing<Restricts, Story>
+        const string source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            using Disruptor.Surface.Sample.Relations;
+            using System.Collections.Generic;
+
+            namespace Disruptor.Surface.Sample.Relations
+            {
+                public sealed class RestrictsAttribute : ForwardRelation;
+                public sealed class RestrictedByAttribute : InverseRelation<RestrictsAttribute>;
+            }
+
+            namespace M
+            {
+                using Disruptor.Surface.Sample.Relations;
+
+                [Table, AggregateRoot] public partial class Design {
+                    [Id] public partial DesignId Id { get; set; }
+                    [Children] public partial IReadOnlyCollection<Constraint> Constraints { get; }
+                    [Children] public partial IReadOnlyCollection<Story> Stories { get; }
+                }
+
+                [Table] public partial class Constraint {
+                    [Id] public partial ConstraintId Id { get; set; }
+                    [Parent] public partial Design Design { get; set; }
+                    [Property] public partial string Description { get; set; }
+                    [Restricts] public partial IReadOnlyCollection<Story> Restrictions { get; }
+                }
+
+                [Table] public partial class Story {
+                    [Id] public partial StoryId Id { get; set; }
+                    [Parent] public partial Design Design { get; set; }
+                    [Property] public partial string Description { get; set; }
+                    [RestrictedBy] public partial IReadOnlyCollection<Constraint> Restrictions { get; }
+                }
+
+                [CompositionRoot] public partial class Workspace { }
+            }
+            """;
+        var assembly = GeneratorHarness.CompileAndLoad(source);
+
+        var queryRoot = assembly.GetType("M.Workspace")!
+            .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
+        var query = queryRoot.GetType().GetProperty("Constraints")!.GetValue(queryRoot)!;
+        var constraintUlid = Ulid.NewUlid().ToString();
+        var constraintIdCtor = assembly.GetType("M.ConstraintId")!.GetConstructor([typeof(string)])!;
+        var constraintId = constraintIdCtor.Invoke([constraintUlid]);
+        query = query.GetType().GetMethod("WithId")!.Invoke(query, [constraintId])!;
+
+        // IncludeRestrictions on Query<Constraint> — single-target, takes a configure
+        // lambda (which we leave as a no-op for this happy-path test).
+        var includes = assembly.GetType("M.ConstraintQueryIncludes")!;
+        var includeRestrictions = includes.GetMethod("IncludeRestrictions")!;
+        var configureType = includeRestrictions.GetParameters()[1].ParameterType;
+        query = includeRestrictions.Invoke(null, [query, MakeConfigure(configureType, _ => { })])!;
+
+        var designUlid = Ulid.NewUlid().ToString();
+        var storyUlid1 = Ulid.NewUlid().ToString();
+        var storyUlid2 = Ulid.NewUlid().ToString();
+        var scriptedResponse = $$"""
+            [{"result":[
+                {
+                    "id":"constraints:{{constraintUlid}}",
+                    "description":"no negatives",
+                    "design":"designs:{{designUlid}}",
+                    "restrictions":[
+                        {"id":"stories:{{storyUlid1}}", "description":"first", "design":"designs:{{designUlid}}"},
+                        {"id":"stories:{{storyUlid2}}", "description":"second", "design":"designs:{{designUlid}}"}
+                    ]
+                }
+            ],"status":"OK"}]
+            """;
+        var transport = new ScriptedTransport(scriptedResponse);
+
+        var executeMethod = query.GetType().GetMethod("ExecuteAsync")!;
+        var task = (Task)executeMethod.Invoke(query, [transport, default(CancellationToken)])!;
+        await task;
+        var resultList = (System.Collections.IList)task.GetType().GetProperty("Result")!.GetValue(task)!;
+
+        // Wire shape: graph projection + slice alias matches the snake-cased property.
+        var sql = transport.SqlSeen.Single();
+        Assert.Contains("(->restricts->stories.*) AS restrictions", sql);
+        Assert.Contains($"FROM constraints WHERE id = constraints:{constraintUlid}", sql);
+
+        // Result shape: one constraint, two restrictions navigable through the relation
+        // property — proves edge synthesis + target hydration both fired.
+        var constraint = resultList[0]!;
+        var restrictions = ((System.Collections.IEnumerable)constraint.GetType().GetProperty("Restrictions")!.GetValue(constraint)!)
+            .Cast<object>().ToList();
+        Assert.Equal(2, restrictions.Count);
+        var descriptions = restrictions
+            .Select(s => (string)s.GetType().GetProperty("Description")!.GetValue(s)!)
+            .OrderBy(d => d)
+            .ToList();
+        Assert.Equal(["first", "second"], descriptions);
+    }
+
     // ─────────────────────────── helpers ───────────────────────────
 
     private static object NewEntity(Assembly assembly, string fullName)

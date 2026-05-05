@@ -814,7 +814,7 @@ public sealed class SurrealSession : IHydrationSink
                 }
                 catch (Exception ex) when (lease is not null && WriterLease.IsStolen(ex))
                 {
-                    throw new WriterLeaseStolenException(lease.AggregateName, lease.ExpectedSequence);
+                    throw new WriterLeaseStolenException(lease.ExpectedSequence);
                 }
 
                 lease?.OnCommitSucceeded();

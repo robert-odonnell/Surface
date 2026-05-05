@@ -58,3 +58,47 @@ public sealed record IncludeChildrenNode(
     IReadOnlyList<IIncludeNode> Nested,
     Action<System.Text.Json.JsonElement, IHydrationSink>? Hydrator = null,
     string? ParentSliceKey = null) : IIncludeNode;
+
+/// <summary>
+/// Forward / inverse relation traversal — follows a typed edge kind from each owner row
+/// and projects the targets (within-aggregate) or just edge ids (cross-aggregate).
+/// <para>
+/// Two emit shapes, picked by <see cref="IdsOnly"/>:
+/// </para>
+/// <list type="bullet">
+///   <item>
+///     <b>Within-aggregate</b> — graph-traversal projection. Forward (outgoing) renders
+///     <c>(->edge->target[WHERE filter].*) AS slice_key</c> for single-target relations,
+///     <c>(->edge->?.*) AS slice_key</c> for multi-target. Inverse (incoming) flips the
+///     arrows: <c>(&lt;-edge&lt;-source.*)</c>. Targets come back as full rows; the
+///     <see cref="Hydrator"/> dispatches each row to the right concrete entity type
+///     (single-target = direct construction; multi-target = switch on the row's
+///     <c>id:&lt;table&gt;</c> prefix). Each hydrated target also gets an
+///     <c>IHydrationSink.Edge(...)</c> call synthesised from the parent row's id +
+///     <see cref="EdgeName"/>, so <c>SurrealSession.QueryOutgoing</c> /
+///     <c>QueryIncoming</c> resolve the slice after load.
+///   </item>
+///   <item>
+///     <b>Cross-aggregate</b> — edge subselect. Forward renders
+///     <c>(SELECT id, in, out FROM edge WHERE in = $parent.id) AS slice_key</c>; inverse
+///     swaps <c>in</c> for <c>out</c>. No target hydration — only the edges dict is
+///     populated. Matches the existing entity-side surface where cross-aggregate
+///     relation properties expose <c>IReadOnlyCollection&lt;IRecordId&gt;</c>.
+///   </item>
+/// </list>
+/// <para>
+/// Multi-target relation includes are leaves: they take no <c>configure</c> lambda and
+/// have an empty <see cref="Nested"/>. Single-target includes can carry a target-side
+/// <see cref="Filter"/> and further <see cref="Nested"/> traversals (passed to the
+/// generated <c>{Target}TraversalBuilder</c>).
+/// </para>
+/// </summary>
+public sealed record IncludeRelationNode(
+    string EdgeName,
+    bool IsOutgoing,
+    string ParentSliceKey,
+    bool IdsOnly,
+    string? SingleTargetTable,
+    IPredicate? Filter,
+    IReadOnlyList<IIncludeNode> Nested,
+    Action<System.Text.Json.JsonElement, IHydrationSink>? Hydrator = null) : IIncludeNode;

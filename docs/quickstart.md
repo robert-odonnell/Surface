@@ -217,7 +217,35 @@ foreach (var c in design.Constraints)
     Console.WriteLine(c.Description);
 ```
 
-Edges have their own root for flat `(source, target)` pair reads:
+Relation traversals follow forward (outgoing) or inverse (incoming) edges and pull the targets in the same query. Single-target relations take a configure lambda for filtering at the target side; multi-target unions and cross-aggregate relations are leaves:
+
+```csharp
+// Forward, single-target within-aggregate — drill into target's own slices.
+var c = await Workspace.Query.Constraints
+    .WithId(constraintId)
+    .IncludeRestrictions(r => r
+        .Where(StoryQ.Description.Contains("auth"))
+        .IncludeDetails())
+    .ExecuteAsync(transport);
+foreach (var story in c.Single().Restrictions)
+    Console.WriteLine(story.Description);
+
+// Inverse, multi-target — leaf, no lambda.
+var f = await Workspace.Query.Features
+    .WithId(featureId)
+    .IncludeRestrictions()
+    .ExecuteAsync(transport);
+
+// Cross-aggregate — id-typed result, just like the entity-side reads.
+var design = (await Workspace.Query.Designs
+    .WithId(designId)
+    .IncludeAssessments()
+    .ExecuteAsync(transport)).Single();
+foreach (var reviewId in design.Assessments)
+    Console.WriteLine(reviewId);
+```
+
+Edges also have their own root for flat `(source, target)` pair reads, when you want raw edges without hydrating either side as an entity:
 
 ```csharp
 var pairs = await Workspace.Query.Edges.Restricts

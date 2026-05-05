@@ -442,6 +442,126 @@ public sealed class QueryCompilerTests
             InvokeWithIncludes("designs", filter: null, pinnedId: null, includes: includes));
     }
 
+    // ─────────────────────── Relation traversal coverage ───────────────────────
+
+    [Fact]
+    public void Compile_RelationInclude_MultiTargetForward_EmitsGraphTraversalAny()
+    {
+        var rel = new IncludeRelationNode(
+            EdgeName: "restricts",
+            IsOutgoing: true,
+            ParentSliceKey: "restrictions",
+            IdsOnly: false,
+            SingleTargetTable: null,
+            Filter: null,
+            Nested: []);
+
+        var sql = InvokeWithIncludes("constraints", filter: null, pinnedId: null, includes: [rel]);
+
+        Assert.Equal(
+            "SELECT *, (->restricts->?.*) AS restrictions FROM constraints;",
+            sql);
+    }
+
+    [Fact]
+    public void Compile_RelationInclude_SingleTargetForward_NarrowsToTargetTable()
+    {
+        var rel = new IncludeRelationNode(
+            EdgeName: "validates",
+            IsOutgoing: true,
+            ParentSliceKey: "validations",
+            IdsOnly: false,
+            SingleTargetTable: "acceptance_criteria",
+            Filter: null,
+            Nested: []);
+
+        var sql = InvokeWithIncludes("tests", filter: null, pinnedId: null, includes: [rel]);
+
+        Assert.Equal(
+            "SELECT *, (->validates->acceptance_criteria.*) AS validations FROM tests;",
+            sql);
+    }
+
+    [Fact]
+    public void Compile_RelationInclude_SingleTargetForward_AppliesTargetFilter()
+    {
+        // Single-target relation with a Where on the target's traversal builder —
+        // the filter binds at the target step via SurrealQL's [WHERE …] graph clause.
+        var rel = new IncludeRelationNode(
+            EdgeName: "validates",
+            IsOutgoing: true,
+            ParentSliceKey: "validations",
+            IdsOnly: false,
+            SingleTargetTable: "acceptance_criteria",
+            Filter: new EqPredicate("status", "passed"),
+            Nested: []);
+
+        var sql = InvokeWithIncludes("tests", filter: null, pinnedId: null, includes: [rel]);
+
+        Assert.Equal(
+            "SELECT *, (->validates->acceptance_criteria[WHERE status = \"passed\"].*) AS validations FROM tests;",
+            sql);
+    }
+
+    [Fact]
+    public void Compile_RelationInclude_InverseDirection_FlipsArrows()
+    {
+        var rel = new IncludeRelationNode(
+            EdgeName: "restricts",
+            IsOutgoing: false, // inverse: incoming
+            ParentSliceKey: "restrictions",
+            IdsOnly: false,
+            SingleTargetTable: null,
+            Filter: null,
+            Nested: []);
+
+        var sql = InvokeWithIncludes("features", filter: null, pinnedId: null, includes: [rel]);
+
+        Assert.Equal(
+            "SELECT *, (<-restricts<-?.*) AS restrictions FROM features;",
+            sql);
+    }
+
+    [Fact]
+    public void Compile_RelationInclude_CrossAggregateForward_EmitsEdgeSubselect()
+    {
+        // Cross-aggregate relations (IdsOnly: true) get the legacy edge subselect shape
+        // — id/in/out rows feed the session's edges dict; no target hydration.
+        var rel = new IncludeRelationNode(
+            EdgeName: "concerns",
+            IsOutgoing: true,
+            ParentSliceKey: "concerns",
+            IdsOnly: true,
+            SingleTargetTable: null,
+            Filter: null,
+            Nested: []);
+
+        var sql = InvokeWithIncludes("issues", filter: null, pinnedId: null, includes: [rel]);
+
+        Assert.Equal(
+            "SELECT *, (SELECT id, in, out FROM concerns WHERE in = $parent.id) AS concerns FROM issues;",
+            sql);
+    }
+
+    [Fact]
+    public void Compile_RelationInclude_CrossAggregateInverse_FiltersOnOut()
+    {
+        var rel = new IncludeRelationNode(
+            EdgeName: "concerns",
+            IsOutgoing: false,
+            ParentSliceKey: "concerns",
+            IdsOnly: true,
+            SingleTargetTable: null,
+            Filter: null,
+            Nested: []);
+
+        var sql = InvokeWithIncludes("constraints", filter: null, pinnedId: null, includes: [rel]);
+
+        Assert.Equal(
+            "SELECT *, (SELECT id, in, out FROM concerns WHERE out = $parent.id) AS concerns FROM constraints;",
+            sql);
+    }
+
     /// <summary>
     /// Reflection trampoline — <see cref="QueryCompiler"/> is internal-by-design (the only
     /// supported entry point is <c>Query&lt;T&gt;.ExecuteAsync</c>). This keeps the test

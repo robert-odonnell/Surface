@@ -19,6 +19,7 @@ internal static class CompositionRootEmitter
     private const string TransportFqn = "global::Disruptor.Surface.Runtime.ISurrealTransport";
     private const string CtFqn        = "global::System.Threading.CancellationToken";
     private const string TaskFqn      = "global::System.Threading.Tasks.Task";
+    private const string LeaseFqn     = "global::Disruptor.Surface.Runtime.WriterLease";
 
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
     {
@@ -61,6 +62,22 @@ internal static class CompositionRootEmitter
         sb.Append(indent).Append(FormatAccessibility(root.DeclaredAccessibility))
           .Append(" partial class ").AppendLine(root.Name);
         sb.Append(indent).AppendLine("{");
+
+        // Single-writer paradigm: one writer_lease:main row gates every commit. Surface
+        // an accessor so callers don't reach for WriterLease directly. Sits before the
+        // per-aggregate Load*Async methods because that's the order it's used at the
+        // call site (acquire → load → commit).
+        sb.Append(memberIndent)
+          .AppendLine("/// <summary>Acquire the workspace's single writer lease. Pass the returned handle to <see cref=\"global::Disruptor.Surface.Runtime.SurrealSession.CommitAsync\"/> when committing. Single-writer paradigm — one outstanding lease across all aggregates; concurrent acquirers race for the commit's CAS check.</summary>");
+        sb.Append(memberIndent).Append("public ").Append(TaskFqn).Append('<').Append(LeaseFqn)
+          .Append("> AcquireWriterAsync(").Append(TransportFqn).Append(" transport, ")
+          .Append(CtFqn).AppendLine(" ct = default)");
+        sb.Append(memberIndent).Append("    => ").Append(LeaseFqn).AppendLine(".AcquireAsync(transport, ct);");
+
+        if (aggregateRoots.Count > 0)
+        {
+            sb.AppendLine();
+        }
 
         for (var i = 0; i < aggregateRoots.Count; i++)
         {
