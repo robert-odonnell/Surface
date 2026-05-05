@@ -102,7 +102,7 @@ internal static class RelationKindExtractor
         var fields = new List<EdgePayloadFieldModel>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
-        for (var current = (ITypeSymbol?)payload; current is not null && current.SpecialType != Microsoft.CodeAnalysis.SpecialType.System_Object; current = current.BaseType)
+        for (var current = (ITypeSymbol?)payload; current is not null && current.SpecialType != SpecialType.System_Object; current = current.BaseType)
         {
             foreach (var member in current.GetMembers())
             {

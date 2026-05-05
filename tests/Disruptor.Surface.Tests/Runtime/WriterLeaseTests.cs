@@ -90,9 +90,7 @@ public sealed class WriterLeaseTests
         // catches and translates.
         var transport = new RecordingTransport()
             .ScriptResponse("[{\"result\":[{\"seq\":5}],\"status\":\"OK\"}]")
-            .ScriptThrow(new SurrealException(
-                "SurrealDB statement failed: writer_lease_stolen (current 9, expected 5)",
-                retryable: false));
+            .ScriptThrow(new SurrealException("SurrealDB statement failed: writer_lease_stolen (current 9, expected 5)"));
 
         var lease = await WriterLease.AcquireAsync(transport);
         var session = new SurrealSession();
@@ -109,7 +107,7 @@ public sealed class WriterLeaseTests
     {
         var transport = new RecordingTransport()
             .ScriptResponse("[{\"result\":[{\"seq\":5}],\"status\":\"OK\"}]")
-            .ScriptThrow(new SurrealException("writer_lease_stolen", retryable: false));
+            .ScriptThrow(new SurrealException("writer_lease_stolen"));
 
         var lease = await WriterLease.AcquireAsync(transport);
         var session = new SurrealSession();
@@ -133,7 +131,7 @@ public sealed class WriterLeaseTests
         // session's normal fail-closed path, NOT the stolen-lease translator.
         var transport = new RecordingTransport()
             .ScriptResponse("[{\"result\":[{\"seq\":5}],\"status\":\"OK\"}]")
-            .ScriptThrow(new SurrealException("HTTP 503 service unavailable", retryable: true));
+            .ScriptThrow(new SurrealException("HTTP 503 service unavailable"));
 
         var lease = await WriterLease.AcquireAsync(transport);
         var session = new SurrealSession();
@@ -219,12 +217,12 @@ public sealed class WriterLeaseTests
     {
         private readonly Queue<Func<JsonDocument>> responses = new();
 
-        public List<string> SqlSeen { get; } = new();
+        public List<string> SqlSeen { get; } = [];
 
         public RecordingTransport ScriptResponse(string json)
             => ScriptResponse(() => JsonDocument.Parse(json));
 
-        public RecordingTransport ScriptResponse(Func<JsonDocument> producer)
+        private RecordingTransport ScriptResponse(Func<JsonDocument> producer)
         {
             responses.Enqueue(producer);
             return this;

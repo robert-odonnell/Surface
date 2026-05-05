@@ -37,7 +37,6 @@ public sealed class SurrealEmbeddedTransport : ISurrealTransport
     /// <summary>SurrealQL prefix the WriterLease emits to open a transactional commit. Used as the lock predicate — anything starting with this is a write that needs single-writer serialisation.</summary>
     private const string TransactionPrefix = "BEGIN TRANSACTION";
 
-    private readonly ISurrealDbClient client;
     private readonly bool ownsClient;
     private readonly SemaphoreSlim writerSemaphore = new(initialCount: 1, maxCount: 1);
 
@@ -59,7 +58,7 @@ public sealed class SurrealEmbeddedTransport : ISurrealTransport
         // Use(ns, db) is the SDK's namespace-and-database setter; runs synchronously
         // against the in-process engine so blocking once at construction is fine.
         rocks.Use(@namespace, database).GetAwaiter().GetResult();
-        client = rocks;
+        Client = rocks;
         ownsClient = true;
     }
 
@@ -72,12 +71,12 @@ public sealed class SurrealEmbeddedTransport : ISurrealTransport
     public SurrealEmbeddedTransport(ISurrealDbClient existingClient)
     {
         ArgumentNullException.ThrowIfNull(existingClient);
-        client = existingClient;
+        Client = existingClient;
         ownsClient = false;
     }
 
     /// <summary>The underlying SDK client. Exposed for callers that need to layer the SDK's typed APIs alongside the Disruptor.Surface session abstraction.</summary>
-    public ISurrealDbClient Client => client;
+    public ISurrealDbClient Client { get; }
 
     /// <inheritdoc />
     public async Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
@@ -92,7 +91,7 @@ public sealed class SurrealEmbeddedTransport : ISurrealTransport
 
         try
         {
-            var response = await client.RawQuery(sql, parameters: null, ct).ConfigureAwait(false);
+            var response = await Client.RawQuery(sql, parameters: null, ct).ConfigureAwait(false);
             return CborJsonProjection.BuildEnvelope(response);
         }
         finally
@@ -108,14 +107,7 @@ public sealed class SurrealEmbeddedTransport : ISurrealTransport
     public async ValueTask DisposeAsync()
     {
         writerSemaphore.Dispose();
-        if (ownsClient && client is IAsyncDisposable asyncDisposable)
-        {
-            await asyncDisposable.DisposeAsync().ConfigureAwait(false);
-        }
-        else if (ownsClient && client is IDisposable disposable)
-        {
-            disposable.Dispose();
-        }
+        if (ownsClient) await Client.DisposeAsync().ConfigureAwait(false);
     }
 
     /// <summary>

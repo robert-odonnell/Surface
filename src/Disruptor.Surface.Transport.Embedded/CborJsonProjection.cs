@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
-using Dahomey.Cbor;
 using Dahomey.Cbor.Serialization;
 using SurrealDb.Net.Models.Response;
 
@@ -363,7 +362,7 @@ internal static class CborJsonProjection
 
     private static string DescribeError(ISurrealDbErrorResult err) => err switch
     {
-        SurrealDbErrorResult e => e.Details ?? string.Empty,
+        SurrealDbErrorResult e => e.Details,
         _ => err.ToString() ?? string.Empty,
     };
 

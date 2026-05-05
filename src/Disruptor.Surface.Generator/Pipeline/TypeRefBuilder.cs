@@ -44,7 +44,7 @@ internal static class TypeRefBuilder
         var isTypeParam = type.TypeKind == TypeKind.TypeParameter;
         var isTable = HasTableAttribute(type);
 
-        (bool isCollection, TypeRef? element) = TryGetCollectionElement(type);
+        var (isCollection, element) = TryGetCollectionElement(type);
 
         var typeArgs = type is INamedTypeSymbol named
             ? named.TypeArguments.Select(Build).ToEquatableArray()

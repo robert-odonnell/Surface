@@ -7,6 +7,13 @@ using System.Text.Json.Serialization;
 using Disruptor.Surface.Runtime;
 
 namespace Disruptor.Surface.Transport.Http;
+public sealed record SurrealConfig(
+    Uri Url,
+    string Namespace,
+    string Database,
+    string User,
+    string Password,
+    TimeSpan Timeout); 
 
 public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
 {
@@ -33,8 +40,6 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
     private static Uri EnsureTrailingSlash(Uri url)
         => url.AbsoluteUri.EndsWith('/') ? url : new Uri(url.AbsoluteUri + "/");
 
-    public SurrealConfig Config => config;
-
     public void Dispose() => signInGate.Dispose();
 
     public ValueTask DisposeAsync()
@@ -43,42 +48,16 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
         return ValueTask.CompletedTask;
     }
 
-    //public async Task<SurrealResultSet> SqlAsync(string surrealQl, CancellationToken cancellationToken = default)
-    //{
-    //    var normalized = await SendAndNormalizeAsync(surrealQl, cancellationToken);
-    //    return new SurrealResultSet(normalized);
-    //}
-
     public async Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
     {
-        var normalized = await SendAndNormalizeAsync(sql, ct);
+        using var response = await SendRpcQueryAsync(sql, ct);
+        var payload = await response.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(payload);
+        var normalized = ExtractRpcResult(doc.RootElement);
+        ValidateSqlStatuses(normalized);
         return JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(normalized));
     }
 
-
-    private async Task<JsonElement> SendAndNormalizeAsync(string surrealQl, CancellationToken cancellationToken)
-    {
-        const int maxAttempts = 3;
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            try
-            {
-                using var response = await SendRpcQueryAsync(surrealQl, cancellationToken);
-                var payload = await response.Content.ReadAsStringAsync(cancellationToken);
-                using var doc = JsonDocument.Parse(payload);
-                var normalized = ExtractRpcResult(doc.RootElement);
-                ValidateSqlStatuses(normalized);
-                return normalized;
-            }
-            catch (SurrealException ex) when (attempt < maxAttempts && ex.Retryable)
-            {
-                //await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt), cancellationToken);
-            }
-        }
-
-        throw new SurrealException("SurrealDB query failed after retries.", retryable: false);
-    }
-    
     /// <summary>
     /// POST a SurrealDB JSON-RPC <c>query</c> call to <c>/rpc</c>. The SQL travels
     /// unmodified in <c>params[0]</c>; the binding dictionary travels in
@@ -104,7 +83,7 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
                 response.Dispose();
-                throw new SurrealException("SurrealDB unauthorized after re-auth retry.", retryable: false);
+                throw new SurrealException("SurrealDB unauthorized after re-auth retry.");
             }
         }
 
@@ -112,7 +91,7 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
         {
             var errBody = await response.Content.ReadAsStringAsync(ct);
             response.Dispose();
-            throw new SurrealException($"SurrealDB /rpc failed: {(int)response.StatusCode} {errBody}", retryable: false);
+            throw new SurrealException($"SurrealDB /rpc failed: {(int)response.StatusCode} {errBody}");
         }
 
         return response;
@@ -133,13 +112,13 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
         }
         catch (TaskCanceledException ex)
         {
-            throw new SurrealException($"SurrealDB request timed out: {ex.Message}", retryable: true);
+            throw new SurrealException($"SurrealDB request timed out: {ex.Message}");
         }
         catch (HttpRequestException ex)
         {
             var inner = ex.InnerException?.Message;
             var detail = string.IsNullOrWhiteSpace(inner) ? ex.Message : $"{ex.Message} | inner: {inner}";
-            throw new SurrealException($"HTTP request failed: {detail}", retryable: true);
+            throw new SurrealException($"HTTP request failed: {detail}");
         }
     }
 
@@ -185,7 +164,7 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
             var errMessage = errorElem.ValueKind == JsonValueKind.Object && errorElem.TryGetProperty("message", out var msg)
                 ? msg.GetString()
                 : errorElem.GetRawText();
-            throw new SurrealException($"SurrealDB RPC error: {errMessage}", retryable: false);
+            throw new SurrealException($"SurrealDB RPC error: {errMessage}");
         }
 
         if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("result", out var resultElem))
@@ -222,7 +201,7 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
 
             if (!response.IsSuccessStatusCode)
             {
-                throw new SurrealException($"SurrealDB signin failed: {(int)response.StatusCode} {body}", retryable: false);
+                throw new SurrealException($"SurrealDB signin failed: {(int)response.StatusCode} {body}");
             }
 
             bearerToken = TryParseToken(body);
@@ -314,11 +293,7 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
                 ? result.GetRawText()
                 : statement.GetRawText();
 
-            var retryable = details.Contains("Transaction conflict", StringComparison.OrdinalIgnoreCase)
-                         || details.Contains("Resource busy", StringComparison.OrdinalIgnoreCase)
-                         || details.Contains("can be retried", StringComparison.OrdinalIgnoreCase);
-
-            throw new SurrealException($"SurrealDB statement failed: {details}", retryable);
+            throw new SurrealException($"SurrealDB statement failed: {details}");
         }
     }
 }

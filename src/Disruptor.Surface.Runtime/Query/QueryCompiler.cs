@@ -64,11 +64,6 @@ internal static class QueryCompiler
         return sb.ToString();
     }
 
-    /// <summary>Backwards-compat overload — flat select, no traversals.</summary>
-    public static string Compile(
-        string table, IPredicate? filter, RecordId? pinnedId)
-        => Compile(table, filter, pinnedId, [], orderClauses: null, limit: null, start: null);
-
     private static void AppendOrderBy(StringBuilder sb, IReadOnlyList<OrderClause>? clauses)
     {
         if (clauses is null || clauses.Count == 0) return;
