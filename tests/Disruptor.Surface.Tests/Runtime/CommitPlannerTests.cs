@@ -88,6 +88,25 @@ public sealed class CommitPlannerTests
     }
 
     [Fact]
+    public void DeadWeight_Suppression_DoesNotDropReferencedCreate_FromUnloadedRecordUpdate()
+    {
+        // Existing-but-unloaded owner gets a field update referencing a fresh target.
+        // Owner emits UPDATE SET (no lifecycle bits), so the target id must still count
+        // as referenced and keep its CREATE alive.
+        var pending = Empty();
+        var owner = new RecordId("designs", "d");
+        var details = new RecordId("details", "t");
+
+        pending.ApplyCommand(Command.Create(details));
+        pending.ApplyCommand(Command.Set(owner, "details", details));
+
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
+
+        Assert.Contains(plan, c => c.Op is CommandOp.Create or CommandOp.Upsert && c.Target.Equals(details));
+        Assert.Contains(plan, c => c.Op == CommandOp.Set && c.Target.Equals(owner));
+    }
+
+    [Fact]
     public void Phases_Ordering_CreatesBeforeFieldUpdates_BeforeRelations()
     {
         var pending = Empty();
