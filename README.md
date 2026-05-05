@@ -47,7 +47,8 @@ The generator emits everything needed to make this work end-to-end:
 
 - Per-table `{Name}Id` `readonly record struct` with implicit conversion to the canonical `RecordId`
 - A `Workspace.LoadDesignAsync(transport, id, ct)` instance method (grafted onto your `[CompositionRoot]` partial) that hydrates the whole aggregate from SurrealDB in a single nested-`SELECT`
-- A unified query+load surface — `Workspace.Query.Designs.Where(DesignQ.Description.Contains("…")).ExecuteAsync(transport)` for surgical projections, `…WithId(id).IncludeConstraints(c => c.Where(...)).LoadAsync(transport, lease)` for filtered write-mode loads, `Workspace.Query.Edges.Restricts.WhereIn(...).ExecuteAsync(transport)` for flat edge pairs. Strict-with-escape on filtered loads — unloaded slices throw `LoadShapeViolationException`, `session.FetchAsync(...)` extends the slice in place
+- A unified query surface with five terminal verbs sharing one AST — `…IdsAsync(transport)` for id-only selection (`IReadOnlyList<{Table}Id>`), `…Select(projection).ExecuteAsync(transport)` for projection rows (immutable user-defined `TRow`), `…ExecuteAsync(transport)` for hydrated entities, `…WithId(id).IncludeConstraints(c => c.Where(...)).LoadAsync(transport, lease)` for filtered write-mode loads of an aggregate root, and `Workspace.Hydrate.{Table}(ids).WithInclude(...).ExecuteAsync(transport, [lease])` to materialise a non-aggregate-shaped slice into a tracked session. Plus `Workspace.Query.Edges.Restricts.WhereIn(...).ExecuteAsync(transport)` for flat edge pairs. Strict-with-escape on filtered loads — unloaded slices throw `LoadShapeViolationException`, `session.FetchAsync(...)` extends the slice in place
+- A future-direction `ISurrealExecutor` + `SurrealCommand` boundary alongside the legacy `ISurrealTransport` — both production transports (`SurrealHttpClient`, `SurrealEmbeddedTransport`) implement both
 - A `SurrealSession` surface with sync reads (`design.Description`, `design.Constraints`) and mutations queued to a dirty batch
 - `SurrealSession.CommitAsync(transport, lease?)` rendering the dirty batch as a single SurrealQL script
 - A `Restricts : IRelationKind` marker class per forward relation attribute, so `session.Relate<Restricts>(constraint, userStory)` is type-checked at compile time
@@ -88,7 +89,9 @@ foreach (var c in ro.Get<Design>(designId)!.Constraints)
     Console.WriteLine($"{c.Id}: {c.Description}");
 
 // Surgical read — no aggregate hydration, no session, runs the predicate
-// straight on SurrealDB.
+// straight on SurrealDB. Use `.IdsAsync(transport)` for an `IReadOnlyList<ConstraintId>`
+// when you only need the ids, or `.Select(projection).ExecuteAsync(transport)` for
+// typed row DTOs.
 var matches = await Workspace.Query.Constraints
     .Where(ConstraintQ.Description.Contains("security"))
     .ExecuteAsync(transport);
@@ -283,7 +286,8 @@ What's exercised end-to-end: scalar properties, `SurrealArray<T>` round-trip, `[
 mandatory + optional (with inline `field.*` re-hydration), `[Parent]`/`[Children]`,
 `OnCreate` hooks, writer-lease acquisition + theft detection, full aggregate hydration,
 typed relation kinds (forward + inverse, within-aggregate + cross-aggregate), the
-unified query+load surface (predicates, traversals, edges, `Fetch` strict-with-escape).
+unified query surface (predicates, traversals, edges, `IdsAsync`, `Select(projection)`,
+`Hydrate.{Table}(ids)`, `Fetch` strict-with-escape).
 
 What's defined but not yet exercised in the harness: `[Cascade]` reference-delete
 chains end-to-end, `WriterLeaseStolenException` reload-and-retry flow.

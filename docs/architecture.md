@@ -60,9 +60,12 @@ Main emitter responsibilities:
 | `ReferenceRegistryEmitter` | Model-scoped reference metadata for delete planning. |
 | `QueryRootEmitter` | `Workspace.Query` accessor + per-table `Query<T>` roots. |
 | `EdgeQueryRootEmitter` | `Workspace.Query.Edges.{Kind}` accessors with id-side type parameters. |
+| `EdgePredicateFactoryEmitter` | Per forward kind with a typed payload — `{Kind}EdgeQ` static class with `PropertyExpr<T>` per payload field. |
 | `PredicateFactoryEmitter` | Per-table `{Name}Q` static class — typed `PropertyExpr<T>` per scalar column. |
+| `IdsAsyncEmitter` | Per-table `{Name}QueryIds` static class with the `IdsAsync` extension on `Query<{Table}>` — typed id-only selection terminal. |
 | `TraversalBuilderEmitter` | Per-table `{Name}TraversalBuilder` plus the `{Name}QueryIncludes` extensions on `Query<T>`. |
 | `LoadEntryEmitter` | `LoadAsync` extension on `Query<TRoot>` for aggregate roots — delegates to the legacy loader for empty-`Includes`, runs the compiler-driven path otherwise. |
+| `HydrateRootEmitter` | `Workspace.Hydrate` accessor + per-table `{Table}(ids)` factories returning `HydrationQuery<T>` (typed and raw `IRecordId` overloads). |
 
 ## Model Mapping
 
@@ -124,10 +127,13 @@ Hydration is routed through `IHydrationSink`, an explicit interface on `SurrealS
 
 ## Query+Load Surface
 
-Two terminal verbs share one query AST:
+Five terminal verbs share one query AST. Each picks a different materialisation contract; the AST (predicates, ordering, paging, includes, pinned id) doesn't change between them.
 
 - `ExecuteAsync(transport)` — read mode. Compiles the predicate + traversal AST to SurrealQL, executes it, hydrates root entities (and any traversed children) into an internal `SurrealSession`. Returns the root list; the session is opaque.
+- `IdsAsync(transport)` — id-only selection. Compiles to `SELECT id FROM table …` and projects each returned `RecordId` into the typed `{Table}Id`. Includes are rejected — id-only selection is flat by definition. Generator-emitted per `[Table]` via `IdsAsyncEmitter`; runtime body lives on `Query<T>.CompileIdsOnly()` plus the per-table extension.
+- `Select(projection).ExecuteAsync(transport)` — projection mode. Compiles to `SELECT field1, field2 FROM table …` (only the columns the projection's lambda touches) and runs the lambda once per row to materialise immutable user-defined `TRow` instances. The library does NOT generate projection types; the user owns `TRow` and the materialise lambda. Discovery runs the lambda once at construction time with a probe row that captures the SELECT field list.
 - `LoadAsync(transport, lease)` — write mode, only on aggregate roots. Same compile-and-hydrate path against a session built with `Workspace.ReferenceRegistry`. Returns the session for mutation + commit. With no `Include*` calls, delegates to the legacy `{Root}AggregateLoader` so the full-aggregate path keeps its single-query shape.
+- `Workspace.Hydrate.{Table}(ids).WithInclude(...).ExecuteAsync(transport, [lease])` — hydration terminal. Pairs with `IdsAsync`: takes a list of ids and materialises each into a tracked session along with included slices. Reuses `Query<T>`'s compiler+sink pipeline by composing an `InPredicate` over the id column — single round-trip, identical wire SQL to `Query<T>.Where(IdIn).WithInclude(...).ExecuteAsync`. Two ExecuteAsync overloads: read-mode (no lease) and write-mode (lease required at the call site).
 
 Compilation:
 
@@ -204,7 +210,9 @@ CommitPlanner.Build(...)
 SurrealCommandEmitter.Emit(...)
                 |
                 v
-ISurrealTransport.ExecuteAsync(...)
+ISurrealTransport.ExecuteAsync(string sql)
+        (or ISurrealExecutor.ExecuteAsync(SurrealCommand) — both
+        production transports implement both interfaces)
 ```
 
 `PendingState` folds repeated changes into final intent. `CommitPlanner` then:
@@ -254,24 +262,40 @@ This is optimistic concurrency, not pessimistic locking. Two writers can both ac
 
 ## Transport Boundary
 
-Generated code depends only on `ISurrealTransport`:
+Two parallel interfaces — the legacy stringly one and the next-generation parameter-aware one. Generated code talks through the legacy interface today; both production transports implement both.
 
 ```csharp
-Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default);
+public interface ISurrealTransport : IAsyncDisposable
+{
+    Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default);
+}
+
+public sealed record SurrealCommand(
+    string Sql,
+    IReadOnlyDictionary<string, object?>? Parameters = null);
+
+public interface ISurrealExecutor : IAsyncDisposable
+{
+    Task<JsonDocument> ExecuteAsync(SurrealCommand command, CancellationToken ct = default);
+}
 ```
 
-The signature is intentionally minimal: a SurrealQL string in, a `JsonDocument` out. There is no separate parameter dictionary — every value (record ids, strings, numbers) is rendered as a SurrealQL literal by `SurrealFormatter` at the call site (`QueryCompiler`, `SurrealCommandEmitter`) before reaching the transport. SurrealDB's JSON-RPC binder treats record-shaped objects as generic `Object`s rather than `Thing`s, so a query like `WHERE id = $p0` bound through JSON vars never matches; SurrealQL literal syntax (`table:value`) is parsed at the query level and preserves type. Inlining at the codegen layer also lifts the per-batch statement ceiling that `LET $p0 = …;` prefixes hit on large commits.
+`ISurrealTransport` was the v1 boundary: a SurrealQL string in, a `JsonDocument` out, no separate parameter dictionary. Every value (record ids, strings, numbers) is rendered as a SurrealQL literal by `SurrealFormatter` at the call site (`QueryCompiler`, `SurrealCommandEmitter`) before reaching the transport. SurrealDB's JSON-RPC binder treats record-shaped objects as generic `Object`s rather than `Thing`s, so a query like `WHERE id = $p0` bound through JSON vars never matches; SurrealQL literal syntax (`table:value`) is parsed at the query level and preserves type. Inlining at the codegen layer also lifts the per-batch statement ceiling that `LET $p0 = …;` prefixes hit on large commits.
 
-`SurrealHttpClient` is the included implementation. It:
+`ISurrealExecutor` is the future-direction boundary that takes `SurrealCommand` instead. Same return shape, richer input shape — opens the door for parameter-aware execution paths (embedded engines that bind natively, future HTTP/JSON-RPC paths that don't lose `Thing` types) without touching today's inlined-literal callers. The runtime keeps using `ISurrealTransport.ExecuteAsync(string sql)` for now; per-callsite migration lands as use cases need parameter-aware execution. Callers holding an `ISurrealTransport` can up-cast via `transport.AsExecutor()` — returns the same instance when the transport already implements both, otherwise wraps it in `SurrealTransportExecutorAdapter`.
+
+`SurrealHttpClient` (in `Disruptor.Surface.Transport.Http`) is the over-the-network implementation. It:
 
 - Signs in to SurrealDB via `/signin` and caches the bearer token.
 - Posts JSON-RPC 2.0 envelopes (`{"method": "query", "params": [<sql>, {}]}`) to `/rpc` — `params[1]` is always the empty bindings object.
 - Applies namespace and database headers.
 - Extracts `result` from the RPC response envelope; surfaces typed errors via `SurrealException` / `WriterLeaseStolenException`.
-- Retries selected retryable transport failures.
+- Re-auths once on a 401 (the request never reached the server's SQL execution stage). Does not retry arbitrary failures — automatically retrying mutating commits is unsafe under unknown-outcome failure modes.
 - Provides `SqlAsync` and `SurrealResultSet` for direct SQL use.
 
-Applications can replace it with another transport for tests, logging, retry policy, or alternate SurrealDB connectivity.
+`SurrealEmbeddedTransport` (in `Disruptor.Surface.Transport.Embedded`) is the in-process implementation backed by SurrealDB embedded with a RocksDB file store. Side-steps the HTTP body-size ceiling that bites large commits (code-index full rebuilds, bulk imports). Single-process only; uses a `SemaphoreSlim` to gate `BEGIN TRANSACTION` scripts so concurrent writers serialise (single-writer paradigm, same as the cross-process `WriterLease`).
+
+Applications can replace either with a custom transport for tests, logging, alternate SurrealDB connectivity, or layered policy. Implementing both `ISurrealTransport` and `ISurrealExecutor` directly avoids the wrapping adapter for callers that hold one or the other.
 
 ## Reference Delete Behavior
 

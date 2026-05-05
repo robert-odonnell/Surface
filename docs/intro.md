@@ -53,7 +53,7 @@ For that model, the generator contributes:
 - Typed ids such as `DesignId` and `ConstraintId`.
 - Implementations for the partial properties.
 - `Workspace.LoadDesignAsync(transport, designId, ct)`, which hydrates the aggregate into a `SurrealSession`.
-- `Workspace.Query` — a typed query surface with predicate factories (`ConstraintQ.Description.Contains("…")`), traversal builders (`IncludeConstraints(c => c.Where(...))`), edge query roots (`Workspace.Query.Edges.Restricts.WhereIn(...)`), and unified `ExecuteAsync` (read mode) / `LoadAsync` (write mode) terminals.
+- `Workspace.Query` — a typed query surface with predicate factories (`ConstraintQ.Description.Contains("…")`), traversal builders (`IncludeConstraints(c => c.Where(...))`), edge query roots (`Workspace.Query.Edges.Restricts.WhereIn(...)`), and five terminal verbs sharing one AST: `IdsAsync` (typed id list), `Select(projection).ExecuteAsync` (immutable projection rows), `ExecuteAsync` (hydrated entities), `LoadAsync` (write-mode aggregate session), and `Workspace.Hydrate.{Table}(ids)` for non-aggregate-shaped slices into a tracked session.
 - `Workspace.Schema` and `Workspace.ApplySchemaAsync(transport)`.
 - `Workspace.ReferenceRegistry`, used by commit planning.
 - Relation marker types for user-defined relation attributes.
@@ -65,8 +65,10 @@ The generated code does not require your entities to inherit from a base class. 
 
 The main runtime concepts are:
 
-- `ISurrealTransport`: abstraction for executing SurrealQL.
-- `SurrealHttpClient`: HTTP implementation of `ISurrealTransport`.
+- `ISurrealTransport`: abstraction for executing SurrealQL — `Task<JsonDocument> ExecuteAsync(string sql, ct)`. The runtime's existing pipeline talks through this.
+- `ISurrealExecutor` + `SurrealCommand`: next-generation parameter-aware boundary that the production transports (`SurrealHttpClient`, `SurrealEmbeddedTransport`) also implement; runtime callsites migrate as use cases land.
+- `SurrealHttpClient`: HTTP implementation. Lives in `Disruptor.Surface.Transport.Http`.
+- `SurrealEmbeddedTransport`: in-process implementation backed by SurrealDB embedded + RocksDB. Lives in `Disruptor.Surface.Transport.Embedded`.
 - `SurrealSession`: identity map, synchronous read surface, and pending write batch.
 - `WriterLease`: optional cross-process writer coordination — single workspace-wide lease, acquired via the generated `workspace.AcquireWriterAsync(transport)` accessor.
 - `RecordId` and generated `{Entity}Id` types: strongly typed SurrealDB record ids.
@@ -75,9 +77,13 @@ The main runtime concepts are:
 The usual flow is:
 
 1. Apply generated schema at startup.
-2. Read or load:
-   - **Read mode** — `Workspace.Query.{Table}.Where(...).ExecuteAsync(transport)` for surgical projections without aggregate hydration; `Workspace.Query.Edges.{Kind}.WhereIn(...).ExecuteAsync(transport)` for flat edge pairs.
-   - **Load mode** — `Workspace.LoadDesignAsync(transport, id)` (legacy) or `Workspace.Query.Designs.WithId(id).Include*(...).LoadAsync(transport, lease)` (filtered) for a write-mode `SurrealSession`.
+2. Read or load. Pick the terminal that matches the workload:
+   - **Id selection** — `Workspace.Query.{Table}.Where(...).IdsAsync(transport)` returns `IReadOnlyList<{Table}Id>`. The "identify, don't materialise" terminal; pairs with `Hydrate` below.
+   - **Projection** — `Workspace.Query.{Table}.Where(...).Select(projection).ExecuteAsync(transport)` returns immutable user-defined `TRow` rows. The user owns the `TRow` shape and the materialise lambda; the library doesn't generate projection types.
+   - **Hydrated entity reads** — `Workspace.Query.{Table}.Where(...).ExecuteAsync(transport)` returns hydrated entities tracked in an internal session (opaque, never-committed).
+   - **Edge pairs** — `Workspace.Query.Edges.{Kind}.WhereIn(...).ExecuteAsync(transport)` returns flat `(source, target)` rows.
+   - **Hydration** — `Workspace.Hydrate.{Table}(ids).WithInclude(...).ExecuteAsync(transport, [lease])` materialises specific rows + slices into a tracked `SurrealSession`. Lease-required overload advertises write intent at the call site.
+   - **Aggregate load (write mode)** — `Workspace.LoadDesignAsync(transport, id)` (legacy convenience) or `Workspace.Query.Designs.WithId(id).Include*(...).LoadAsync(transport, lease)` (filtered) for a write-mode `SurrealSession` rooted at an aggregate root.
 3. Read and mutate entities through normal properties and methods.
 4. Acquire a `WriterLease` via `workspace.AcquireWriterAsync(transport)` for writes when cross-process coordination matters.
 5. Call `session.CommitAsync(transport, lease, ct)`.

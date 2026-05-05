@@ -187,10 +187,10 @@ A `SurrealSession` is one-shot. After `CommitAsync` or `AbandonAsync`, the sessi
 
 ## 7. Query Without Loading An Aggregate
 
-For projection-style reads — UI lists, dashboards, single-entity lookups — the generated query layer skips full-aggregate hydration. Each `[Table]` gets a sibling predicate factory (`{Name}Q`) and a query root on `Workspace.Query`:
+For workloads that don't fit the "load the whole aggregate" shape — UI lists, search, dashboards, single-field updates — the generated query layer offers four read terminals on one shared AST. Each `[Table]` gets a sibling predicate factory (`{Name}Q`) and a query root on `Workspace.Query`:
 
 ```csharp
-// Find constraints whose description contains "security" — no session, no lease.
+// 1. Hydrated entity reads — full row data, tracked in an opaque internal session.
 var matches = await Workspace.Query.Constraints
     .Where(ConstraintQ.Description.Contains("security"))
     .ExecuteAsync(transport);
@@ -198,9 +198,30 @@ foreach (var c in matches)
 {
     Console.WriteLine($"{c.Id}: {c.Description}");
 }
+
+// 2. Id-only selection — IReadOnlyList<ConstraintId>, no entity hydration.
+var ids = await Workspace.Query.Constraints
+    .Where(ConstraintQ.Description.Contains("security"))
+    .OrderBy(ConstraintQ.Description)
+    .Limit(50)
+    .IdsAsync(transport);
+
+// 3. Projection — typed DTOs, only the columns the projection touches travel back.
+public sealed record ConstraintRow(ConstraintId Id, string? Description);
+
+public static readonly ISurfaceProjection<ConstraintRow> ConstraintRowProj =
+    SurfaceProjection.For<ConstraintRow>(row => new ConstraintRow(
+        Id:          new ConstraintId(row.Read(ConstraintQ.Id).Value),
+        Description: row.Read(ConstraintQ.Description)));
+
+var rows = await Workspace.Query.Constraints
+    .Where(ConstraintQ.Description.Contains("security"))
+    .Limit(20)
+    .Select(ConstraintRowProj)
+    .ExecuteAsync(transport);
 ```
 
-Predicate operators on `PropertyExpr<T>`: `Eq`, `Lt`/`Le`/`Gt`/`Ge`, `In(...)`, plus the string-only `Contains` extension. Compose multiple predicates with `Predicate.And/Or/Not`.
+Predicate operators on `PropertyExpr<T>`: `Eq`, `Lt`/`Le`/`Gt`/`Ge`, `In(...)`, plus the string-only `Contains` extension. Compose multiple predicates with `Predicate.And/Or/Not`. Server-side `OrderBy` / `ThenBy` / `Limit` / `Start` chain on every terminal — render as `ORDER BY … LIMIT … START …` at the tail of the SurrealQL.
 
 Pin a single record by id and pull traversed slices in the same call:
 
@@ -257,7 +278,35 @@ foreach (var (src, dst) in pairs.Select(p => (p.Source, p.Target)))
     Console.WriteLine($"{src} → {dst}");
 ```
 
-## 8. Filtered Loads And Top-Up Fetch
+## 8. Hydrate Specific Ids Into A Tracked Session
+
+The fifth query terminal — `Workspace.Hydrate.{Table}(ids)` — pairs with `IdsAsync` for the `Load → Hydrate → Mutate → Commit` flow. Use it when the slice you want to mutate isn't aggregate-shaped (search results, paged scrollers, edge fanout):
+
+```csharp
+// 1. Load — id selection only.
+var symbolIds = await Workspace.Query.CodeSymbols
+    .Where(CodeSymbolQ.Name.Contains("Parser"))
+    .Limit(20)
+    .IdsAsync(transport);
+
+// 2. Hydrate — materialise into a tracked session, with a write-mode lease.
+await using var lease = await workspace.AcquireWriterAsync(transport);
+var session = await Workspace.Hydrate.CodeSymbols(symbolIds)
+    .ExecuteAsync(transport, lease);
+
+// 3. Mutate.
+foreach (var symbol in session.GetAll<CodeSymbol>())
+    symbol.LastSeen = DateTimeOffset.UtcNow;
+
+// 4. Commit.
+await session.CommitAsync(transport, lease);
+```
+
+Two overloads per table — typed `{Table}Id` for the ergonomic call site, raw `IRecordId` for cross-aggregate edge endpoints already collapsed to canonical record ids. The read-mode `ExecuteAsync(transport, ct)` (no lease) is also available for "load and read" flows that won't commit. Empty-id list short-circuits to an empty session with no transport call.
+
+`WithInclude(IIncludeNode)` accepts the same node AST as `Query<T>.WithInclude(...)` — wire SQL is identical to `Query<T>.Where(IdIn).WithInclude(...).ExecuteAsync` would emit. Per-relation ergonomic `Include*` helpers for the hydration path are deferred until a real callsite needs them.
+
+## 9. Filtered Loads And Top-Up Fetch
 
 Switch the terminal verb from `ExecuteAsync` to `LoadAsync` to get a write-mode session for the same query AST. Aggregate-root tables only — non-roots compile-error if you try.
 
@@ -291,7 +340,7 @@ catch (LoadShapeViolationException)
 
 `Fetch` preserves uncommitted user mutations: if the user has already written to `design.Description` since load, a Fetch that re-hydrates the same row leaves the pending value alone (a `HasPendingWrite` guard skips field-level overwrites).
 
-## 9. Add Relations
+## 10. Add Relations
 
 Declare a forward relation attribute and its inverse:
 
@@ -342,7 +391,7 @@ public partial class UserStory
 
 The generator emits `Restricts : IRelationKind`. Use `Session.Relate<Restricts>(...)`, `Session.Unrelate<Restricts>(...)`, `Session.QueryOutgoing<Restricts, T>(...)`, and `Session.QueryIncoming<Restricts, T>(...)` instead of string edge names.
 
-## 10. Run The Repository Sample
+## 11. Run The Repository Sample
 
 From this repository:
 
