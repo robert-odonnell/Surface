@@ -56,7 +56,7 @@ internal static class EdgePredicateFactoryEmitter
 
         sb.Append(indent)
           .AppendLine($"/// <summary>Predicate factory for the <c>{markerName}</c> edge's payload — one <c>PropertyExpr&lt;T&gt;</c> per public scalar property of the relation's payload type. Compose with <c>EdgeQuery&lt;TIn, TOut&gt;.Where(...)</c> / <c>.OrderBy(...)</c>.</summary>");
-        sb.Append(indent).Append("public static class ").AppendLine(qTypeName);
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(kind.DeclaredAccessibility)).Append(" static class ").AppendLine(qTypeName);
         sb.Append(indent).AppendLine("{");
 
         foreach (var field in kind.PayloadFields)

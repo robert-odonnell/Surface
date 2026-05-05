@@ -63,7 +63,7 @@ internal static class TraversalBuilderEmitter
 
         sb.Append(indent)
           .AppendLine($"/// <summary>Traversal builder for <see cref=\"{table.Name}\"/>. Emitted by <c>TraversalBuilderEmitter</c>; passed as the configure-action argument to <c>Query&lt;{table.Name}&gt;.Include*</c> extensions.</summary>");
-        sb.Append(indent).Append("public sealed class ").AppendLine(typeName);
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(" sealed class ").AppendLine(typeName);
         sb.Append(indent).AppendLine("{");
 
         // Mutable accumulators. Builders are throw-away (per-Include invocation) so a
@@ -154,7 +154,7 @@ internal static class TraversalBuilderEmitter
         sb.AppendLine();
         sb.Append(indent)
           .AppendLine($"/// <summary>Root-level <c>Include*</c> extensions on <c>Query&lt;{table.Name}&gt;</c>. Mirror the per-level methods on <see cref=\"{table.Name}TraversalBuilder\"/>.</summary>");
-        sb.Append(indent).Append("public static class ").AppendLine(extName);
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(" static class ").AppendLine(extName);
         sb.Append(indent).AppendLine("{");
 
         var first = true;
@@ -165,7 +165,7 @@ internal static class TraversalBuilderEmitter
             sb.Append(memberIndent)
               .AppendLine($"/// <summary>Pulls the inline <c>[Reference, Inline]</c> record at <c>{inline.Field}</c> into the projection (<c>{inline.Field}.*</c>).</summary>");
             sb.Append(memberIndent)
-              .Append("public static ").Append(queryFqn).Append(" Include").Append(inline.PropertyName)
+              .Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(" static ").Append(queryFqn).Append(" Include").Append(inline.PropertyName)
               .Append("(this ").Append(queryFqn).AppendLine(" query)");
             sb.Append(memberIndent).AppendLine("{");
             sb.Append(bodyIndent).Append("return query.WithInclude(new ").Append(IncludeInlineRefNodeFqn)
@@ -185,7 +185,7 @@ internal static class TraversalBuilderEmitter
             sb.Append(memberIndent)
               .AppendLine($"/// <summary>Pulls children rows from <c>{child.ChildTable}</c> (parent link <c>{child.ParentField}</c>). Pass <paramref name=\"configure\"/> to filter or descend further.</summary>");
             sb.Append(memberIndent)
-              .Append("public static ").Append(queryFqn).Append(" Include").Append(child.PropertyName)
+              .Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(" static ").Append(queryFqn).Append(" Include").Append(child.PropertyName)
               .Append("(this ").Append(queryFqn).Append(" query, global::System.Action<")
               .Append(childBuilderFqn).AppendLine(">? configure = null)");
             sb.Append(memberIndent).AppendLine("{");
@@ -352,7 +352,7 @@ internal static class TraversalBuilderEmitter
         if (rel.SingleTargetBuilderFqn is { } targetBuilder)
         {
             sb.Append(memberIndent)
-              .Append("public static ").Append(queryFqn).Append(" Include").Append(rel.PropertyName)
+              .Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(" static ").Append(queryFqn).Append(" Include").Append(rel.PropertyName)
               .Append("(this ").Append(queryFqn).Append(" query, global::System.Action<")
               .Append(targetBuilder).AppendLine(">? configure = null)");
             sb.Append(memberIndent).AppendLine("{");
@@ -367,7 +367,7 @@ internal static class TraversalBuilderEmitter
         }
 
         sb.Append(memberIndent)
-          .Append("public static ").Append(queryFqn).Append(" Include").Append(rel.PropertyName)
+          .Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(" static ").Append(queryFqn).Append(" Include").Append(rel.PropertyName)
           .Append("(this ").Append(queryFqn).AppendLine(" query)");
         sb.Append(memberIndent).AppendLine("{");
         sb.Append(bodyIndent).Append("return query.WithInclude(new ").Append(IncludeRelationNodeFqn).Append('(');

@@ -55,17 +55,17 @@ internal static class EdgeQueryRootEmitter
         // Partial fragment of GeneratedQueryRoot — adds the Edges accessor. The base
         // partial (from QueryRootEmitter) defines the singleton instance + the per-table
         // accessors; this fragment just hangs an Edges entry off the same class.
-        sb.Append(indent).Append("public sealed partial class ").AppendLine(GeneratedRootClass);
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(root.DeclaredAccessibility)).Append(" sealed partial class ").AppendLine(GeneratedRootClass);
         sb.Append(indent).AppendLine("{");
         sb.Append(memberIndent).AppendLine("/// <summary>Edge query roots — one per forward <c>RelationAttribute</c>. Compose with <c>.WhereIn(...)</c> / <c>.WhereOut(...)</c>; terminate with <c>.ExecuteAsync(transport)</c>.</summary>");
-        sb.Append(memberIndent).Append("public ").Append(GeneratedEdgesClass).Append(" Edges => ")
+        sb.Append(memberIndent).Append(EmitterAccessibility.FormatRoslyn(root.DeclaredAccessibility)).Append(" ").Append(GeneratedEdgesClass).Append(" Edges => ")
           .Append(GeneratedEdgesClass).AppendLine(".Instance;");
         sb.Append(indent).AppendLine("}");
         sb.AppendLine();
 
         // Sibling singleton holding the per-kind accessors. Stateless, mirrors the table
         // catalogue's shape.
-        sb.Append(indent).Append("public sealed class ").AppendLine(GeneratedEdgesClass);
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(root.DeclaredAccessibility)).Append(" sealed class ").AppendLine(GeneratedEdgesClass);
         sb.Append(indent).AppendLine("{");
         sb.Append(memberIndent).Append("public static readonly ").Append(GeneratedEdgesClass).Append(" Instance = new ").Append(GeneratedEdgesClass).AppendLine("();");
         sb.AppendLine();

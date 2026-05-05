@@ -59,7 +59,7 @@ internal static class HydrateRootEmitter
         var nestedIndent = $"{memberIndent}    ";
 
         // Partial fragment of [CompositionRoot] — adds the static Hydrate accessor.
-        sb.Append(indent).Append(FormatAccessibility(root.DeclaredAccessibility))
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(root.DeclaredAccessibility))
           .Append(" partial class ").AppendLine(root.Name);
         sb.Append(indent).AppendLine("{");
         sb.Append(memberIndent).AppendLine("/// <summary>Hydration entry points — one per <c>[Table]</c>. Pass a list of ids; chain <c>.WithInclude(...)</c> to widen the slice; terminate with <c>.ExecuteAsync(transport, [lease])</c> to materialise into a tracked session.</summary>");
@@ -68,7 +68,7 @@ internal static class HydrateRootEmitter
         sb.Append(indent).AppendLine("}");
         sb.AppendLine();
 
-        sb.Append(indent).Append("public sealed class ").AppendLine(GeneratedClass);
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(root.DeclaredAccessibility)).Append(" sealed class ").AppendLine(GeneratedClass);
         sb.Append(indent).AppendLine("{");
         sb.Append(memberIndent).Append("public static readonly ").Append(GeneratedClass).Append(" Instance = new ").Append(GeneratedClass).AppendLine("();");
         sb.AppendLine();
@@ -88,7 +88,7 @@ internal static class HydrateRootEmitter
               .Append("/// <summary>Hydrate the matching <see cref=\"").Append(entityFqn.Substring("global::".Length))
               .AppendLine("\"/> rows into a fresh tracked session. Typed-id overload — preferred call site shape.</summary>");
             sb.Append(memberIndent)
-              .Append("public ").Append(HydrationQueryFqn).Append('<').Append(entityFqn).Append("> ")
+              .Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(' ').Append(HydrationQueryFqn).Append('<').Append(entityFqn).Append("> ")
               .Append(methodName).Append('(').Append(IEnumerableFqn).Append('<').Append(idFqn).AppendLine("> ids)");
             sb.Append(memberIndent).AppendLine("{");
             sb.Append(nestedIndent).AppendLine("global::System.ArgumentNullException.ThrowIfNull(ids);");
@@ -102,7 +102,7 @@ internal static class HydrateRootEmitter
             sb.Append(memberIndent)
               .AppendLine("/// <summary>Raw-id overload — accepts any <see cref=\"global::Disruptor.Surface.Runtime.IRecordId\"/>; useful for cross-aggregate edge endpoints already collapsed to canonical record ids.</summary>");
             sb.Append(memberIndent)
-              .Append("public ").Append(HydrationQueryFqn).Append('<').Append(entityFqn).Append("> ")
+              .Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(' ').Append(HydrationQueryFqn).Append('<').Append(entityFqn).Append("> ")
               .Append(methodName).Append('(').Append(IEnumerableFqn).Append('<').Append(IRecordIdFqn).AppendLine("> ids)");
             sb.Append(memberIndent).AppendLine("{");
             sb.Append(nestedIndent).AppendLine("global::System.ArgumentNullException.ThrowIfNull(ids);");
@@ -155,15 +155,4 @@ internal static class HydrateRootEmitter
     private static string PascalPluralize(string typeName)
         => Humanizer.InflectorExtensions.Pluralize(typeName, inputIsKnownToBeSingular: false);
 
-    private static string FormatAccessibility(string raw) => raw switch
-    {
-        "Public" => "public",
-        "Internal" => "internal",
-        "Private" => "private",
-        "Protected" => "protected",
-        "ProtectedOrInternal" => "protected internal",
-        "ProtectedAndInternal" => "private protected",
-        "NotApplicable" => string.Empty,
-        _ => raw.ToLowerInvariant(),
-    };
 }

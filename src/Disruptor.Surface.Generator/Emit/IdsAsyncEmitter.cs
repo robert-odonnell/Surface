@@ -67,13 +67,13 @@ internal static class IdsAsyncEmitter
 
         sb.Append(indent)
           .AppendLine($"/// <summary>Id-only selection terminal for <see cref=\"{table.Name}\"/>. Compiles to <c>SELECT id FROM …</c> and returns a typed list of <c>{table.Name}Id</c>; no entity hydration, no session.</summary>");
-        sb.Append(indent).Append("public static class ").AppendLine(className);
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(" static class ").AppendLine(className);
         sb.Append(indent).AppendLine("{");
 
         sb.Append(memberIndent)
           .AppendLine($"/// <summary>Compile and execute the query as <c>SELECT id FROM {SurrealNaming.ToTableName(table.Name)} …</c> and project each returned id into <c>{table.Name}Id</c>. Throws <see cref=\"global::System.InvalidOperationException\"/> if the query carries any <c>Include*</c> nodes — id-only selection is flat by definition.</summary>");
         sb.Append(memberIndent)
-          .Append("public static async ").Append(TaskFqn).Append('<').Append(ReadOnlyListFqn).Append('<').Append(idFqn).Append(">> IdsAsync(this ")
+          .Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(" static async ").Append(TaskFqn).Append('<').Append(ReadOnlyListFqn).Append('<').Append(idFqn).Append(">> IdsAsync(this ")
           .Append(QueryFqn).Append('<').Append(entityFqn).Append("> query, ")
           .Append(TransportFqn).Append(" transport, ")
           .Append(CtFqn).AppendLine(" ct = default)");

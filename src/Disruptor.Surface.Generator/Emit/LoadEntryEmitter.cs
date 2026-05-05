@@ -76,13 +76,13 @@ internal static class LoadEntryEmitter
 
         sb.Append(indent)
           .AppendLine($"/// <summary>Write-mode entry on <c>Query&lt;{aggRoot.Name}&gt;</c>. Two paths: with no <c>Include*</c> calls, delegates to the legacy <c>{aggRoot.Name}AggregateLoader.PopulateAsync</c> (matches <c>Workspace.Load{aggRoot.Name}Async</c>); with at least one <c>Include*</c>, the compiler-driven path emits a nested <c>SELECT</c> and hydrates only the user-chosen slice through <see cref=\"global::Disruptor.Surface.Runtime.IHydrationSink\"/>.</summary>");
-        sb.Append(indent).Append("public static class ").Append(aggRoot.Name).AppendLine("QueryLoad");
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(aggRoot.DeclaredAccessibility)).Append(" static class ").Append(aggRoot.Name).AppendLine("QueryLoad");
         sb.Append(indent).AppendLine("{");
 
         sb.Append(memberIndent)
           .AppendLine($"/// <summary>Loads the <c>{aggRoot.Name}</c> aggregate identified by the query's <c>WithId</c> pin. Returns a populated <see cref=\"global::Disruptor.Surface.Runtime.SurrealSession\"/> the caller mutates and commits via <c>session.CommitAsync(transport, lease)</c>. The supplied <paramref name=\"lease\"/> is the same writer-lease handle the caller will pass into commit; LoadAsync stores no reference, so the caller stays responsible for its lifetime.</summary>");
         sb.Append(memberIndent)
-          .Append("public static async ").Append(TaskFqn).Append('<').Append(SessionFqn)
+          .Append(EmitterAccessibility.FormatRoslyn(aggRoot.DeclaredAccessibility)).Append(" static async ").Append(TaskFqn).Append('<').Append(SessionFqn)
           .Append("> LoadAsync(this ").Append(QueryFqn).Append('<').Append(entityFqn).Append("> query, ")
           .Append(TransportFqn).Append(" transport, ")
           .Append(LeaseFqn).Append(" lease, ")

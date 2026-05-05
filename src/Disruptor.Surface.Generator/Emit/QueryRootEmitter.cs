@@ -54,7 +54,7 @@ internal static class QueryRootEmitter
         var nestedIndent = $"{memberIndent}    ";
 
         // Partial fragment of [CompositionRoot] — adds the static Query accessor.
-        sb.Append(indent).Append(FormatAccessibility(root.DeclaredAccessibility))
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(root.DeclaredAccessibility))
           .Append(" partial class ").AppendLine(root.Name);
         sb.Append(indent).AppendLine("{");
         sb.Append(memberIndent).AppendLine("/// <summary>Read-mode query roots — one per <c>[Table]</c>. Compose with <c>.Where(predicate)</c> / <c>.WithId(id)</c>; terminate with <c>.ExecuteAsync(transport)</c>.</summary>");
@@ -67,7 +67,7 @@ internal static class QueryRootEmitter
         // factories are stateless, so a per-process instance is fine. Marked partial so
         // sibling emitters (EdgeQueryRootEmitter) can graft their own accessors onto the
         // same class.
-        sb.Append(indent).Append("public sealed partial class ").AppendLine(GeneratedClass);
+        sb.Append(indent).Append(EmitterAccessibility.FormatRoslyn(root.DeclaredAccessibility)).Append(" sealed partial class ").AppendLine(GeneratedClass);
         sb.Append(indent).AppendLine("{");
         sb.Append(memberIndent).Append("public static readonly ").Append(GeneratedClass).Append(" Instance = new ").Append(GeneratedClass).AppendLine("();");
         sb.AppendLine();
@@ -85,7 +85,7 @@ internal static class QueryRootEmitter
             sb.Append(memberIndent)
               .Append("/// <summary>Query root for <see cref=\"").Append(entityFqn.Substring("global::".Length)).AppendLine("\"/>.</summary>");
             sb.Append(memberIndent)
-              .Append("public ").Append(QueryFqn).Append('<').Append(entityFqn).Append("> ")
+              .Append(EmitterAccessibility.FormatRoslyn(table.DeclaredAccessibility)).Append(' ').Append(QueryFqn).Append('<').Append(entityFqn).Append("> ")
               .Append(propertyName)
               .Append(" => new(\"").Append(tableName).AppendLine("\");");
         }
@@ -109,15 +109,4 @@ internal static class QueryRootEmitter
     private static string PascalPluralize(string typeName)
         => Humanizer.InflectorExtensions.Pluralize(typeName, inputIsKnownToBeSingular: false);
 
-    private static string FormatAccessibility(string raw) => raw switch
-    {
-        "Public" => "public",
-        "Internal" => "internal",
-        "Private" => "private",
-        "Protected" => "protected",
-        "ProtectedOrInternal" => "protected internal",
-        "ProtectedAndInternal" => "private protected",
-        "NotApplicable" => string.Empty,
-        _ => raw.ToLowerInvariant(),
-    };
 }
