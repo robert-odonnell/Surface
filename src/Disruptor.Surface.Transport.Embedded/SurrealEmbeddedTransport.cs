@@ -32,7 +32,7 @@ namespace Disruptor.Surface.Transport.Embedded;
 /// through any binding dictionary.
 /// </para>
 /// </summary>
-public sealed class SurrealEmbeddedTransport : ISurrealTransport
+public sealed class SurrealEmbeddedTransport : ISurrealTransport, ISurrealExecutor
 {
     /// <summary>SurrealQL prefix the WriterLease emits to open a transactional commit. Used as the lock predicate — anything starting with this is a write that needs single-writer serialisation.</summary>
     private const string TransactionPrefix = "BEGIN TRANSACTION";
@@ -102,6 +102,15 @@ public sealed class SurrealEmbeddedTransport : ISurrealTransport
             }
         }
     }
+
+    /// <summary>
+    /// <see cref="ISurrealExecutor"/> implementation. Like the HTTP path, today's
+    /// SurrealQL bindings are inlined into <see cref="SurrealCommand.Sql"/> by the
+    /// upstream compilers (the embedded SDK's parameter binder has the same
+    /// Thing-loss behaviour as JSON-RPC), so the parameter dictionary is ignored.
+    /// </summary>
+    public Task<JsonDocument> ExecuteAsync(SurrealCommand command, CancellationToken ct = default)
+        => ExecuteAsync(command.Sql, ct);
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()

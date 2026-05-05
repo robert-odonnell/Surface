@@ -15,7 +15,7 @@ public sealed record SurrealConfig(
     string Password,
     TimeSpan Timeout); 
 
-public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
+public sealed class SurrealHttpClient : ISurrealTransport, ISurrealExecutor, IDisposable
 {
     private readonly SurrealConfig config;
     private readonly HttpClient httpClient;
@@ -57,6 +57,17 @@ public sealed class SurrealHttpClient : ISurrealTransport, IDisposable
         ValidateSqlStatuses(normalized);
         return JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(normalized));
     }
+
+    /// <summary>
+    /// <see cref="ISurrealExecutor"/> implementation. Today the SurrealQL bindings are
+    /// always inlined into <see cref="SurrealCommand.Sql"/> by the upstream compilers
+    /// (see the comment on <c>BuildRpcQueryBody</c> for why JSON-RPC params don't
+    /// preserve <c>Thing</c> types), so the parameter dictionary is ignored — the SQL
+    /// already contains everything the server needs. The contract carries the slot for
+    /// future callers that author their own SQL with <c>$name</c> placeholders.
+    /// </summary>
+    public Task<JsonDocument> ExecuteAsync(SurrealCommand command, CancellationToken ct = default)
+        => ExecuteAsync(command.Sql, ct);
 
     /// <summary>
     /// POST a SurrealDB JSON-RPC <c>query</c> call to <c>/rpc</c>. The SQL travels

@@ -585,6 +585,21 @@ public interface ISurrealTransport : IAsyncDisposable
 
 A SurrealQL string in, a `JsonDocument` out. No vars — bindings are inlined as SurrealQL literals upstream by `QueryCompiler` / `SurrealCommandEmitter` / etc. via `SurrealFormatter`. Implement this for a custom transport (test recorders, alternate connectivity, retry policy); most users use `SurrealHttpClient`.
 
+### `ISurrealExecutor` and `SurrealCommand`
+
+```csharp
+public sealed record SurrealCommand(string Sql, IReadOnlyDictionary<string, object?>? Parameters = null);
+
+public interface ISurrealExecutor : IAsyncDisposable
+{
+    Task<JsonDocument> ExecuteAsync(SurrealCommand command, CancellationToken ct = default);
+}
+```
+
+The next-generation transport boundary — same return shape as `ISurrealTransport`, richer input shape. Today the upstream compilers inline every literal into `SurrealCommand.Sql`, so executors discard the parameter dictionary; the slot exists for future evolution (an embedded engine path that natively binds, an HTTP path that doesn't lose `Thing` types). Both `SurrealHttpClient` and `SurrealEmbeddedTransport` implement *both* interfaces directly. Callers holding an `ISurrealTransport` can up-cast via `transport.AsExecutor()` — returns the same instance when the transport already implements `ISurrealExecutor`, otherwise wraps it in `SurrealTransportExecutorAdapter`.
+
+The runtime's existing query/load/commit pipeline still calls `ISurrealTransport.ExecuteAsync(string sql)` for now; per-callsite migration to `ISurrealExecutor` lands as use cases need parameter-aware execution.
+
 ### `SurrealHttpClient`
 
 Lives in the `Disruptor.Surface.Transport.Http` package (namespace `Disruptor.Surface.Transport.Http`). HTTP transport for SurrealDB. Uses the `/rpc` endpoint with JSON-RPC 2.0 envelopes (`{"method": "query", "params": [<sql>, {}]}`); the `params[1]` slot stays empty because every binding has already been inlined into the SQL. SurrealDB's JSON binder treats record-shaped objects as generic `Object`s rather than `Thing`s, so routing record ids through `params[1]` would silently miss; SurrealQL literal syntax (`table:value`) is parsed at the query level and preserves type. The bypass also lifts the per-query statement-count ceiling that a `LET $pN = …;` prefix used to hit on large commits.
