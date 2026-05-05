@@ -85,7 +85,7 @@ internal static class QueryRootEmitter
             sb.Append(memberIndent)
               .Append("/// <summary>Query root for <see cref=\"").Append(entityFqn.Substring("global::".Length)).AppendLine("\"/>.</summary>");
             sb.Append(memberIndent)
-              .Append("public ").Append(QueryFqn).Append('<').Append(entityFqn).Append("> ")
+              .Append(FormatAccessibility(table.DeclaredAccessibility)).Append(' ').Append(QueryFqn).Append('<').Append(entityFqn).Append("> ")
               .Append(propertyName)
               .Append(" => new(\"").Append(tableName).AppendLine("\");");
         }

@@ -58,14 +58,14 @@ internal static class PredicateFactoryEmitter
 
         sb.Append(indent)
           .AppendLine($"/// <summary>Predicate factory for <see cref=\"{table.Name}\"/>. One <c>PropertyExpr&lt;T&gt;</c> per scalar column; compose via <c>.Eq(...)</c> and the <c>Predicate</c> static helpers.</summary>");
-        sb.Append(indent).Append("public static class ").AppendLine(qTypeName);
+        sb.Append(indent).Append(FormatAccessibility(table.DeclaredAccessibility)).Append(" static class ").AppendLine(qTypeName);
         sb.Append(indent).AppendLine("{");
 
         for (var i = 0; i < members.Count; i++)
         {
-            var (propertyName, surrealField, csharpType) = members[i];
+            var (propertyName, surrealField, csharpType, declaredAccessibility) = members[i];
             sb.Append(memberIndent)
-              .Append("public static readonly ")
+              .Append(FormatAccessibility(declaredAccessibility)).Append(" static readonly ")
               .Append(PropertyExprFqn).Append('<').Append(csharpType).Append("> ")
               .Append(propertyName)
               .Append(" = new(\"").Append(surrealField).AppendLine("\");");
@@ -92,9 +92,9 @@ internal static class PredicateFactoryEmitter
     /// <c>[Property]</c>; <c>SurrealArray&lt;T&gt;</c> / <c>[Reference]</c> / <c>[Parent]</c>
     /// / <c>[Children]</c> / relation properties are skipped.
     /// </summary>
-    private static List<(string PropertyName, string SurrealField, string CSharpType)> CollectMembers(TableModel table)
+    private static List<(string PropertyName, string SurrealField, string CSharpType, string DeclaredAccessibility)> CollectMembers(TableModel table)
     {
-        var result = new List<(string, string, string)>();
+        var result = new List<(string, string, string, string)>();
         var idFqn = string.IsNullOrEmpty(table.Namespace)
             ? $"global::{table.Name}Id"
             : $"global::{table.Namespace}.{table.Name}Id";
@@ -105,7 +105,7 @@ internal static class PredicateFactoryEmitter
 
             if (p.Kinds.HasFlag(PropertyKind.Id))
             {
-                result.Add((p.Name, "id", idFqn));
+                result.Add((p.Name, "id", idFqn, p.DeclaredAccessibility));
                 continue;
             }
 
@@ -121,9 +121,21 @@ internal static class PredicateFactoryEmitter
             // when the user has temporarily suppressed the diagnostic.
             if (!SchemaEmitter.IsMappableScalar(p.Type)) continue;
 
-            result.Add((p.Name, SurrealNaming.ToFieldName(p.Name), p.Type.FullyQualifiedName));
+            result.Add((p.Name, SurrealNaming.ToFieldName(p.Name), p.Type.FullyQualifiedName, p.DeclaredAccessibility));
         }
 
         return result;
     }
+
+    private static string FormatAccessibility(string raw) => raw switch
+    {
+        "Public" => "public",
+        "Internal" => "internal",
+        "Private" => "private",
+        "Protected" => "protected",
+        "ProtectedOrInternal" => "protected internal",
+        "ProtectedAndInternal" => "private protected",
+        "NotApplicable" => string.Empty,
+        _ => raw.ToLowerInvariant(),
+    };
 }
