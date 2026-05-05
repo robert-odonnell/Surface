@@ -138,16 +138,23 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public void HydrateTrack_DifferentInstance_SameId_Throws()
+    public void HydrateTrack_DifferentInstance_SameId_DedupsSilently()
     {
+        // Behavior change from preview.16: include-heavy queries (multiple relation
+        // traversals targeting the same id) construct duplicate instances per row in
+        // their per-target hydrators. Loader-side Track absorbs the duplicate so the
+        // hydration loop keeps going — the first instance wins identity. Public
+        // Track<T> still throws on instance conflict (covered separately).
         var session = new SurrealSession();
         var id = new RecordId("details", "d");
         var first = new StubEntity(id);
         var second = new StubEntity(id);
 
         ((IHydrationSink)session).Track(first);
+        var ex = Record.Exception(() => ((IHydrationSink)session).Track(second));
 
-        Assert.Throws<InvalidOperationException>(() => ((IHydrationSink)session).Track(second));
+        Assert.Null(ex);
+        Assert.Same(first, session.Get<StubEntity>(id));
     }
 
     [Fact]
@@ -577,6 +584,35 @@ public sealed class SurrealSessionTests
         Assert.Equal(1, bulks);
         // Per-edge Unrelate is not emitted — that path was for loaded-only enumeration.
         Assert.Equal(0, session.Log.Entries.Count(e => e.Op == CommandOp.Unrelate));
+    }
+
+    [Fact]
+    public void HydrationSinkTrack_DuplicateInstance_DedupsSilently_AndReturns()
+    {
+        // Include-heavy queries can route the same row through the hydrator twice (e.g.
+        // CodeSymbol B reached via both Calls and Uses traversals). The hydrator's
+        // `new T() + Hydrate` pattern produces a fresh instance per row, but the
+        // identity-map already has one. Loader-side Track must absorb the duplicate
+        // silently — throwing aborts the hydration loop after the first conflict and
+        // strands edge synthesis / nested traversal for the rest of the rows.
+        //
+        // Distinct from the public Track<T> path, which still throws on instance
+        // conflict (user-side identity-map poison is loud-fail territory).
+        var session = new SurrealSession();
+        var sink = (IHydrationSink)session;
+        var id = new RecordId("code_symbols", "shared");
+        var first = new StubEntity(id);
+        var second = new StubEntity(id);
+
+        sink.Track(first);
+        var ex = Record.Exception(() => sink.Track(second));
+
+        Assert.Null(ex);
+        // The first instance wins identity; the duplicate is dropped (no Bind, no
+        // entries dict overwrite).
+        Assert.Same(first, session.Get<StubEntity>(id));
+        Assert.Same(session, first.BoundSession);
+        Assert.Null(second.BoundSession);
     }
 
     /// <summary>Test-only entity that records the order of session-side hook calls.</summary>

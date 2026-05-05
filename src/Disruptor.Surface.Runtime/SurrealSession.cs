@@ -989,10 +989,24 @@ public sealed class SurrealSession : IHydrationSink
         ThrowIfClosed();
         if (entities.TryGetValue(entity.Id, out var existing))
         {
+            // Same instance — idempotent, fall through to the loadedAtStart bump.
+            // Different instance — common during include-heavy queries where the same
+            // row reaches the hydrator through multiple relation paths (A.Calls and
+            // A.Uses both targeting B, etc). The hydrator's `new T() + Hydrate` runs
+            // per row and would conflict with the first-hit instance; we silently
+            // drop the new one. The DB row is the same regardless of traversal path,
+            // so the existing instance already carries the right state. This also
+            // lets the surrounding loop (edge synthesis, nested traversal) keep going
+            // — the previous throw aborted everything after the first dup.
+            //
+            // Distinct from the public Track<T> path (line above), which DOES throw
+            // on instance conflict — user code holding two live instances for the
+            // same id is identity-map poison and we want to surface that loudly.
+            // Hydration dups are accidental and benign.
             if (!ReferenceEquals(existing, entity))
             {
-                throw new InvalidOperationException(
-                    $"Cannot hydrate {entity.Id}: a different entity instance is already tracked under this id.");
+                loadedAtStart.Add(entity.Id);
+                return;
             }
         }
         else
