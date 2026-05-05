@@ -57,7 +57,12 @@ await ReloadAndPrintReview(reviewId, transport);
 //    LoadShapeViolationException on unloaded reads, and FetchAsync top-up.
 await DemoQueryLayer(seededDesignIds, transport);
 
-// ── 6. Lease theft demo — acquire a lease, simulate theft via direct DELETE, then
+// ── 6. Relation traversal demo — the four flavors of [Forward]/[Inverse] relation
+//    includes: forward outgoing single-target, inverse incoming single-target, forward
+//    outgoing multi-target leaf, and cross-aggregate id-only.
+await DemoRelationTraversal(transport);
+
+// ── 7. Lease theft demo — acquire a lease, simulate theft via direct DELETE, then
 //    attempt commit and observe the typed exception.
 await DemoLeaseTheft(seededDesignIds[2], transport);
 
@@ -303,7 +308,7 @@ async Task ReloadAndPrintReview(ReviewId reloadId, SurrealHttpClient db)
     Console.WriteLine($"  details: header='{review.Details?.Header}'");
     Console.WriteLine($"  findings: {review.Findings.Count}, observations: {review.Observations.Count}, issues: {review.Issues.Count}, design_changes: {review.DesignChanges.Count}");
 
-    Console.WriteLine($"  cross-agg → assesses ({review.Assessments.Count}):");
+    Console.WriteLine($"  cross-agg assesses ({review.Assessments.Count}):");
     foreach (var id in review.Assessments)
     {
         Console.WriteLine($"    - {id}");
@@ -353,7 +358,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SurrealHttpClient d
         .IncludeConstraints(c => c.IncludeDetails())
         .ExecuteAsync(db);
     var queriedDesign = designsWithConstraints.Single();
-    Console.WriteLine($"  traversal read: design '{queriedDesign.Description}' → {queriedDesign.Constraints.Count} constraint(s)");
+    Console.WriteLine($"  traversal read: design '{queriedDesign.Description}' has {queriedDesign.Constraints.Count} constraint(s)");
     foreach (var c in queriedDesign.Constraints.Take(2))
     {
         Console.WriteLine($"    - {c.Id}  details.header='{c.Details?.Header}'");
@@ -369,7 +374,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SurrealHttpClient d
     Console.WriteLine($"  edge query: {restrictPairs.Count} restricts edges from these constraints");
     foreach (var pair in restrictPairs.Take(3))
     {
-        Console.WriteLine($"    - {pair.Source} → {pair.Target}");
+        Console.WriteLine($"    - {pair.Source} :: {pair.Target}");
     }
 
     // (d) Compiler-driven LoadAsync (filtered slice): only Constraints get loaded.
@@ -407,6 +412,108 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SurrealHttpClient d
         // Epic doesn't declare a public [Id] partial; the IEntity.Id is explicit-impl,
         // reach it through the interface for diagnostics.
         Console.WriteLine($"    - {((IEntity)e).Id}  '{e.Description}'");
+    }
+
+    Console.WriteLine();
+}
+
+static async Task DemoRelationTraversal(SurrealHttpClient db)
+{
+    Console.WriteLine("--- Relation traversal demo ---");
+
+    // (a) Forward outgoing, single-target, within-aggregate. Each Finding declares
+    //     [Informs]→Issue and [Cites]→Observation. Both are within the Review
+    //     aggregate, so the include projects target rows (not just ids) and supports
+    //     nested traversal — here we top up each target's [Reference, Inline] details.
+    //     After ExecuteAsync, finding.InformedIssues and finding.Citations resolve
+    //     against the implicit hydrated session — no extra round trip.
+    var findings = await Workspace.Query.Findings
+        .IncludeDetails()
+        .IncludeInformedIssues(i => i.IncludeDetails())
+        .IncludeCitations(o => o.IncludeDetails())
+        .ExecuteAsync(db);
+    Console.WriteLine($"  forward outgoing single-target: {findings.Count} finding(s)");
+    foreach (var f in findings.Take(2))
+    {
+        Console.WriteLine($"    - finding {((IEntity)f).Id}  recommendation='{f.Recommendation}'");
+        foreach (var iss in f.InformedIssues)
+        {
+            Console.WriteLine($"        informs : {iss.Id}  severity='{iss.Severity}'  details.header='{iss.Details?.Header}'");
+        }
+        foreach (var obs in f.Citations)
+        {
+            Console.WriteLine($"        cites   : {obs.Id}  description='{obs.Description}'");
+        }
+    }
+
+    // (b) Inverse incoming, single-target, within-aggregate. Issue declares
+    //     [InformedBy]→Finding — same `informs` edge as (a), opposite direction.
+    //     The traversal walks the edge backwards and hydrates the source-side
+    //     Finding rows.
+    var issues = await Workspace.Query.Issues
+        .IncludeDetails()
+        .IncludeInformingFindings(f => f.IncludeDetails())
+        .ExecuteAsync(db);
+    Console.WriteLine($"  inverse incoming single-target: {issues.Count} issue(s)");
+    foreach (var iss in issues.Take(2))
+    {
+        Console.WriteLine($"    - issue {iss.Id}  severity='{iss.Severity}'");
+        foreach (var f in iss.InformingFindings)
+        {
+            Console.WriteLine($"        informed-by: {((IEntity)f).Id}  recommendation='{f.Recommendation}'");
+        }
+    }
+
+    // (c) Forward outgoing, multi-target, leaf. Constraint.Restricts targets a
+    //     heterogeneous union (UserStory / AcceptanceCriteria / Test), so the
+    //     include is a leaf — no nested configure-action, no per-target predicate.
+    //     The hydrator dispatches each row to the right entity type by record-id
+    //     prefix, materialising Constraint.Restrictions across all union members.
+    var constraints = await Workspace.Query.Constraints
+        .Where(ConstraintQ.Description.Contains("seed-2"))
+        .IncludeRestrictions()
+        .ExecuteAsync(db);
+    Console.WriteLine($"  forward outgoing multi-target leaf: {constraints.Count} constraint(s)");
+    foreach (var c in constraints.Take(1))
+    {
+        Console.WriteLine($"    - constraint {c.Id}  Restrictions.Count={c.Restrictions.Count}");
+        foreach (var target in c.Restrictions.Take(4))
+        {
+            Console.WriteLine($"        restricts: {target.Id}  ({target.GetType().Name})");
+        }
+    }
+
+    // (d) Cross-aggregate inverse, id-only. `concerns` runs from Issue (Review
+    //     aggregate) → Constraint (Design aggregate). Crossing the boundary collapses
+    //     the include to ids — load the other aggregate explicitly when you need the
+    //     entity. The forward side (Issue.IncludeConcerns) is symmetric.
+    foreach (var c in constraints.Take(1))
+    {
+        var withConcerns = (await Workspace.Query.Constraints
+            .WithId(c.Id)
+            .IncludeConcerns()
+            .ExecuteAsync(db)).Single();
+        Console.WriteLine($"  cross-aggregate inverse id-only: constraint {withConcerns.Id} concerned by {withConcerns.Concerns.Count} issue id(s)");
+        foreach (var id in withConcerns.Concerns.Take(3))
+        {
+            Console.WriteLine($"        concerned-by: {id}");
+        }
+    }
+
+    // (e) Forward side of the same cross-aggregate edge. Issue.IncludeConcerns is
+    //     also id-only — the include sits on the source side of `concerns`, but the
+    //     target lives in a different aggregate, so the include collapses identically.
+    var issuesWithConcerns = await Workspace.Query.Issues
+        .IncludeConcerns()
+        .ExecuteAsync(db);
+    Console.WriteLine($"  cross-aggregate forward id-only: {issuesWithConcerns.Count} issue(s)");
+    foreach (var iss in issuesWithConcerns.Take(2))
+    {
+        Console.WriteLine($"    - issue {iss.Id} concerns {iss.Concerns.Count} constraint id(s)");
+        foreach (var id in iss.Concerns.Take(3))
+        {
+            Console.WriteLine($"        concerns: {id}");
+        }
     }
 
     Console.WriteLine();
