@@ -444,8 +444,8 @@ Write methods:
 | `UnsetField(owner, field, kind)` | Low-level field clear used by generated setters. |
 | `Relate<TKind>(source, target)` | Queue relation creation. |
 | `Relate<TKind>(source, target, payload)` | Queue relation creation with a typed payload — renders as `RELATE source->edge->target CONTENT { … }`. Use for edges that carry data (confidence, run id, resolution method). |
-| `RelateOnce<TKind>(source, target)` | Idempotent relation creation. The edge id is derived deterministically from `(source, kind, target)` via SHA-256, so re-issuing the same triple lands on the same edge row instead of stacking duplicates. Renders as `UPSERT edge_table:<hash> CONTENT { in, out }`. The right verb for re-indexing / re-import workloads. |
-| `RelateOnce<TKind>(source, target, payload)` | Idempotent relate with payload — same deterministic id; payload merges with the auto-injected `in`/`out` fields. Re-running with a different payload overwrites the edge row's data fields (UPSERT semantics). |
+| `RelateOnce<TKind>(source, target)` | Idempotent relation creation. The edge id is derived deterministically from `(source, kind, target)` via SHA-256, so re-issuing the same triple lands on the same edge row instead of stacking duplicates. Renders as `RELATE source -> edge_table:<hash> -> target` — the RELATE-with-explicit-id form so SurrealDB registers the row as a graph edge on `TYPE RELATION ENFORCED` tables. The right verb for re-indexing / re-import workloads. |
+| `RelateOnce<TKind>(source, target, payload)` | Idempotent relate with payload — same deterministic id; payload becomes the trailing `CONTENT { … }` clause. `in` / `out` are encoded by the RELATE syntax itself and aren't repeated in the payload. |
 | `Unrelate<TKind>(source, target)` | Queue relation deletion. |
 | `UnrelateAllFrom<TKind>(source)` | Queue bulk deletion of all outgoing edges of a kind. |
 | `UnrelateAllTo<TKind>(target)` | Queue bulk deletion of all incoming edges of a kind. |

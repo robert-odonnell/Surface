@@ -296,7 +296,7 @@ public sealed class SurrealSessionTests
     public void RelateOnce_ProducesDeterministicEdgeId_AcrossInvocations()
     {
         // The whole point: same (src, kind, tgt) triple → same edge row id, every run.
-        // Render twice in separate sessions; the UPSERT target id must match.
+        // Render twice in separate sessions; the rendered SQL must match exactly.
         string Render(string srcVal)
         {
             var session = new SurrealSession();
@@ -307,8 +307,11 @@ public sealed class SurrealSessionTests
         var first = Render("f");
         var second = Render("f");
         Assert.Equal(first, second);
-        Assert.StartsWith("UPSERT stub_edge:", first);
-        Assert.Contains("CONTENT { in: findings:f, out: issues:i }", first);
+        // RELATE-with-explicit-edge-id is the form SurrealDB accepts for `TYPE RELATION
+        // ENFORCED`; UPSERT-with-CONTENT (the previous shape) was rejected because the
+        // resulting row never registered as a graph edge.
+        Assert.StartsWith("RELATE findings:f->stub_edge:", first);
+        Assert.EndsWith("->issues:i;\n", first);
 
         // Different src → different id (no aliasing).
         var different = Render("g");
@@ -316,11 +319,11 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public void RelateOnce_WithPayload_MergesCallerFieldsWithInOut()
+    public void RelateOnce_WithPayload_AppendsContentClause()
     {
-        // Caller-supplied payload joins the auto-injected `in` / `out` fields in the
-        // CONTENT clause. SurrealDB needs `in`/`out` for graph-edge semantics; the
-        // payload contributes the user's data on top.
+        // Caller-supplied payload becomes the CONTENT clause. `in` / `out` come from
+        // the RELATE syntax itself, not the payload, so the user's payload is the only
+        // thing inside CONTENT { … }.
         var session = new SurrealSession();
         var payload = new Dictionary<string, object?>
         {
@@ -331,11 +334,28 @@ public sealed class SurrealSessionTests
         session.RelateOnce<StubKind>(new RecordId("findings", "f"), new RecordId("issues", "i"), payload);
         var sql = SurrealCommandEmitter.Emit(session.Log.Entries);
 
-        Assert.Contains("UPSERT stub_edge:", sql);
-        Assert.Contains("in: findings:f", sql);
-        Assert.Contains("out: issues:i", sql);
+        Assert.StartsWith("RELATE findings:f->stub_edge:", sql);
+        Assert.Contains("->issues:i CONTENT {", sql);
         Assert.Contains("confidence: 0.92", sql);
         Assert.Contains("method: \"static-analysis\"", sql);
+        Assert.DoesNotContain("UPSERT", sql);
+        // No `in`/`out` in CONTENT — they're already encoded by the RELATE syntax.
+        Assert.DoesNotContain("in: findings:f", sql);
+        Assert.DoesNotContain("out: issues:i", sql);
+    }
+
+    [Fact]
+    public void RelateOnce_WithoutPayload_OmitsContentClause()
+    {
+        // No payload → no CONTENT clause. The RELATE itself encodes in/out, so an empty
+        // CONTENT { } would be redundant noise on the wire.
+        var session = new SurrealSession();
+        session.RelateOnce(new RecordId("a", "1"), new RecordId("b", "2"), "stub_edge");
+        var sql = SurrealCommandEmitter.Emit(session.Log.Entries);
+
+        Assert.StartsWith("RELATE a:1->stub_edge:", sql);
+        Assert.EndsWith("->b:2;\n", sql);
+        Assert.DoesNotContain("CONTENT", sql);
     }
 
     [Fact]

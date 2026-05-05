@@ -66,27 +66,37 @@ public static class SurrealCommandEmitter
                 case CommandOp.RelateOnce:
                 {
                     // Deterministic edge id: same (source, kind, target) triple always
-                    // produces the same hash, so UPSERT collides with the prior row on
-                    // re-relate instead of accumulating duplicates. The hash key uses
+                    // produces the same hash, so re-issuing the same relate lands on the
+                    // same edge row rather than stacking duplicates. The hash key uses
                     // pipe separators (illegal in SurrealQL identifiers, so unambiguous)
                     // and includes both table names so cross-table aliasing can't blur
                     // the (designs:abc, owns, tasks:abc) and (designs:abc, owns, notes:abc)
-                    // triples into the same edge row. The `in`/`out` fields are required
-                    // for SurrealDB to treat the row as a graph edge; merging them into
-                    // EdgeContent keeps the renderer's CONTENT branch unified.
+                    // triples into the same edge row.
+                    //
+                    // The render shape is RELATE-with-explicit-id rather than
+                    // UPSERT-with-CONTENT. UPSERT writes a row to the edge table but
+                    // SurrealDB rejects it on `TYPE RELATION ENFORCED` tables ("Found
+                    // record … which is not a relation, but expected a RELATION") because
+                    // the row never gets registered as a graph edge — the `->edge->`
+                    // traversal can't see it. RELATE with an explicit edge id produces a
+                    // proper graph edge AND honours the deterministic id, which is the
+                    // shape SurrealDB accepts. `in` / `out` come from the RELATE syntax
+                    // itself, not the CONTENT clause, so EdgeContent stays user-payload-
+                    // only.
                     var src = c.Target;
                     var tgt = (RecordId)c.Value!;
                     var edgeTable = c.Key!;
-                    _ = edgeTable.Identifier(); // validate; the rendered identifier comes through FormatId(edgeId) below
+                    _ = edgeTable.Identifier(); // validate; rendered identifier flows through FormatId(edgeId) below
                     var hash = RecordIdFormat.HashText($"{src.Table}:{src.Value}|{edgeTable}|{tgt.Table}:{tgt.Value}");
                     var edgeId = new RecordId(edgeTable, hash);
-                    var merged = new Dictionary<string, object?>(c.EdgeContent ?? new Dictionary<string, object?>())
+                    sb.Append("RELATE ").Append(FormatId(src))
+                      .Append("->").Append(FormatId(edgeId))
+                      .Append("->").Append(FormatId(tgt));
+                    if (c.EdgeContent is { Count: > 0 } onceContent)
                     {
-                        ["in"] = src,
-                        ["out"] = tgt,
-                    };
-                    sb.Append("UPSERT ").Append(FormatId(edgeId)).Append(" CONTENT ");
-                    AppendContent(merged);
+                        sb.Append(" CONTENT ");
+                        AppendContent(onceContent);
+                    }
                     sb.Append(";\n");
                     break;
                 }
@@ -159,7 +169,7 @@ public enum CommandOp
     Unset,             // UPDATE record:id UNSET key
     Delete,            // DELETE record:id
     Relate,            // RELATE source->edge->target
-    RelateOnce,        // UPSERT edge:<deterministic-hash(source, edge, target)> CONTENT { in: source, out: target, … } — idempotent re-relate
+    RelateOnce,        // RELATE source -> edge:<deterministic-hash(source, edge, target)> -> target [CONTENT { … }] — idempotent re-relate, valid on TYPE RELATION ENFORCED
     Unrelate,          // DELETE edge WHERE in = source AND out = target
     UnrelateAllFrom,   // DELETE edge WHERE in = source         — bulk; persisted edges too
     UnrelateAllTo      // DELETE edge WHERE out = target        — bulk; persisted edges too
