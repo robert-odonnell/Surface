@@ -212,9 +212,13 @@ internal static class EdgeQueryCompiler
         int? start = null)
     {
         var sb = new StringBuilder();
-        // Project id/in/out only — payload fields can drive WHERE/ORDER BY without
-        // needing to come back in the result. Keeps the wire payload minimal.
-        sb.Append("SELECT id, in, out FROM ").Append(edgeTable.Identifier());
+        // SurrealDB requires every ORDER BY field to appear in the SELECT projection
+        // ("Missing order idiom <field> in statement selection"). The hydration path
+        // only reads id/in/out — extra columns ride along but are dropped on the way
+        // back, so the wire payload only widens by what the user actually orders on.
+        sb.Append("SELECT id, in, out");
+        AppendOrderProjection(sb, orderClauses);
+        sb.Append(" FROM ").Append(edgeTable.Identifier());
 
         // Build a small synthetic AST so we can reuse QueryCompiler's predicate visitor for
         // the side filters + the user-supplied extra predicate. Side filters take canonical
@@ -244,6 +248,31 @@ internal static class EdgeQueryCompiler
 
         sb.Append(';');
         return sb.ToString();
+    }
+
+    private static void AppendOrderProjection(StringBuilder sb, IReadOnlyList<OrderClause>? clauses)
+    {
+        if (clauses is null || clauses.Count == 0) return;
+
+        // id/in/out are already projected; only widen for distinct payload fields.
+        for (var i = 0; i < clauses.Count; i++)
+        {
+            var field = clauses[i].Field;
+            if (IsBaseColumn(field) || ContainsField(clauses, field, i)) continue;
+            sb.Append(", ").Append(field.Identifier());
+        }
+    }
+
+    private static bool IsBaseColumn(string field)
+        => field is "id" or "in" or "out";
+
+    private static bool ContainsField(IReadOnlyList<OrderClause> clauses, string field, int upTo)
+    {
+        for (var j = 0; j < upTo; j++)
+        {
+            if (clauses[j].Field == field) return true;
+        }
+        return false;
     }
 
     private static void AppendOrderBy(StringBuilder sb, IReadOnlyList<OrderClause>? clauses)

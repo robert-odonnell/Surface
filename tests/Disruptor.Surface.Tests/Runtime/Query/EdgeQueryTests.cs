@@ -170,10 +170,12 @@ public sealed class EdgeQueryTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithOrderByOnPayloadField_AppendsOrderByClause()
+    public async Task ExecuteAsync_WithOrderByOnPayloadField_ProjectsOrderedFieldAndAppendsOrderByClause()
     {
         // Edge payload predicate factories produce PropertyExpr<T> instances; they
         // flow into EdgeQuery.OrderBy the same way they do for entity Query<T>.
+        // SurrealDB rejects ORDER BY on a field that isn't projected, so the
+        // ordered payload fields are spliced into the SELECT alongside id/in/out.
         var transport = new RecordingTransport().ScriptResponse(EmptyEnvelope);
 
         await new EdgeQuery<TestSrcId, TestTgtId>("uses")
@@ -182,7 +184,57 @@ public sealed class EdgeQueryTests
             .ExecuteAsync(transport);
 
         Assert.Equal(
-            "SELECT id, in, out FROM uses ORDER BY line DESC LIMIT 5;",
+            "SELECT id, in, out, line FROM uses ORDER BY line DESC LIMIT 5;",
+            transport.SqlSeen[0]);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_OrderByMultiplePayloadFields_ProjectsEachDistinctField()
+    {
+        var transport = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+        var src = new[] { new TestSrcId("symbols", "01HX") };
+
+        await new EdgeQuery<TestSrcId, TestTgtId>("uses")
+            .OutgoingFrom(src)
+            .Where(new PropertyExpr<string>("kind").Eq("call"))
+            .OrderBy(new PropertyExpr<int>("line"))
+            .ThenBy(new PropertyExpr<int>("column"))
+            .Limit(50)
+            .ExecuteAsync(transport);
+
+        Assert.Equal(
+            "SELECT id, in, out, line, column FROM uses WHERE (in IN [symbols:01HX] AND kind = \"call\") ORDER BY line ASC, column ASC LIMIT 50;",
+            transport.SqlSeen[0]);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_OrderByDuplicateField_ProjectsFieldOnlyOnce()
+    {
+        // Duplicate ORDER BY fields are user error but shouldn't widen the projection.
+        var transport = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+
+        await new EdgeQuery<TestSrcId, TestTgtId>("uses")
+            .OrderBy(new PropertyExpr<int>("line"))
+            .ThenBy(new PropertyExpr<int>("line"), OrderDirection.Descending)
+            .ExecuteAsync(transport);
+
+        Assert.Equal(
+            "SELECT id, in, out, line FROM uses ORDER BY line ASC, line DESC;",
+            transport.SqlSeen[0]);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_OrderByBaseColumn_DoesNotDuplicateProjection()
+    {
+        // Ordering by id/in/out is unusual but valid; they're already projected.
+        var transport = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+
+        await new EdgeQuery<TestSrcId, TestTgtId>("uses")
+            .OrderBy(new PropertyExpr<RecordId>("in"))
+            .ExecuteAsync(transport);
+
+        Assert.Equal(
+            "SELECT id, in, out FROM uses ORDER BY in ASC;",
             transport.SqlSeen[0]);
     }
 

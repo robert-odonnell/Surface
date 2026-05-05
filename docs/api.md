@@ -337,6 +337,8 @@ var calls = await Workspace.Query.Edges.Uses
     .ExecuteAsync(transport);
 ```
 
+The compiler renders this as `SELECT id, in, out, line FROM uses WHERE … ORDER BY line ASC LIMIT 50;` — SurrealDB requires every `ORDER BY` field to be projected, so the ordered payload columns are spliced into `SELECT` alongside `id`/`in`/`out`. The hydration path still only reads the endpoint pair into `EdgeRow`, so the extra columns ride the wire but don't leak into the result type.
+
 Without the factory, edge payload fields stayed effectively write-only — readable from the wire but not a typed first-class member of the query surface.
 
 ### `LoadAsync`
