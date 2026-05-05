@@ -633,6 +633,91 @@ public sealed class QueryCompilerTests
         }
     }
 
+    [Fact]
+    public void Compile_WithLimit_AppendsLimitClauseAtTheEnd()
+    {
+        var sql = new Query<TestTable>("symbols")
+            .Where(new EqPredicate("kind", "method"))
+            .Limit(10)
+            .Compile();
+
+        Assert.Equal("SELECT * FROM symbols WHERE kind = \"method\" LIMIT 10;", sql);
+    }
+
+    [Fact]
+    public void Compile_WithStart_AppendsStartClause_AfterLimit()
+    {
+        // SurrealQL clause order is fixed: ORDER BY → LIMIT → START. Pinning the
+        // emit order so paged reads (Limit + Start) don't drift into a syntax error.
+        var sql = new Query<TestTable>("symbols").Limit(20).Start(40).Compile();
+
+        Assert.Equal("SELECT * FROM symbols LIMIT 20 START 40;", sql);
+    }
+
+    [Fact]
+    public void Compile_OrderBy_EmitsAscByDefault_AndDescWhenAsked()
+    {
+        var ascSql = new Query<TestTable>("symbols").OrderBy(new PropertyExpr<string>("name")).Compile();
+        var descSql = new Query<TestTable>("symbols")
+            .OrderBy(new PropertyExpr<int>("line"), OrderDirection.Descending)
+            .Compile();
+
+        Assert.Equal("SELECT * FROM symbols ORDER BY name ASC;", ascSql);
+        Assert.Equal("SELECT * FROM symbols ORDER BY line DESC;", descSql);
+    }
+
+    [Fact]
+    public void Compile_OrderByThenBy_ChainsCommaSeparated()
+    {
+        var sql = new Query<TestTable>("symbols")
+            .OrderBy(new PropertyExpr<string>("kind"))
+            .ThenBy(new PropertyExpr<string>("name"), OrderDirection.Descending)
+            .Compile();
+
+        Assert.Equal("SELECT * FROM symbols ORDER BY kind ASC, name DESC;", sql);
+    }
+
+    [Fact]
+    public void Compile_FullClauseStack_RendersInCanonicalOrder()
+    {
+        // WHERE → ORDER BY → LIMIT → START — same shape SurrealQL parses.
+        var sql = new Query<TestTable>("symbols")
+            .Where(PropertyExprStringExtensions.Contains(new PropertyExpr<string>("name"), "Foo"))
+            .OrderBy(new PropertyExpr<string>("name"))
+            .Limit(5)
+            .Start(10)
+            .Compile();
+
+        Assert.Equal(
+            "SELECT * FROM symbols WHERE string::contains(name, \"Foo\") ORDER BY name ASC LIMIT 5 START 10;",
+            sql);
+    }
+
+    [Fact]
+    public void Limit_NonPositive_ClearsTheCap()
+    {
+        // Defensive: passing zero or a negative number should be a "no-op no cap"
+        // signal rather than silently emitting `LIMIT 0` (which Surreal honours and
+        // returns nothing).
+        var sql = new Query<TestTable>("symbols").Limit(10).Limit(0).Compile();
+
+        Assert.Equal("SELECT * FROM symbols;", sql);
+    }
+
+    /// <summary>Test stand-in for a generated entity — minimal IEntity shape so Query&lt;T&gt; can construct.</summary>
+    private sealed class TestTable : IEntity
+    {
+        public RecordId Id => default;
+        public SurrealSession? Session => null;
+        public void Bind(SurrealSession session) { }
+        public void Initialize(SurrealSession session) { }
+        public void Flush(SurrealSession session) { }
+        public void Hydrate(System.Text.Json.JsonElement json, IHydrationSink sink) { }
+        public void HydratePartial(System.Text.Json.JsonElement json, IHydrationSink sink) { }
+        public void OnDeleting() { }
+        public void MarkAllSlicesLoaded(IHydrationSink sink) { }
+    }
+
     private static string InvokeWithIncludes(
         string table, IPredicate? filter, RecordId? pinnedId, IReadOnlyList<IIncludeNode> includes)
     {
@@ -642,11 +727,20 @@ public sealed class QueryCompilerTests
                 "Compile",
                 System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic,
                 binder: null,
-                types: [typeof(string), typeof(IPredicate), typeof(RecordId?), typeof(IReadOnlyList<IIncludeNode>)],
+                types:
+                [
+                    typeof(string),
+                    typeof(IPredicate),
+                    typeof(RecordId?),
+                    typeof(IReadOnlyList<IIncludeNode>),
+                    typeof(IReadOnlyList<OrderClause>),
+                    typeof(int?),
+                    typeof(int?),
+                ],
                 modifiers: null)!;
         try
         {
-            return (string)method.Invoke(null, [table, filter, pinnedId, includes])!;
+            return (string)method.Invoke(null, [table, filter, pinnedId, includes, null, null, null])!;
         }
         catch (System.Reflection.TargetInvocationException tie) when (tie.InnerException is not null)
         {

@@ -174,6 +174,14 @@ public sealed class ModelGenerator : IIncrementalGenerator
         }
         RelationKindEmitter.Emit(spc, graph);
 
+        // Edge-payload predicate factories — one per forward kind that carries a typed
+        // payload via ForwardRelation<TPayload>. Bare ForwardRelation kinds (no payload)
+        // produce no factory; emitter short-circuits internally.
+        foreach (var kind in graph.RelationKinds)
+        {
+            EdgePredicateFactoryEmitter.Emit(spc, kind);
+        }
+
         // CG020 — every member of an aggregate must be reachable from the root via
         // [Parent] links so the loader's dotted-path WHERE clauses can scope each row
         // by parent. Aggregate membership is decided by [Children] reachability, so a

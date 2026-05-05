@@ -28,7 +28,10 @@ internal static class QueryCompiler
         string table,
         IPredicate? filter,
         RecordId? pinnedId,
-        IReadOnlyList<IIncludeNode> includes)
+        IReadOnlyList<IIncludeNode> includes,
+        IReadOnlyList<OrderClause>? orderClauses = null,
+        int? limit = null,
+        int? start = null)
     {
         var sb = new StringBuilder();
 
@@ -49,6 +52,13 @@ internal static class QueryCompiler
         {
             sb.Append(" WHERE ").Append(string.Join(" AND ", clauses));
         }
+
+        // SurrealQL clause order is fixed: ORDER BY → LIMIT → START. Keeping it stable
+        // here matches the docs and avoids "why doesn't this paginate" surprises.
+        AppendOrderBy(sb, orderClauses);
+        AppendLimit(sb, limit);
+        AppendStart(sb, start);
+
         sb.Append(';');
 
         return sb.ToString();
@@ -57,7 +67,36 @@ internal static class QueryCompiler
     /// <summary>Backwards-compat overload — flat select, no traversals.</summary>
     public static string Compile(
         string table, IPredicate? filter, RecordId? pinnedId)
-        => Compile(table, filter, pinnedId, []);
+        => Compile(table, filter, pinnedId, [], orderClauses: null, limit: null, start: null);
+
+    private static void AppendOrderBy(StringBuilder sb, IReadOnlyList<OrderClause>? clauses)
+    {
+        if (clauses is null || clauses.Count == 0) return;
+
+        sb.Append(" ORDER BY ");
+        for (var i = 0; i < clauses.Count; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            var c = clauses[i];
+            sb.Append(c.Field.Identifier()).Append(c.Direction == OrderDirection.Descending ? " DESC" : " ASC");
+        }
+    }
+
+    private static void AppendLimit(StringBuilder sb, int? limit)
+    {
+        if (limit is { } n && n > 0)
+        {
+            sb.Append(" LIMIT ").Append(n);
+        }
+    }
+
+    private static void AppendStart(StringBuilder sb, int? start)
+    {
+        if (start is { } n && n > 0)
+        {
+            sb.Append(" START ").Append(n);
+        }
+    }
 
     /// <summary>
     /// Compile a predicate AST in isolation — returns the WHERE-clause text plus the

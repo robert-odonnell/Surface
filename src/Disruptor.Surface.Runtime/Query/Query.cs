@@ -31,15 +31,34 @@ public sealed class Query<T>
     /// <summary>Traversal nodes added via <see cref="WithInclude"/>. Empty when the query is flat.</summary>
     public IReadOnlyList<IIncludeNode> Includes { get; }
 
-    /// <summary>Generator entry point. <paramref name="table"/> is the snake-cased SurrealDB table name.</summary>
-    public Query(string table) : this(table, filter: null, pinnedId: null, includes: []) { }
+    /// <summary>Order specs added via <see cref="OrderBy"/> / <see cref="ThenBy"/>. Empty when no ordering is set.</summary>
+    public IReadOnlyList<OrderClause> OrderClauses { get; }
 
-    private Query(string table, IPredicate? filter, RecordId? pinnedId, IReadOnlyList<IIncludeNode> includes)
+    /// <summary>Maximum row count via <see cref="Limit"/>. Renders as SurrealQL <c>LIMIT n</c>; <c>null</c> means no cap.</summary>
+    public int? LimitCount { get; }
+
+    /// <summary>Row offset via <see cref="Start"/>. Renders as SurrealQL <c>START n</c>; <c>null</c> means start at zero.</summary>
+    public int? StartAt { get; }
+
+    /// <summary>Generator entry point. <paramref name="table"/> is the snake-cased SurrealDB table name.</summary>
+    public Query(string table) : this(table, filter: null, pinnedId: null, includes: [], orderClauses: [], limitCount: null, startAt: null) { }
+
+    private Query(
+        string table,
+        IPredicate? filter,
+        RecordId? pinnedId,
+        IReadOnlyList<IIncludeNode> includes,
+        IReadOnlyList<OrderClause> orderClauses,
+        int? limitCount,
+        int? startAt)
     {
         Table = table;
         Filter = filter;
         PinnedId = pinnedId;
         Includes = includes;
+        OrderClauses = orderClauses;
+        LimitCount = limitCount;
+        StartAt = startAt;
     }
 
     /// <summary>
@@ -50,7 +69,7 @@ public sealed class Query<T>
     public Query<T> Where(IPredicate predicate)
     {
         var combined = Filter is null ? predicate : Predicate.And(Filter, predicate);
-        return new Query<T>(Table, combined, PinnedId, Includes);
+        return new Query<T>(Table, combined, PinnedId, Includes, OrderClauses, LimitCount, StartAt);
     }
 
     /// <summary>
@@ -70,7 +89,7 @@ public sealed class Query<T>
                 "Pass an id whose table matches the query's table.",
                 nameof(id));
         }
-        return new(Table, Filter, RecordId.From(id), Includes);
+        return new(Table, Filter, RecordId.From(id), Includes, OrderClauses, LimitCount, StartAt);
     }
 
     /// <summary>
@@ -86,8 +105,49 @@ public sealed class Query<T>
             next[i] = Includes[i];
         }
         next[Includes.Count] = node;
-        return new Query<T>(Table, Filter, PinnedId, next);
+        return new Query<T>(Table, Filter, PinnedId, next, OrderClauses, LimitCount, StartAt);
     }
+
+    /// <summary>
+    /// Adds an ordering specification — the first call seeds the sort, subsequent calls
+    /// (or <see cref="ThenBy"/>) tie-break on the previous one. Renders as SurrealQL
+    /// <c>ORDER BY field ASC|DESC, …</c>. The <see cref="PropertyExpr{TValue}"/> arg
+    /// matches the same factory used for predicates, so generator-emitted
+    /// <c>{Table}Q.Field</c> accessors flow through here without ceremony.
+    /// </summary>
+    public Query<T> OrderBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending)
+        => Append(new OrderClause(property.Field, direction));
+
+    /// <summary>Tie-break on a secondary field. Equivalent to chaining another <see cref="OrderBy"/>; named for readability at the call site.</summary>
+    public Query<T> ThenBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending)
+        => Append(new OrderClause(property.Field, direction));
+
+    private Query<T> Append(OrderClause clause)
+    {
+        var next = new OrderClause[OrderClauses.Count + 1];
+        for (var i = 0; i < OrderClauses.Count; i++)
+        {
+            next[i] = OrderClauses[i];
+        }
+        next[OrderClauses.Count] = clause;
+        return new Query<T>(Table, Filter, PinnedId, Includes, next, LimitCount, StartAt);
+    }
+
+    /// <summary>
+    /// Caps the result set at <paramref name="count"/> rows server-side — renders as
+    /// SurrealQL <c>LIMIT n</c>. Multiple calls overwrite (last wins). Pass a
+    /// non-positive value to remove the cap.
+    /// </summary>
+    public Query<T> Limit(int count)
+        => new(Table, Filter, PinnedId, Includes, OrderClauses, count > 0 ? count : null, StartAt);
+
+    /// <summary>
+    /// Skips the first <paramref name="count"/> rows server-side — renders as SurrealQL
+    /// <c>START n</c>. Pair with <see cref="Limit"/> for paged reads. Multiple calls
+    /// overwrite. Pass zero to remove the offset.
+    /// </summary>
+    public Query<T> Start(int count)
+        => new(Table, Filter, PinnedId, Includes, OrderClauses, LimitCount, count > 0 ? count : null);
 
     /// <summary>
     /// Compiles the AST to SurrealQL, executes via <paramref name="transport"/>, and
@@ -104,7 +164,7 @@ public sealed class Query<T>
     /// inspect or splice the rendered query before sending.
     /// </summary>
     public string Compile()
-        => QueryCompiler.Compile(Table, Filter, PinnedId, Includes);
+        => QueryCompiler.Compile(Table, Filter, PinnedId, Includes, OrderClauses, LimitCount, StartAt);
 
     /// <summary>
     /// Compile, execute, and hydrate the query against a caller-supplied
@@ -125,7 +185,7 @@ public sealed class Query<T>
         ISurrealTransport transport,
         CancellationToken ct = default)
     {
-        var sql = QueryCompiler.Compile(Table, Filter, PinnedId, Includes);
+        var sql = QueryCompiler.Compile(Table, Filter, PinnedId, Includes, OrderClauses, LimitCount, StartAt);
         using var doc = await transport.ExecuteAsync(sql, ct);
         var rs = new SurrealResultSet(doc.RootElement);
         var rows = rs.ResultAt();

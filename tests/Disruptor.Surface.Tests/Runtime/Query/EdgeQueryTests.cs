@@ -157,6 +157,54 @@ public sealed class EdgeQueryTests
         Assert.Empty(rows);
     }
 
+    [Fact]
+    public async Task ExecuteAsync_WithLimit_AppendsLimitClause()
+    {
+        var transport = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+
+        await new EdgeQuery<TestSrcId, TestTgtId>("restricts")
+            .Limit(25)
+            .ExecuteAsync(transport);
+
+        Assert.Equal("SELECT id, in, out FROM restricts LIMIT 25;", transport.SqlSeen[0]);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WithOrderByOnPayloadField_AppendsOrderByClause()
+    {
+        // Edge payload predicate factories produce PropertyExpr<T> instances; they
+        // flow into EdgeQuery.OrderBy the same way they do for entity Query<T>.
+        var transport = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+
+        await new EdgeQuery<TestSrcId, TestTgtId>("uses")
+            .OrderBy(new PropertyExpr<int>("line"), OrderDirection.Descending)
+            .Limit(5)
+            .ExecuteAsync(transport);
+
+        Assert.Equal(
+            "SELECT id, in, out FROM uses ORDER BY line DESC LIMIT 5;",
+            transport.SqlSeen[0]);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhereOnPayloadField_FiltersServerSide()
+    {
+        // The whole point of the edge-payload factory + EdgeQuery.Where(IPredicate)
+        // pairing — `UsesEdgeQ.Kind.Eq("call")` materialises as a server-side WHERE
+        // clause instead of pulling rows and filtering in-process.
+        var transport = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+        var src = new[] { new TestSrcId("symbols", "01HX") };
+
+        await new EdgeQuery<TestSrcId, TestTgtId>("uses")
+            .OutgoingFrom(src)
+            .Where(new PropertyExpr<string>("kind").Eq("call"))
+            .ExecuteAsync(transport);
+
+        Assert.Equal(
+            "SELECT id, in, out FROM uses WHERE (in IN [symbols:01HX] AND kind = \"call\");",
+            transport.SqlSeen[0]);
+    }
+
     private const string EmptyEnvelope = "[{\"result\":[],\"status\":\"OK\"}]";
 
     private readonly record struct TestSrcId(string Table, string Value) : IRecordId

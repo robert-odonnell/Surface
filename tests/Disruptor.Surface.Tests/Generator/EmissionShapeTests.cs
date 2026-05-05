@@ -555,4 +555,76 @@ public sealed class EmissionShapeTests
         Assert.DoesNotContain("DEFINE FIELD IF NOT EXISTS kind ON calls", allSrc);
         Assert.DoesNotContain("DEFINE FIELD IF NOT EXISTS run_id ON calls", allSrc);
     }
+
+    [Fact]
+    public void ForwardRelationWithPayload_Emits_EdgeQ_PredicateFactory()
+    {
+        // ForwardRelation<TPayload> drives both schema field emission AND a sibling
+        // {Kind}EdgeQ predicate factory so callers can do
+        //     edges.OutgoingFrom([id]).Where(UsesEdgeQ.Kind.Eq("call"))
+        // server-side. Mirrors the {Table}Q factory pattern for entity columns.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            public sealed class UsesPayload
+            {
+                public string Kind { get; set; } = "";
+                public int Line { get; set; }
+                public string RunId { get; set; } = "";
+            }
+
+            public sealed class UsesAttribute : ForwardRelation<UsesPayload>;
+            public sealed class UsedByAttribute : InverseRelation<UsesAttribute>;
+
+            [Table, AggregateRoot] public partial class Symbol {
+                [Id] public partial SymbolId Id { get; set; }
+                [Property] public partial string Name { get; set; }
+                [Uses] public partial IReadOnlyCollection<Symbol> UsedSymbols { get; }
+                [UsedBy] public partial IReadOnlyCollection<Symbol> UsersOfMe { get; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, _) = GeneratorHarness.Run(src);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        // Class itself, named after the marker (UsesAttribute -> Uses -> UsesEdgeQ).
+        Assert.Contains("public static class UsesEdgeQ", allSrc);
+
+        // One PropertyExpr<T> per public scalar payload property, snake-cased field.
+        Assert.Contains("PropertyExpr<string> Kind = new(\"kind\");", allSrc);
+        Assert.Contains("PropertyExpr<int> Line = new(\"line\");", allSrc);
+        Assert.Contains("PropertyExpr<string> RunId = new(\"run_id\");", allSrc);
+    }
+
+    [Fact]
+    public void BareForwardRelation_Emits_NoEdgeQ_Factory()
+    {
+        // Regression: a forward kind without a payload should not produce an empty
+        // {Kind}EdgeQ class — emitter short-circuits.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            public sealed class CallsAttribute : ForwardRelation;
+            public sealed class CalledByAttribute : InverseRelation<CallsAttribute>;
+
+            [Table, AggregateRoot] public partial class Symbol {
+                [Id] public partial SymbolId Id { get; set; }
+                [Calls] public partial IReadOnlyCollection<Symbol> CalledSymbols { get; }
+                [CalledBy] public partial IReadOnlyCollection<Symbol> CallingSymbols { get; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, _) = GeneratorHarness.Run(src);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        Assert.DoesNotContain("CallsEdgeQ", allSrc);
+    }
 }

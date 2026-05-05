@@ -32,21 +32,30 @@ public sealed class EdgeQuery<TIn, TOut>
     private readonly IReadOnlyList<IRecordId>? inFilter;
     private readonly IReadOnlyList<IRecordId>? outFilter;
     private readonly IPredicate? extra;
+    private readonly IReadOnlyList<OrderClause> orderClauses;
+    private readonly int? limitCount;
+    private readonly int? startAt;
 
     /// <summary>Generator entry point. <paramref name="edgeTable"/> is the snake-cased SurrealDB edge table name.</summary>
     public EdgeQuery(string edgeTable)
-        : this(edgeTable, inFilter: null, outFilter: null, extra: null) { }
+        : this(edgeTable, inFilter: null, outFilter: null, extra: null, orderClauses: [], limitCount: null, startAt: null) { }
 
     private EdgeQuery(
         string edgeTable,
         IReadOnlyList<IRecordId>? inFilter,
         IReadOnlyList<IRecordId>? outFilter,
-        IPredicate? extra)
+        IPredicate? extra,
+        IReadOnlyList<OrderClause> orderClauses,
+        int? limitCount,
+        int? startAt)
     {
         this.edgeTable = edgeTable;
         this.inFilter = inFilter;
         this.outFilter = outFilter;
         this.extra = extra;
+        this.orderClauses = orderClauses;
+        this.limitCount = limitCount;
+        this.startAt = startAt;
     }
 
     /// <summary>
@@ -56,7 +65,7 @@ public sealed class EdgeQuery<TIn, TOut>
     public EdgeQuery<TIn, TOut> WhereIn(IEnumerable<TIn> ids)
     {
         var snap = SnapshotIds(ids);
-        return new(edgeTable, snap, outFilter, extra);
+        return new(edgeTable, snap, outFilter, extra, orderClauses, limitCount, startAt);
     }
 
     /// <summary>
@@ -66,20 +75,47 @@ public sealed class EdgeQuery<TIn, TOut>
     public EdgeQuery<TIn, TOut> WhereOut(IEnumerable<TOut> ids)
     {
         var snap = SnapshotIds(ids);
-        return new(edgeTable, inFilter, snap, extra);
+        return new(edgeTable, inFilter, snap, extra, orderClauses, limitCount, startAt);
     }
 
     /// <summary>
     /// Adds an arbitrary predicate to the WHERE clause (AND-merged with any side
-    /// restrictions). Useful for filtering on edge-carried fields once those become a
-    /// thing. Today edge rows have only <c>id</c>/<c>in</c>/<c>out</c>, so <c>Where</c>
-    /// is mostly a forward-compat hook.
+    /// restrictions). Pair with the generator-emitted <c>{ForwardKind}EdgeQ</c> factory
+    /// to filter on edge payload fields — e.g.
+    /// <c>edges.OutgoingFrom([id]).Where(UsesEdgeQ.Kind.Eq("call"))</c>.
     /// </summary>
     public EdgeQuery<TIn, TOut> Where(IPredicate predicate)
     {
         var combined = extra is null ? predicate : Predicate.And(extra, predicate);
-        return new(edgeTable, inFilter, outFilter, combined);
+        return new(edgeTable, inFilter, outFilter, combined, orderClauses, limitCount, startAt);
     }
+
+    /// <summary>Order edge rows by a payload field. Same shape as <see cref="Query{T}.OrderBy"/>; renders as <c>ORDER BY field ASC|DESC</c>.</summary>
+    public EdgeQuery<TIn, TOut> OrderBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending)
+        => AppendOrder(new OrderClause(property.Field, direction));
+
+    /// <summary>Tie-break on a secondary payload field. Equivalent to chaining another <see cref="OrderBy"/>.</summary>
+    public EdgeQuery<TIn, TOut> ThenBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending)
+        => AppendOrder(new OrderClause(property.Field, direction));
+
+    private EdgeQuery<TIn, TOut> AppendOrder(OrderClause clause)
+    {
+        var next = new OrderClause[orderClauses.Count + 1];
+        for (var i = 0; i < orderClauses.Count; i++)
+        {
+            next[i] = orderClauses[i];
+        }
+        next[orderClauses.Count] = clause;
+        return new(edgeTable, inFilter, outFilter, extra, next, limitCount, startAt);
+    }
+
+    /// <summary>Caps the result set at <paramref name="count"/> rows server-side. Multiple calls overwrite.</summary>
+    public EdgeQuery<TIn, TOut> Limit(int count)
+        => new(edgeTable, inFilter, outFilter, extra, orderClauses, count > 0 ? count : null, startAt);
+
+    /// <summary>Skips the first <paramref name="count"/> rows server-side. Pair with <see cref="Limit"/> for paged reads.</summary>
+    public EdgeQuery<TIn, TOut> Start(int count)
+        => new(edgeTable, inFilter, outFilter, extra, orderClauses, limitCount, count > 0 ? count : null);
 
     // ─── Direction-clarifying aliases ───
     // WhereIn / WhereOut name the SurrealDB column directly, which is concise but easy
@@ -106,7 +142,7 @@ public sealed class EdgeQuery<TIn, TOut>
     /// </summary>
     public async Task<IReadOnlyList<EdgeRow>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
     {
-        var sql = EdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra);
+        var sql = EdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra, orderClauses, limitCount, startAt);
         using var doc = await transport.ExecuteAsync(sql, ct);
         var rs = new SurrealResultSet(doc.RootElement);
         var rows = rs.ResultAt();
@@ -170,9 +206,14 @@ internal static class EdgeQueryCompiler
         string edgeTable,
         IReadOnlyList<IRecordId>? inFilter,
         IReadOnlyList<IRecordId>? outFilter,
-        IPredicate? extra)
+        IPredicate? extra,
+        IReadOnlyList<OrderClause>? orderClauses = null,
+        int? limit = null,
+        int? start = null)
     {
         var sb = new StringBuilder();
+        // Project id/in/out only — payload fields can drive WHERE/ORDER BY without
+        // needing to come back in the result. Keeps the wire payload minimal.
         sb.Append("SELECT id, in, out FROM ").Append(edgeTable.Identifier());
 
         // Build a small synthetic AST so we can reuse QueryCompiler's predicate visitor for
@@ -192,15 +233,40 @@ internal static class EdgeQueryCompiler
             combined = AddClause(combined, extra);
         }
 
-        if (combined is null)
+        if (combined is not null)
         {
-            sb.Append(';');
-            return sb.ToString();
+            sb.Append(" WHERE ").Append(combined.CompilePredicate());
         }
 
-        var whereClause = combined.CompilePredicate();
-        sb.Append(" WHERE ").Append(whereClause).Append(';');
+        AppendOrderBy(sb, orderClauses);
+        AppendLimit(sb, limit);
+        AppendStart(sb, start);
+
+        sb.Append(';');
         return sb.ToString();
+    }
+
+    private static void AppendOrderBy(StringBuilder sb, IReadOnlyList<OrderClause>? clauses)
+    {
+        if (clauses is null || clauses.Count == 0) return;
+
+        sb.Append(" ORDER BY ");
+        for (var i = 0; i < clauses.Count; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            var c = clauses[i];
+            sb.Append(c.Field.Identifier()).Append(c.Direction == OrderDirection.Descending ? " DESC" : " ASC");
+        }
+    }
+
+    private static void AppendLimit(StringBuilder sb, int? limit)
+    {
+        if (limit is { } n && n > 0) sb.Append(" LIMIT ").Append(n);
+    }
+
+    private static void AppendStart(StringBuilder sb, int? start)
+    {
+        if (start is { } n && n > 0) sb.Append(" START ").Append(n);
     }
 
     private static IPredicate AddClause(IPredicate? existing, IPredicate next)

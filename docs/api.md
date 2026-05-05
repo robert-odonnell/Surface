@@ -189,10 +189,21 @@ public sealed class Query<T> where T : class, IEntity, new()
     public IPredicate? Filter { get; }
     public RecordId? PinnedId { get; }
     public IReadOnlyList<IIncludeNode> Includes { get; }
+    public IReadOnlyList<OrderClause> OrderClauses { get; }
+    public int? LimitCount { get; }
+    public int? StartAt { get; }
 
     public Query<T> Where(IPredicate predicate);
     public Query<T> WithId(IRecordId id);
     public Query<T> WithInclude(IIncludeNode node);
+
+    // Server-side ordering / paging — render as ORDER BY / LIMIT / START at the
+    // tail of the SurrealQL. Pair with the generated {Table}Q factory to type-check
+    // the field reference at the call site.
+    public Query<T> OrderBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
+    public Query<T> ThenBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
+    public Query<T> Limit(int count);   // <= 0 clears the cap
+    public Query<T> Start(int count);   // <= 0 clears the offset
 
     public Task<IReadOnlyList<T>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default);
     public Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(SurrealSession session, ISurrealTransport transport, CancellationToken ct = default);
@@ -201,6 +212,18 @@ public sealed class Query<T> where T : class, IEntity, new()
 ```
 
 `Where` AND-merges across calls. `WithId` overwrites. `WithInclude` is the primitive the generated `Include*` extensions call into. `Compile()` renders the AST to a SurrealQL string with every binding inlined as a literal via `SurrealFormatter` — no separate parameter dictionary.
+
+`Limit` / `Start` / `OrderBy` push search-shape semantics server-side. SurrealQL's clause order is fixed (`WHERE → ORDER BY → LIMIT → START`); the compiler emits in that order regardless of which chain method ran first. Multiple `Limit` / `Start` calls overwrite (last wins); `OrderBy` and `ThenBy` are equivalent — both append a clause — and chain commas in declaration order. Typical search-tool shape:
+
+```csharp
+var topMatches = await Workspace.Query.Symbols
+    .Where(SymbolQ.Name.Contains(query))
+    .OrderBy(SymbolQ.Name)
+    .Limit(20)
+    .ExecuteAsync(transport);
+```
+
+Without these, callers had to pull the full match set and `.Take(N)` / `.OrderBy(...)` in-process — fine for smoke tests, expensive for tool-call latencies on large indexes.
 
 ### Traversal — `{Name}TraversalBuilder` and `{Name}QueryIncludes`
 
@@ -261,6 +284,13 @@ public sealed class EdgeQuery<TIn, TOut>
     public EdgeQuery<TIn, TOut> IncomingTo(IEnumerable<TOut> targets);  // edges where out ∈ targets
 
     public EdgeQuery<TIn, TOut> Where(IPredicate predicate);
+
+    // Server-side ordering / paging — same shape as Query<T>.
+    public EdgeQuery<TIn, TOut> OrderBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
+    public EdgeQuery<TIn, TOut> ThenBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
+    public EdgeQuery<TIn, TOut> Limit(int count);
+    public EdgeQuery<TIn, TOut> Start(int count);
+
     public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default);
 }
 
@@ -270,6 +300,44 @@ public readonly record struct EdgeRow(RecordId Source, RecordId Target);
 `TIn` and `TOut` are id-side types — the concrete `{Name}Id` for single-member sides, or the generated id-side union marker (`IRestrictedById`, `IReferencedById`, …) when 2+ tables participate.
 
 The aliases exist because `WhereIn` / `WhereOut` are easy to misread as "incoming/outgoing" when they actually name the SurrealDB columns directly (`in` = source, `out` = target). For code-index-style queries that pivot heavily on edge direction, `OutgoingFrom(symbol)` and `IncomingTo(symbol)` make intent unambiguous at the call site.
+
+### Edge payload predicate factory — `{Kind}EdgeQ`
+
+For each forward relation kind declared via `ForwardRelation<TPayload>`, the generator emits a `{Kind}EdgeQ` static class — same shape as the entity-side `{Table}Q` factory, one `PropertyExpr<T>` per public scalar property of the payload type. Bare `ForwardRelation` (no payload) produces no factory.
+
+```csharp
+public sealed class UsesPayload
+{
+    public string Kind { get; set; } = "";
+    public string FilePath { get; set; } = "";
+    public int Line { get; set; }
+    public string RunId { get; set; } = "";
+}
+
+public sealed class UsesAttribute : ForwardRelation<UsesPayload>;
+
+// Generator emits, alongside `Uses : IRelationKind`:
+public static class UsesEdgeQ
+{
+    public static readonly PropertyExpr<string> Kind     = new("kind");
+    public static readonly PropertyExpr<string> FilePath = new("file_path");
+    public static readonly PropertyExpr<int>    Line     = new("line");
+    public static readonly PropertyExpr<string> RunId    = new("run_id");
+}
+```
+
+Compose with `EdgeQuery.Where` / `.OrderBy` to push payload-aware filtering and ordering server-side:
+
+```csharp
+var calls = await Workspace.Query.Edges.Uses
+    .OutgoingFrom([symbol.Id])
+    .Where(UsesEdgeQ.Kind.Eq("call"))
+    .OrderBy(UsesEdgeQ.Line)
+    .Limit(50)
+    .ExecuteAsync(transport);
+```
+
+Without the factory, edge payload fields stayed effectively write-only — readable from the wire but not a typed first-class member of the query surface.
 
 ### `LoadAsync`
 
