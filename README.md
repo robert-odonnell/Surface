@@ -139,8 +139,11 @@ Generated files land in `src/Disruptor.Surface.Sample/obj/Debug/net10.0/generate
 ## Running the harness
 
 The sample is a console app that connects to a live SurrealDB, applies the schema,
-seeds three Design aggregates, commits them, then reloads one and prints what came
-back. Useful both as a smoke test and as a worked end-to-end example.
+seeds ten Design aggregates and a Review against one of them, reloads them, then
+exercises the query layer (predicate, traversal, edge), filtered `LoadAsync`,
+`LoadShapeViolationException`, `FetchAsync` top-up, the four flavors of relation
+traversal include, and lease-theft recovery. Useful both as a smoke test and as a
+worked end-to-end example.
 
 ```sh
 surreal start --bind 127.0.0.1:8000 \

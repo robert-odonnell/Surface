@@ -544,6 +544,51 @@ public sealed class QueryCompilerTests
     }
 
     [Fact]
+    public void Compile_RelationInclude_SingleTargetWithNested_WrapsInSelectFromTraversal()
+    {
+        // When the include carries Nested children, the compact `(<traversal>.*)` shape
+        // can't splice them in — switch to the SELECT-FROM form so BuildProjection can
+        // emit the inner field.* / subselect list.
+        var inline = new IncludeInlineRefNode("details");
+        var rel = new IncludeRelationNode(
+            EdgeName: "validates",
+            IsOutgoing: true,
+            ParentSliceKey: "validations",
+            IdsOnly: false,
+            SingleTargetTable: "acceptance_criteria",
+            Filter: null,
+            Nested: [inline]);
+
+        var sql = InvokeWithIncludes("tests", filter: null, pinnedId: null, includes: [rel]);
+
+        Assert.Equal(
+            "SELECT *, (SELECT *, details.* FROM ->validates->acceptance_criteria) AS validations FROM tests;",
+            sql);
+    }
+
+    [Fact]
+    public void Compile_RelationInclude_SingleTargetWithNestedAndFilter_FilterLiftsToSelectWhere()
+    {
+        // The target-side filter that previously rendered as `[WHERE …]` on the traversal
+        // step now lifts to a SELECT-level WHERE since we're inside a SELECT subquery.
+        var inline = new IncludeInlineRefNode("details");
+        var rel = new IncludeRelationNode(
+            EdgeName: "validates",
+            IsOutgoing: true,
+            ParentSliceKey: "validations",
+            IdsOnly: false,
+            SingleTargetTable: "acceptance_criteria",
+            Filter: new EqPredicate("status", "passed"),
+            Nested: [inline]);
+
+        var sql = InvokeWithIncludes("tests", filter: null, pinnedId: null, includes: [rel]);
+
+        Assert.Equal(
+            "SELECT *, (SELECT *, details.* FROM ->validates->acceptance_criteria WHERE status = \"passed\") AS validations FROM tests;",
+            sql);
+    }
+
+    [Fact]
     public void Compile_RelationInclude_CrossAggregateInverse_FiltersOnOut()
     {
         var rel = new IncludeRelationNode(

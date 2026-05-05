@@ -67,10 +67,13 @@ public sealed record IncludeChildrenNode(
 /// </para>
 /// <list type="bullet">
 ///   <item>
-///     <b>Within-aggregate</b> — graph-traversal projection. Forward (outgoing) renders
-///     <c>(->edge->target[WHERE filter].*) AS slice_key</c> for single-target relations,
-///     <c>(->edge->?.*) AS slice_key</c> for multi-target. Inverse (incoming) flips the
-///     arrows: <c>(&lt;-edge&lt;-source.*)</c>. Targets come back as full rows; the
+///     <b>Within-aggregate</b> — graph-traversal projection. Without nested includes,
+///     forward (outgoing) renders <c>(->edge->target[WHERE filter].*) AS slice_key</c>
+///     for single-target relations and <c>(->edge->?.*) AS slice_key</c> for multi-target.
+///     With nested includes, the compiler wraps the traversal in a <c>SELECT</c> so the
+///     nested <c>field.*</c> / subselect list lands in the inner projection:
+///     <c>(SELECT projection FROM ->edge->target [WHERE filter]) AS slice_key</c>.
+///     Inverse (incoming) flips the arrows. Targets come back as full rows; the
 ///     <see cref="Hydrator"/> dispatches each row to the right concrete entity type
 ///     (single-target = direct construction; multi-target = switch on the row's
 ///     <c>id:&lt;table&gt;</c> prefix). Each hydrated target also gets an

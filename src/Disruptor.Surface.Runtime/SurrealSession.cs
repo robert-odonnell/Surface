@@ -555,6 +555,53 @@ public sealed class SurrealSession : IHydrationSink
                         HydrateMergingNested(childRow, children.Nested, sink);
                     }
                     break;
+
+                case Query.IncludeRelationNode relation:
+                    // Mirrors Query<T>.HydrateNested's relation case but with
+                    // dedup-on-tracked: target rows whose id is already in the entities
+                    // dict get HydratePartial (preserving uncommitted writes) instead of
+                    // the relation's full-hydrate callback. Slice marking + edge synth
+                    // are identical to the read-mode path.
+                    if (hasOwnerId)
+                    {
+                        sink.MarkSliceLoaded(ownerId, relation.ParentSliceKey);
+                    }
+                    if (!row.TryGetProperty(relation.ParentSliceKey, out var relArr)) continue;
+                    if (relArr.ValueKind != JsonValueKind.Array) continue;
+
+                    if (relation.IdsOnly)
+                    {
+                        foreach (var edgeRow in relArr.EnumerateArray())
+                        {
+                            if (edgeRow.ValueKind != JsonValueKind.Object) continue;
+                            if (!HydrationJson.TryReadRecordId(edgeRow, "in", out var src)) continue;
+                            if (!HydrationJson.TryReadRecordId(edgeRow, "out", out var dst)) continue;
+                            sink.Edge(src, relation.EdgeName, dst);
+                        }
+                    }
+                    else
+                    {
+                        foreach (var targetRow in relArr.EnumerateArray())
+                        {
+                            if (targetRow.ValueKind != JsonValueKind.Object) continue;
+                            if (HydrationJson.TryReadRecordId(targetRow, "id", out var targetId)
+                                && entities.TryGetValue(targetId, out var existingTarget))
+                            {
+                                existingTarget.HydratePartial(targetRow, sink);
+                            }
+                            else
+                            {
+                                relation.Hydrator?.Invoke(targetRow, sink);
+                            }
+                            if (!hasOwnerId) continue;
+                            if (!HydrationJson.TryReadRecordId(targetRow, "id", out var tgtForEdge)) continue;
+                            var src = relation.IsOutgoing ? ownerId : tgtForEdge;
+                            var dst = relation.IsOutgoing ? tgtForEdge : ownerId;
+                            sink.Edge(src, relation.EdgeName, dst);
+                            HydrateMergingNested(targetRow, relation.Nested, sink);
+                        }
+                    }
+                    break;
             }
         }
     }

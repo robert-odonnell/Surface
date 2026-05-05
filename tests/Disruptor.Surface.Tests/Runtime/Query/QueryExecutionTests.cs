@@ -44,6 +44,22 @@ public sealed class QueryExecutionTests
     }
 
     [Fact]
+    public void WithId_TableMismatch_ThrowsBeforeAnythingIsBound()
+    {
+        // Without the guard, Query.Designs.WithId(constraintId).LoadAsync(...) would
+        // silently rewrite the lookup to designs:<constraintId.Value> via RecordId.From
+        // dropping the supplied id's Table. That's a silent data corruption hazard —
+        // fail at the API boundary instead.
+        var wrongTableId = new TestEntityId("constraints", "01HX7AF5");
+
+        var ex = Assert.Throws<ArgumentException>(
+            () => new Query<TestEntity>("designs").WithId(wrongTableId));
+        Assert.Contains("designs", ex.Message);
+        Assert.Contains("constraints", ex.Message);
+        Assert.Equal("id", ex.ParamName);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_HydratesEachReturnedRow()
     {
         // Two rows in the result; each populates the entity's _description backing

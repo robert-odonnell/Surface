@@ -137,11 +137,12 @@ Predicate AST + Includes AST + PinnedId
         v
 QueryCompiler.Compile
         |
-        +--> SurrealQL: SELECT *, field.*, (SELECT … FROM child WHERE parent = $parent.id) AS …
-        +--> Bindings dict: $p0 → "x", $p1 → recordId, …
+        +--> SurrealQL with all values inlined as literals via SurrealFormatter:
+             SELECT *, field.*, (SELECT … FROM child WHERE parent = $parent.id) AS …
+             WHERE description = "x" AND id = constraints:01HX…
         |
         v
-SurrealHttpClient (inlines bindings, posts JSON-RPC)
+SurrealHttpClient (posts JSON-RPC, params[1] = {})
 ```
 
 Generator-emitted hydrator delegates on each `IncludeChildrenNode` capture the right concrete `new TChild()` + `Hydrate` at codegen time, so the runtime walks the JSON without reflection. `Fetch` reuses the same compile-and-hydrate path but dispatches to `IEntity.HydratePartial` when an entity is already tracked — pending writes survive a top-up via the `IHydrationSink.HasPendingWrite` guard.
@@ -252,14 +253,15 @@ This is optimistic concurrency, not pessimistic locking. Two writers can both ac
 Generated code depends only on `ISurrealTransport`:
 
 ```csharp
-Task<JsonDocument> ExecuteAsync(string sql, object? vars = null, CancellationToken ct = default);
+Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default);
 ```
+
+The signature is intentionally minimal: a SurrealQL string in, a `JsonDocument` out. There is no separate parameter dictionary — every value (record ids, strings, numbers) is rendered as a SurrealQL literal by `SurrealFormatter` at the call site (`QueryCompiler`, `SurrealCommandEmitter`) before reaching the transport. SurrealDB's JSON-RPC binder treats record-shaped objects as generic `Object`s rather than `Thing`s, so a query like `WHERE id = $p0` bound through JSON vars never matches; SurrealQL literal syntax (`table:value`) is parsed at the query level and preserves type. Inlining at the codegen layer also lifts the per-batch statement ceiling that `LET $p0 = …;` prefixes hit on large commits.
 
 `SurrealHttpClient` is the included implementation. It:
 
 - Signs in to SurrealDB via `/signin` and caches the bearer token.
-- Posts JSON-RPC 2.0 envelopes (`{"method": "query", "params": [<sql>, {}]}`) to `/rpc`.
-- Inlines the supplied `vars` into the SurrealQL via `SurrealFormatter` rather than passing them in `params[1]`. SurrealDB's JSON-RPC binder treats record-shaped objects as generic `Object`s, not `Thing`s, so a query like `WHERE id = $p0` bound through JSON vars never matches; SurrealQL literal syntax (`table:value`) is parsed at the query level and preserves type. The bypass also lifts the per-batch statement ceiling that `LET $p0 = …;` prefixes hit on large commits.
+- Posts JSON-RPC 2.0 envelopes (`{"method": "query", "params": [<sql>, {}]}`) to `/rpc` — `params[1]` is always the empty bindings object.
 - Applies namespace and database headers.
 - Extracts `result` from the RPC response envelope; surfaces typed errors via `SurrealException` / `WriterLeaseStolenException`.
 - Retries selected retryable transport failures.

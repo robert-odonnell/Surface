@@ -55,10 +55,23 @@ public sealed class Query<T>
 
     /// <summary>
     /// Pins the query to a single record id. Subsequent <see cref="Where"/> calls still
-    /// apply, AND-merged with the id pin.
+    /// apply, AND-merged with the id pin. Throws <see cref="ArgumentException"/> when the
+    /// supplied id's table doesn't match the query's table — without this guard a
+    /// <c>Query.Designs.WithId(constraintId)</c> would silently rewrite the lookup to
+    /// <c>designs:&lt;constraintId.Value&gt;</c> and either return nothing or hit the
+    /// wrong row.
     /// </summary>
     public Query<T> WithId(IRecordId id)
-        => new(Table, Filter, RecordId.From(id), Includes);
+    {
+        if (!string.Equals(id.Table, Table, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Id table mismatch: query targets '{Table}' but id was '{id.Table}:{id.ToLiteral()}'. " +
+                "Pass an id whose table matches the query's table.",
+                nameof(id));
+        }
+        return new(Table, Filter, RecordId.From(id), Includes);
+    }
 
     /// <summary>
     /// Adds a traversal node to the query. The generated <c>Include*</c> extension

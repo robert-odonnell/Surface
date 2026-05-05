@@ -107,10 +107,15 @@ internal static class QueryCompiler
     /// Render an <see cref="IncludeRelationNode"/> as a SurrealQL projection element.
     /// Two shapes:
     /// <list type="bullet">
-    ///   <item><b>Within-aggregate</b> (<c>IdsOnly == false</c>) — graph-traversal projection
-    ///         <c>(->edge->? .*) AS slice</c>, with arrow direction flipped for inverse and
-    ///         the target step narrowed to a specific table when single-target so a
-    ///         target-side filter can attach via <c>[WHERE …]</c>.</item>
+    ///   <item><b>Within-aggregate</b> (<c>IdsOnly == false</c>) — graph-traversal projection.
+    ///         When the include has no nested traversals, emits the compact
+    ///         <c>(->edge->step[WHERE filter].*) AS slice</c>. When it has nested
+    ///         includes, wraps the traversal in a <c>SELECT</c> so the inner projection
+    ///         can splice in the nested <c>field.*</c> / subselect list:
+    ///         <c>(SELECT projection FROM ->edge->step [WHERE filter]) AS slice</c>.
+    ///         Arrow direction flips for inverse traversals; the target step narrows to a
+    ///         specific table for single-target relations and stays <c>?</c> for
+    ///         multi-target.</item>
     ///   <item><b>Cross-aggregate</b> (<c>IdsOnly == true</c>) — edge subselect
     ///         <c>(SELECT id, in, out FROM edge WHERE in/out = $parent.id) AS slice</c>.
     ///         Mirrors the legacy aggregate loader's edge-row shape so the runtime can
@@ -135,8 +140,22 @@ internal static class QueryCompiler
         // to it so a target-side filter can attach.
         var arrow = node.IsOutgoing ? "->" : "<-";
         var step = node.SingleTargetTable is { } target ? target.Identifier() : "?";
-        var filterClause = node.Filter is null ? "" : $"[WHERE {node.Filter.CompilePredicate()}]";
-        return $"({arrow}{edge}{arrow}{step}{filterClause}.*) AS {alias}";
+
+        if (node.Nested.Count == 0)
+        {
+            // Compact form — no inner projection list to emit, so use the short
+            // `(<traversal>.*)` shape.
+            var filterClause = node.Filter is null ? "" : $"[WHERE {node.Filter.CompilePredicate()}]";
+            return $"({arrow}{edge}{arrow}{step}{filterClause}.*) AS {alias}";
+        }
+
+        // Nested includes present — wrap the traversal in a SELECT so BuildProjection
+        // can splice the nested `field.*` / subselect list in. The traversal expression
+        // is the FROM source; predicate filter (if any) lifts to a SELECT-level WHERE.
+        var inner = BuildProjection(node.Nested);
+        var traversal = $"{arrow}{edge}{arrow}{step}";
+        var where = node.Filter is null ? "" : $" WHERE {node.Filter.CompilePredicate()}";
+        return $"(SELECT {inner} FROM {traversal}{where}) AS {alias}";
     }
 
     /// <summary>
