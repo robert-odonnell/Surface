@@ -345,6 +345,33 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
+    public void RelateOnce_NeverEmitsUpsertOnRelationTable_RegressionGuard()
+    {
+        // SurrealDB rejects `UPSERT edge_table:<hash> CONTENT { in, out, … }` on
+        // `TYPE RELATION ENFORCED` tables — the row writes but never registers as a
+        // graph edge, so `->edge->` traversal returns empty (preview.12 bug). This
+        // test pins the only SQL shape SurrealDB accepts: RELATE with an explicit
+        // edge id. Any drift back to UPSERT for RelateOnce would silently break every
+        // consumer using ENFORCED relation schemas.
+        var session = new SurrealSession();
+        session.RelateOnce(new RecordId("code_symbols", "a"), new RecordId("code_symbols", "b"), "uses",
+            new Dictionary<string, object?> { ["kind"] = "call" });
+
+        var sql = SurrealCommandEmitter.Emit(session.Log.Entries);
+
+        Assert.DoesNotContain("UPSERT", sql);
+        Assert.StartsWith("RELATE code_symbols:a->uses:", sql);
+        Assert.Contains("->code_symbols:b CONTENT { kind: \"call\" };", sql);
+
+        // Determinism: same input → same edge id → same SQL string. Re-running the
+        // commit on a tracked triple lands on the same edge row.
+        var second = new SurrealSession();
+        second.RelateOnce(new RecordId("code_symbols", "a"), new RecordId("code_symbols", "b"), "uses",
+            new Dictionary<string, object?> { ["kind"] = "call" });
+        Assert.Equal(sql, SurrealCommandEmitter.Emit(second.Log.Entries));
+    }
+
+    [Fact]
     public void RelateOnce_WithoutPayload_OmitsContentClause()
     {
         // No payload → no CONTENT clause. The RELATE itself encodes in/out, so an empty

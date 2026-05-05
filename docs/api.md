@@ -247,8 +247,17 @@ public sealed class EdgeQuery<TIn, TOut>
     where TIn : IRecordId
     where TOut : IRecordId
 {
+    // Canonical filters — name the SurrealDB column directly.
     public EdgeQuery<TIn, TOut> WhereIn(IEnumerable<TIn> ids);
     public EdgeQuery<TIn, TOut> WhereOut(IEnumerable<TOut> ids);
+
+    // Direction-clarifying aliases — same wire SQL as WhereIn/WhereOut, named after
+    // the role rather than the column. Pick whichever reads better at the call site.
+    public EdgeQuery<TIn, TOut> WhereSource(IEnumerable<TIn> ids);     // ≡ WhereIn
+    public EdgeQuery<TIn, TOut> WhereTarget(IEnumerable<TOut> ids);    // ≡ WhereOut
+    public EdgeQuery<TIn, TOut> OutgoingFrom(IEnumerable<TIn> sources); // edges where in ∈ sources
+    public EdgeQuery<TIn, TOut> IncomingTo(IEnumerable<TOut> targets);  // edges where out ∈ targets
+
     public EdgeQuery<TIn, TOut> Where(IPredicate predicate);
     public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default);
 }
@@ -257,6 +266,8 @@ public readonly record struct EdgeRow(RecordId Source, RecordId Target);
 ```
 
 `TIn` and `TOut` are id-side types — the concrete `{Name}Id` for single-member sides, or the generated id-side union marker (`IRestrictedById`, `IReferencedById`, …) when 2+ tables participate.
+
+The aliases exist because `WhereIn` / `WhereOut` are easy to misread as "incoming/outgoing" when they actually name the SurrealDB columns directly (`in` = source, `out` = target). For code-index-style queries that pivot heavily on edge direction, `OutgoingFrom(symbol)` and `IncomingTo(symbol)` make intent unambiguous at the call site.
 
 ### `LoadAsync`
 

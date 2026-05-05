@@ -111,6 +111,43 @@ public sealed class EdgeQueryTests
     }
 
     [Fact]
+    public async Task DirectionAliases_OutgoingFromAndWhereSource_EmitInColumnFilter()
+    {
+        // Aliases (WhereSource / OutgoingFrom) must produce the same SQL as the
+        // canonical WhereIn — the names exist for read clarity at the call site, not
+        // for any semantic difference. Same wire SQL = no behavioural drift.
+        var src = new[] { new TestSrcId("constraints", "01HX7AF5") };
+        var canonical = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+        var sourceAlias = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+        var outgoingAlias = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+
+        await new EdgeQuery<TestSrcId, TestTgtId>("restricts").WhereIn(src).ExecuteAsync(canonical);
+        await new EdgeQuery<TestSrcId, TestTgtId>("restricts").WhereSource(src).ExecuteAsync(sourceAlias);
+        await new EdgeQuery<TestSrcId, TestTgtId>("restricts").OutgoingFrom(src).ExecuteAsync(outgoingAlias);
+
+        Assert.Equal(canonical.SqlSeen[0], sourceAlias.SqlSeen[0]);
+        Assert.Equal(canonical.SqlSeen[0], outgoingAlias.SqlSeen[0]);
+        Assert.Contains("WHERE in IN", canonical.SqlSeen[0]);
+    }
+
+    [Fact]
+    public async Task DirectionAliases_IncomingToAndWhereTarget_EmitOutColumnFilter()
+    {
+        var tgt = new[] { new TestTgtId("user_stories", "01HX7AF7") };
+        var canonical = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+        var targetAlias = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+        var incomingAlias = new RecordingTransport().ScriptResponse(EmptyEnvelope);
+
+        await new EdgeQuery<TestSrcId, TestTgtId>("restricts").WhereOut(tgt).ExecuteAsync(canonical);
+        await new EdgeQuery<TestSrcId, TestTgtId>("restricts").WhereTarget(tgt).ExecuteAsync(targetAlias);
+        await new EdgeQuery<TestSrcId, TestTgtId>("restricts").IncomingTo(tgt).ExecuteAsync(incomingAlias);
+
+        Assert.Equal(canonical.SqlSeen[0], targetAlias.SqlSeen[0]);
+        Assert.Equal(canonical.SqlSeen[0], incomingAlias.SqlSeen[0]);
+        Assert.Contains("WHERE out IN", canonical.SqlSeen[0]);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_EmptyResult_ReturnsEmptyList()
     {
         var transport = new RecordingTransport().ScriptResponse(EmptyEnvelope);

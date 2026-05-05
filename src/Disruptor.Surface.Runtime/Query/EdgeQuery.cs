@@ -81,6 +81,24 @@ public sealed class EdgeQuery<TIn, TOut>
         return new(edgeTable, inFilter, outFilter, combined);
     }
 
+    // ─── Direction-clarifying aliases ───
+    // WhereIn / WhereOut name the SurrealDB column directly, which is concise but easy
+    // to misread as "incoming/outgoing." The aliases below name the *role* on each
+    // side instead — call sites become unambiguous: "edges originating from X" picks
+    // OutgoingFrom; "edges landing on X" picks IncomingTo. Same wire SQL either way.
+
+    /// <summary>Source-side filter — alias for <see cref="WhereIn"/>. Restricts the edge's <c>in</c> column.</summary>
+    public EdgeQuery<TIn, TOut> WhereSource(IEnumerable<TIn> ids) => WhereIn(ids);
+
+    /// <summary>Target-side filter — alias for <see cref="WhereOut"/>. Restricts the edge's <c>out</c> column.</summary>
+    public EdgeQuery<TIn, TOut> WhereTarget(IEnumerable<TOut> ids) => WhereOut(ids);
+
+    /// <summary>Edges originating from the given sources — filters <c>in</c>. Reads more naturally than <see cref="WhereIn"/> at the call site for outgoing-edge queries.</summary>
+    public EdgeQuery<TIn, TOut> OutgoingFrom(IEnumerable<TIn> sources) => WhereIn(sources);
+
+    /// <summary>Edges landing on the given targets — filters <c>out</c>. Reads more naturally than <see cref="WhereOut"/> at the call site for incoming-edge queries.</summary>
+    public EdgeQuery<TIn, TOut> IncomingTo(IEnumerable<TOut> targets) => WhereOut(targets);
+
     /// <summary>
     /// Compiles the AST to SurrealQL, executes via <paramref name="transport"/>, and
     /// projects each row to an <see cref="EdgeRow"/>. Returns an empty list on null /
