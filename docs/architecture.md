@@ -223,6 +223,10 @@ The planned phases are:
 5. Relation additions.
 6. Final deletes.
 
+Fresh records (Create intent + no prior existence) fold their pending sets into a single `CREATE record:id CONTENT { … }` statement. SurrealDB's `TYPE RELATION ENFORCED` validates relation endpoints against the in-progress transactional state at the moment of `RELATE`; the single-statement form lands the endpoint fully populated before any relation-creating statement runs, where a bare `CREATE id;` followed by per-field `UPDATE id SET …` (or `UPSERT`) can leave the record in a state the enforcer rejects.
+
+Idempotent relations (`session.RelateOnce`) flow through `pending.Relations` with a sticky flag and emit `RELATE source -> edge_table:<deterministic-hash> -> target [CONTENT { … }]` — a graph-traversable edge with a content-derived id, safe to re-run.
+
 `SurrealCommandEmitter` renders the final command list to a single SurrealQL script plus parameters.
 
 ## Writer Coordination

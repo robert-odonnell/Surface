@@ -129,6 +129,17 @@ public sealed class RelationPendingState(string kind, RecordId source, RecordId 
     public RelationFinalState State { get; set; } = RelationFinalState.Untouched;
     public Dictionary<string, object?> PayloadSets { get; } = [];
     public HashSet<string> PayloadUnsets { get; } = [];
+
+    /// <summary>
+    /// Sticky flag — set by <see cref="CommandOp.RelateOnce"/>, read by
+    /// <see cref="CommitPlanner.EmitRelation"/> to choose between rendering as
+    /// <c>RELATE source-&gt;edge-&gt;target</c> (auto-id, non-idempotent) and
+    /// <c>RELATE source-&gt;edge:&lt;hash&gt;-&gt;target</c> (deterministic id, idempotent).
+    /// Once flipped to true, a subsequent plain <c>Relate</c> on the same triple does
+    /// NOT clear it — re-running a deterministic relate plus a payload bump still wants
+    /// the same edge row.
+    /// </summary>
+    public bool Idempotent { get; set; }
 }
 
 /// <summary>
@@ -269,6 +280,29 @@ public sealed class PendingState(
 
                 break;
             }
+            case CommandOp.RelateOnce:
+            {
+                // Same accumulation as Relate, but the deterministic-id flag stays
+                // sticky so EmitRelation renders RELATE source->edge:<hash>->target
+                // (graph-traversable + idempotent) instead of the auto-id RELATE
+                // source->edge->target. Mixing Relate and RelateOnce on the same
+                // (kind, source, target) triple in one session is unusual; if it
+                // happens, RelateOnce wins because once-deterministic-always-
+                // deterministic is the safer default for re-runs.
+                var rel = GetOrCreateRelation(c.Key!, c.Target, (RecordId)c.Value!);
+                rel.State = RelationFinalState.Related;
+                rel.Idempotent = true;
+                if (c.EdgeContent is { } onceContent)
+                {
+                    foreach (var (k, v) in onceContent)
+                    {
+                        rel.PayloadUnsets.Remove(k);
+                        rel.PayloadSets[k] = v;
+                    }
+                }
+
+                break;
+            }
             case CommandOp.Unrelate:
             {
                 var rel = GetOrCreateRelation(c.Key!, c.Target, (RecordId)c.Value!);
@@ -353,6 +387,7 @@ public sealed class PendingState(
             var dst = new RelationPendingState(src.Kind, src.Source, src.Target, src.ExistedAtStart)
             {
                 State = src.State,
+                Idempotent = src.Idempotent,
             };
             foreach (var (k, v) in src.PayloadSets) dst.PayloadSets[k] = v;
             foreach (var u in src.PayloadUnsets) dst.PayloadUnsets.Add(u);

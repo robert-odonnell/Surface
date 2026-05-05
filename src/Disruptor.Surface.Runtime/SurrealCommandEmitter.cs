@@ -15,7 +15,13 @@ public static class SurrealCommandEmitter
             switch (c.Op)
             {
                 case CommandOp.Create:
-                    sb.Append("CREATE ").Append(FormatId(c.Target)).Append(";\n");
+                    sb.Append("CREATE ").Append(FormatId(c.Target));
+                    if (c.Value is IReadOnlyDictionary<string, object?> { Count: > 0 } createContent)
+                    {
+                        sb.Append(" CONTENT ");
+                        AppendContent(createContent);
+                    }
+                    sb.Append(";\n");
                     break;
 
                 case CommandOp.Upsert:
@@ -197,6 +203,20 @@ public readonly record struct Command(
 {
     public static Command Create(RecordId target) =>
         new(CommandOp.Create, target);
+
+    /// <summary>
+    /// Fresh record create with full payload — renders as
+    /// <c>CREATE record:id CONTENT { … };</c>. Used by <see cref="CommitPlanner"/> for
+    /// any newly-tracked record so endpoints exist with their full schema-required
+    /// content before <c>RELATE</c> statements run within the same transaction.
+    /// SurrealDB's <c>TYPE RELATION ENFORCED</c> validates relation endpoints against
+    /// the in-progress transactional state at the moment of <c>RELATE</c>; bare
+    /// <c>CREATE id;</c> followed by <c>UPDATE id SET …</c> can leave the endpoint
+    /// in a state the enforcer rejects, while <c>CREATE id CONTENT { … }</c> lands
+    /// the record fully populated in one statement.
+    /// </summary>
+    public static Command Create(RecordId target, IDictionary<string, object?>? content) =>
+        new(CommandOp.Create, target, Value: content is null ? null : Freeze(content));
 
     public static Command Upsert(RecordId target, IDictionary<string, object?>? content = null) =>
         new(CommandOp.Upsert, target, Value: content is null ? null : Freeze(content));

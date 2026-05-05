@@ -302,12 +302,17 @@ public static class CommitPlanner
                 return;
             }
 
-            // Fold all sets into a CREATE CONTENT { … } payload via Upsert (the emitter
-            // writes UPSERT … CONTENT, which works as create-or-update; safer for
-            // re-create-in-same-packet sequences than a bare CREATE that would error
-            // if the record happened to still exist).
+            // Fold all sets into a single CREATE CONTENT { … } statement so the
+            // record lands fully populated in one go. SurrealDB's TYPE RELATION
+            // ENFORCED validates relation endpoints against the in-progress
+            // transactional state at the moment of RELATE — endpoints created with a
+            // bare CREATE followed by per-field UPDATE-SET (or even UPSERT-CONTENT in
+            // some versions) can fail the enforcer's validation while a single
+            // CREATE id CONTENT { … } reliably satisfies it. Closed segments above
+            // already emit DELETEs ahead of any re-create, so the bare CREATE can't
+            // collide with a same-packet existing row.
             creates.Add(final.Sets.Count > 0
-                ? Command.Upsert(rec.Id, final.Sets)
+                ? Command.Create(rec.Id, final.Sets)
                 : Command.Create(rec.Id));
             foreach (var unsetField in final.Unsets)
             {
@@ -348,6 +353,14 @@ public static class CommitPlanner
         List<Command> removals,
         List<Command> additions)
     {
+        // Two factories — pick once based on the sticky Idempotent flag so the
+        // RELATE-with-explicit-edge-id form lands whenever the user reached for
+        // RelateOnce. Auto-id RELATE goes on the wire for non-idempotent calls.
+        Command BuildRelate(IReadOnlyDictionary<string, object?>? content)
+            => rel.Idempotent
+                ? Command.RelateOnce(rel.Source, rel.Kind, rel.Target, content)
+                : Command.Relate(rel.Source, rel.Kind, rel.Target, content);
+
         switch (rel.State)
         {
             case RelationFinalState.Untouched:
@@ -355,7 +368,7 @@ public static class CommitPlanner
                 // if there's payload, otherwise nothing to do.
                 if (rel.PayloadSets.Count > 0 || rel.PayloadUnsets.Count > 0)
                 {
-                    additions.Add(Command.Relate(rel.Source, rel.Kind, rel.Target,
+                    additions.Add(BuildRelate(
                         rel.PayloadSets.Count > 0 ? new Dictionary<string, object?>(rel.PayloadSets) : null));
                 }
 
@@ -368,7 +381,7 @@ public static class CommitPlanner
                     break;
                 }
 
-                additions.Add(Command.Relate(rel.Source, rel.Kind, rel.Target,
+                additions.Add(BuildRelate(
                     rel.PayloadSets.Count > 0 ? new Dictionary<string, object?>(rel.PayloadSets) : null));
                 break;
 

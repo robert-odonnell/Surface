@@ -594,6 +594,72 @@ public sealed class CommitPlannerTests
         return -1;
     }
 
+    [Fact]
+    public void Created_WithSets_FoldsInto_CreateContent_NotUpsertContent()
+    {
+        // SurrealDB's TYPE RELATION ENFORCED validates relation endpoints against the
+        // in-progress transactional state at the moment of RELATE. UPSERT id CONTENT
+        // (the previous shape) leaves the endpoint in a state the enforcer can reject;
+        // CREATE id CONTENT lands the record fully populated in one statement and the
+        // enforcer accepts it. Pin this so the planner doesn't drift back to UPSERT.
+        var pending = Empty();
+        var sym = new RecordId("code_symbols", "alpha");
+        pending.ApplyCommand(Command.Create(sym));
+        pending.ApplyCommand(Command.Set(sym, "name", "alpha"));
+        pending.ApplyCommand(Command.Set(sym, "kind", "method"));
+
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
+        var sql = SurrealCommandEmitter.Emit(plan);
+
+        Assert.Contains("CREATE code_symbols:alpha CONTENT { name: \"alpha\", kind: \"method\" };", sql);
+        Assert.DoesNotContain("UPSERT", sql);
+    }
+
+    [Fact]
+    public void RelateOnce_FlowsThroughPlanner_AndEmitsRelateWithDeterministicEdgeId()
+    {
+        // The PendingState ApplyCommand path used to silently drop CommandOp.RelateOnce,
+        // so calling session.RelateOnce(...) produced no RELATE on the wire — relations
+        // never materialized for any caller using the idempotent verb. The fix routes
+        // RelateOnce through pending.Relations with the Idempotent flag, so EmitRelation
+        // picks the deterministic-id RELATE shape SurrealDB accepts on TYPE RELATION
+        // ENFORCED tables.
+        var pending = Empty();
+        var src = new RecordId("code_symbols", "src");
+        var tgt = new RecordId("code_symbols", "tgt");
+        pending.ApplyCommand(Command.RelateOnce(src, "calls", tgt,
+            new Dictionary<string, object?> { ["kind"] = "call" }));
+
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
+        var sql = SurrealCommandEmitter.Emit(plan);
+
+        Assert.Contains("RELATE code_symbols:src->calls:", sql);
+        Assert.Contains("->code_symbols:tgt CONTENT { kind: \"call\" };", sql);
+        // Critical: the auto-id RELATE form (no explicit edge id) is what the previous
+        // path emitted when RelateOnce was downgraded; it must NOT be the shape emitted
+        // for an idempotent-flagged relation.
+        Assert.DoesNotContain("RELATE code_symbols:src->calls->", sql);
+    }
+
+    [Fact]
+    public void Relate_RemainsAutoId_AndDoesNotMimic_RelateOnce()
+    {
+        // Regression: plain Relate must keep the auto-id RELATE source->edge->target
+        // shape. Mixing RelateOnce semantics into plain Relate would silently change
+        // edge-row identity for everyone who relies on the existing duplicate behaviour.
+        var pending = Empty();
+        var src = new RecordId("a", "1");
+        var tgt = new RecordId("b", "2");
+        pending.ApplyCommand(Command.Relate(src, "links", tgt,
+            new Dictionary<string, object?> { ["k"] = "v" }));
+
+        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
+        var sql = SurrealCommandEmitter.Emit(plan);
+
+        Assert.Contains("RELATE a:1->links->b:2 CONTENT { k: \"v\" };", sql);
+        Assert.DoesNotContain("RELATE a:1->links:", sql);
+    }
+
     private sealed class StubRegistry : IReferenceRegistry
     {
         private readonly List<ReferenceFieldInfo> infos;
