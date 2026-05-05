@@ -1,285 +1,887 @@
-That changes the emphasis: you don’t mainly want “table queries”; you want **typed graph/path queries with set operators**.
+- projections because thats the natural expression of the query 
+- tightening up the transports (http and embedded) with embedded mode, i want to leverage the full 
+potential of surreal db and not do "database-y" things in the core.
 
-So I’d make the generated query layer **edge-aware first-class**, not bolt edges on afterwards.
+Reclassify them like this:
 
-The natural shape should match your vocalisation:
+```text
+Core foundation:
+- generated typed query shape
+- graph/edge query support
+- inspectable SurrealQL rendering
 
-> “These features have these restrictions via constraints.”
+Core completion:
+- projections
+- transport cleanup / embedded execution
 
-That is a path:
-
-```text id="1xj8o1"
-Feature
-  <- concerns/restricts/targets/etc
-Constraint
-  -> restricts
-UserStory / Feature / etc
+Later extras:
+- live query ergonomics
+- advanced search/index annotations
+- edge payload sugar
+- query planning hints
 ```
 
-Or more generally:
+## Projections are not polish
 
-```text id="lgw45h"
-source set
-  traverse edge(s)
-  filter intermediate nodes
-  filter target nodes
-  project / group / count
+Projection is the natural end of a query.
+
+A query without projection is basically:
+
+```text
+WHERE + ORDER + LIMIT + give me whatever default row shape exists
 ```
 
-## Recommended query API shape
+Useful for a demo, but not the full idea.
 
-I’d add a path query layer like this:
+The proper shape is:
 
-```csharp id="4ynoby"
-var result = await workspace.Query.Features
-    .Where(FeatureQ.Id.In(featureIds))
-    .ViaIncoming<Restricts, Constraint>()
-    .Where(ConstraintQ.Description.Contains("security"))
-    .Project(FeatureRestrictionProjections.FeatureWithRestrictions)
+```csharp
+var results = await workspace.Search.CodeSymbols
+    .Where(CodeSymbolQ.AnyText.Contains(trimmed))
+    .OrderBy(CodeSymbolQ.QualifiedName)
+    .Limit(20)
+    .Select(CodeSymbolProjections.SearchResult)
     .ExecuteAsync(db, ct);
 ```
 
-But I’d also generate named helpers, because they will read much better:
+And projection should not just be a C# materializer. It should own the **SurrealQL select list**:
 
-```csharp id="wn7ujv"
-var result = await workspace.Query.Features
-    .WhereIdIn(featureIds)
-    .RestrictedByConstraints()
-    .Select(FeatureProjections.WithRestrictions)
+```sql id="ep5tf1"
+SELECT
+    id.id() AS id,
+    kind,
+    name,
+    qualified_name,
+    signature,
+    file_path,
+    line,
+    column
+FROM code_symbols
+...
+```
+
+That is the key. Projection is where you stop loading too much and let SurrealDB shape the answer.
+
+So I’d model projection as:
+
+```csharp
+public interface ISurfaceProjection<TRow>
+{
+    QuerySelectList Select { get; }
+    TRow Materialize(SurrealRow row);
+}
+```
+
+Generated projection:
+
+```csharp
+public static class CodeSymbolProjections
+{
+    public static ISurfaceProjection<CodeSymbolSearchResult> SearchResult { get; }
+    public static ISurfaceProjection<CodeSymbolNavigationItem> NavigationItem { get; }
+    public static ISurfaceProjection<CodeSymbolLocation> Location { get; }
+}
+```
+
+Later you can add user-defined projections, but generated projections first. Keep the first cut deterministic.
+
+## Transport tightening is also core-aligned
+
+This is the more architectural one.
+
+Our core premise is:
+
+```text
+Surface should generate typed SurrealDB intent, not implement database behaviour.
+```
+
+So the runtime boundary should not feel like:
+
+```csharp
+ISurrealTransport.ExecuteAsync(string sql, object? vars)
+```
+
+forever. That was fine as a first seam, but it is too HTTP-shaped and too stringly.
+
+I’d evolve it toward:
+
+```csharp
+public interface ISurrealExecutor : IAsyncDisposable
+{
+    Task<SurrealResultSet> ExecuteAsync(
+        SurrealQueryCommand command,
+        CancellationToken ct = default);
+}
+```
+
+Where:
+
+```csharp
+public sealed record SurrealQueryCommand(
+    string Sql,
+    IReadOnlyDictionary<string, object?> Parameters,
+    SurrealExecutionMode Mode);
+```
+
+And implementations are just adapters:
+
+```text
+Surface.Transport.Http
+Surface.Transport.Embedded
+Surface.Transport.JsonRpc
+```
+
+The generator/runtime should not care whether the command goes over HTTP, embedded engine, or later WebSocket. It should care about:
+
+```text
+SQL
+parameters
+result shape
+materialization
+diagnostics
+```
+
+## Embedded mode changes the incentive
+
+If embedded mode is viable for your target, then yes: that pushes even harder toward “let SurrealDB do the work.”
+
+Because then SurrealDB is not a remote service you’re trying to avoid calling. It is your local graph/query engine. At that point, doing database-style filtering/traversal in Surface core is actively daft.
+
+Embedded mode wants this kind of design:
+
+```text
+Surface generated query
+    -> SurrealQL
+        -> embedded SurrealDB engine
+            -> result set
+                -> generated projection materializer
+```
+
+Not:
+
+```text
+load a pile of rows
+    -> hydrate session
+        -> walk dictionaries
+            -> pretend we queried
+```
+
+The second one is just building a worse database out of C# collections. A bold strategy, usually followed by regret and tea.
+
+## Thoughts
+
+This order:
+
+```text
+1. Stabilise generated query AST and rendering. (we're getting close with this one)
+2. Add projections as the real query endpoint.
+3. Refactor transport from HTTP-shaped transport to executor-shaped boundary.
+4. Refactor embedded executor. 
+5. Then dogfood edge/path queries hard. 
+```
+
+We probably should not have done embedded before projections. Without projections, embedded just makes the wrong query shape faster.
+
+We probably should not do projections before the query AST is stable. Otherwise the projection contract is more of a wet-napkin.
+
+We need to target this: 
+
+```csharp
+private readonly Dictionary<RecordId, IEntity> entities = [];
+private readonly Dictionary<RecordId, RecordId> parents = [];
+private readonly Dictionary<(RecordId Owner, string Field), RecordId> references = [];
+private readonly Dictionary<(RecordId Source, string Edge, RecordId Target), bool> edges = [];
+private readonly Dictionary<RecordId, HashSet<string>> loadedSlices = [];
+```
+
+Because we've baked in graph operations and traversal in right at the core... this is necessary for http transport for performance reasons, waste of time for embedded.
+
+So it not really “transport” in the narrow sense. It is **session read strategy**.
+
+The dictionaries are a **materialized graph slice**.
+
+That is useful when:
+
+```text
+HTTP transport
+known aggregate/session load
+sync property reads
+edit snapshot
+avoid chatty database calls
+```
+
+It is not useful when:
+
+```text
+embedded engine
+projection query
+graph traversal
+search/list/discovery
+database can execute locally
+```
+
+For embedded, building and walking `edges` in C# is often just doing SurrealDB’s job badly, but with more furniture.
+
+## The design
+
+Surface should have two read execution modes:
+
+```text
+1. Materialized session mode
+   - hydrate selected slices into dictionaries
+   - sync entity property reads
+   - edit support
+   - loadedSlices enforces shape safety
+
+2. Database query mode
+   - emit SurrealQL
+   - execute against HTTP/embedded/RPC
+   - return projections/rows
+   - no identity map
+   - no edge dictionary traversal
+```
+
+Same model metadata. Different execution strategy.
+
+## Getters be local
+
+We must **never let generated property getters hit the database**, even embedded.
+
+This should remain true (we already do this):
+
+```csharp
+symbol.CalledSymbols
+```
+
+means:
+
+```text
+read from the loaded session slice
+or throw LoadShapeViolationException
+```
+
+Not:
+
+```text
+surprise async-ish embedded database query hidden inside a getter
+```
+
+This keeps our model honest.
+
+If you want graph traversal from the database, use the query surface:
+
+```csharp
+await workspace.Query.CodeSymbols
+    .For(symbolId)
+    .CalledSymbols()
+    .SelectDefault()
     .ExecuteAsync(db, ct);
 ```
 
-For your “all user stories that may have ambiguity to resolve” example:
+If you want entity navigation, explicitly fetch/load the slice:
 
-```csharp id="qc1i5s"
-var stories = await workspace.Query.UserStories
-    .WithOpenIssues()
-    .InformedByFindings(FindingKind.Ambiguity)
-    .Select(UserStoryProjections.AmbiguityResolutionListItem)
-    .ExecuteAsync(db, ct);
+```csharp
+await session.Fetch(symbol, CodeSymbolSlices.CalledSymbols, ct);
+
+foreach (var called in symbol.CalledSymbols)
+{
+    ...
+}
 ```
 
-That should emit real SurrealQL over the issue/finding/design-node graph. Not load a design, not load all issues, not walk dictionaries.
+For HTTP, `Fetch` hydrates the local dictionaries.
 
-## Make edges queryable objects
+For embedded, you have a choice:
 
-The code generator should emit query roots for both **nodes** and **relations**.
+```text
+Fetch into dictionaries only when entity navigation is needed.
+Query directly when projection/query results are enough.
+```
+
+## The abstraction is not `ISurrealTransport`
+
+It's probably:
+
+```csharp
+public interface ISurrealExecutor : IAsyncDisposable
+{
+    ValueTask<SurrealResultSet> ExecuteAsync(
+        SurrealCommand command,
+        CancellationToken ct = default);
+
+    SurrealExecutionCapabilities Capabilities { get; }
+}
+```
+
+Possibly with:
+
+```csharp
+[Flags]
+public enum SurrealExecutionCapabilities
+{
+    None = 0,
+    Remote = 1,
+    Embedded = 2,
+    SupportsLiveQuery = 4,
+    SupportsTransactions = 8,
+    CheapGraphTraversal = 16,
+}
+```
+
+Then query execution can choose sensible paths.
+
+But session property reads should not care. They read session state.
+
+## Mental model
+
+I should stop thinking of those dictionaries as “the graph.”
+
+They are:
+
+```text
+SessionGraphCache
+MaterializedSliceStore
+LoadedGraphSlice
+```
+
+So:
+
+```csharp
+internal sealed class MaterializedSessionState
+{
+    private readonly Dictionary<RecordId, IEntity> entities = [];
+    private readonly Dictionary<RecordId, RecordId> parents = [];
+    private readonly Dictionary<(RecordId Owner, string Field), RecordId> references = [];
+    private readonly Dictionary<(RecordId Source, string Edge, RecordId Target), bool> edges = [];
+    private readonly Dictionary<RecordId, HashSet<string>> loadedSlices = [];
+}
+```
+
+That name alone prevents the architectural mistake. It says: “this is a loaded slice, not the database.”
+
+## For HTTP
+
+HTTP session loading should still materialize slices:
+
+```text
+Load root
+Fetch child slice
+Fetch relation slice
+Populate entities/parents/references/edges
+Mark loadedSlices
+Allow sync property reads
+```
+
+That is absolutely valid. The network boundary is expensive, and the entity API is synchronous.
+
+## For embedded
+
+Default should be:
+
+```text
+Use SurrealQL query execution.
+Return projections.
+Do not hydrate session dictionaries unless caller explicitly asked for entity/session navigation.
+```
+
+Embedded makes this cheap:
+
+```sql
+SELECT
+    id.id() AS id,
+    qualified_name,
+    ->calls->code_symbols.{ id, qualified_name } AS called_symbols
+FROM code_symbols
+WHERE id = type::record("code_symbols", $id);
+```
+
+No reason to turn that into:
+
+```text
+load relation edges
+stuff dictionary
+walk dictionary
+shape result in C#
+```
+
+unless you specifically need a mutable session snapshot.
+
+## The rule
+
+I’d make this an explicit rule in the design:
+
+```text
+Queries execute in SurrealDB.
+Sessions read loaded slices.
+Fetch bridges database results into session slices.
+```
+
+That gives you the best of both worlds.
+
+HTTP gets the performance benefit of local slice traversal.
+
+Embedded gets the performance/simplicity benefit of letting SurrealDB traverse the graph.
+
+And Surface avoids becoming a tiny confused database wearing a C# hat.
+
+```text
+One query language.
+Two terminal intents.
+
+1. Load a mutable session slice.
+2. Return immutable projection results.
+```
+
+That is a much better mental model than “queries over here, loads over there” as totally separate things.
+
+## The important distinction is the terminal operation
+
+The fluent query defines:
+
+```text
+what records?
+which graph path?
+which edges?
+which filters?
+which order?
+which limit?
+which slices?
+```
+
+Then the terminal decides what happens:
+
+```csharp
+.LoadSliceAsync(...)      // hydrates session state for future mutation
+.Select(...).ExecuteAsync(...) // returns projection rows only
+```
+
+Example:
+
+```csharp
+var query = workspace.Query.CodeSymbols
+    .Where(CodeSymbolQ.Repository.Eq(repositoryId))
+    .Where(CodeSymbolQ.Name.Contains("Parser"))
+    .Include(CodeSymbolSlices.CalledSymbols)
+    .Include(CodeSymbolSlices.UsedSymbols);
+```
+
+Mutable slice:
+
+```csharp
+var session = await query.LoadSliceAsync(transport, ct);
+
+var symbol = session.Get<CodeSymbol>(symbolId)!;
+foreach (var called in symbol.CalledSymbols)
+{
+    // legal only because CalledSymbols slice was loaded
+}
+```
+
+Projection:
+
+```csharp
+var rows = await query
+    .Select(CodeSymbolProjections.NavigationItem)
+    .ExecuteAsync(transport, ct);
+```
+
+Same query shape. Different materialization contract.
+
+## I would make this distinction explicit in the type system
 
 Something like:
 
-```csharp id="bjtqpf"
-workspace.Query.UserStories
-workspace.Query.Features
-workspace.Query.Constraints
-workspace.Query.Issues
-workspace.Query.Findings
+```csharp
+public interface ISurfaceQuery<TNode>
+{
+    ISurfaceProjectionQuery<TProjection> Select<TProjection>(
+        ISurfaceProjection<TNode, TProjection> projection);
 
-workspace.Query.Edges.Restricts
-workspace.Query.Edges.Concerns
-workspace.Query.Edges.InformedBy
-workspace.Query.Edges.Cites
+    ISurfaceSliceQuery<TNode> Include(ISurfaceSlice<TNode> slice);
+
+    Task<SurrealSession> LoadSliceAsync(
+        ISurrealExecutor executor,
+        CancellationToken ct = default);
+}
 ```
 
-That lets you write edge-subset queries directly:
+But I’d probably keep the public call shape simpler:
 
-```csharp id="y4f47p"
-var restrictions = await workspace.Query.Edges.Restricts
-    .WhereIn<Constraint>(constraintIds)
-    .WhereOut<UserStory>(storyIds)
-    .Select(RestrictsEdgeProjections.Pair)
+```csharp
+workspace.Query.CodeSymbols
+    .Where(...)
+    .Include(CodeSymbolSlices.Calls)
+    .LoadSliceAsync(...)
+```
+
+versus:
+
+```csharp
+workspace.Query.CodeSymbols
+    .Where(...)
+    .Select(CodeSymbolProjections.SearchResult)
+    .ExecuteAsync(...)
+```
+
+That is readable, and it makes intent hard to miss.
+
+## Naming matters here
+
+We should stop naming the mutation-oriented terminal like this:
+
+```csharp
+.ExecuteAsync()
+```
+
+because then people will confuse it with projection execution.
+
+```csharp
+.LoadSliceAsync()
+.LoadSessionSliceAsync()
+.HydrateSliceAsync()
+.LoadForMutationAsync()
+```
+
+My pick: **`LoadSliceAsync`**.
+
+It matches your `loadedSlices` concept and doesn’t overpromise “aggregate load”.
+
+For projections, keep:
+
+```csharp
+.ExecuteAsync()
+```
+
+because that is normal query execution.
+
+## A tale of two materializers
+
+It's probably tempting to let projection materialization and session hydration share lots of their implementation. But they have different invariants.
+
+Projection materializer:
+
+```text
+- creates immutable row/result objects
+- no identity map
+- no session
+- no mutation
+- no loadedSlices
+- can over/under-select freely according to projection
+```
+
+Slice hydrator:
+
+```text
+- creates/binds entities
+- fills entities / parents / references / edges
+- marks loadedSlices
+- prepares future mutation
+- must preserve identity-map rules
+- must respect reference/delete planning needs
+```
+
+Same query AST. Different emitter/materializer.
+
+## The `loadedSlices` map becomes the enforcement layer
+
+This is the right place for the rule:
+
+```csharp
+private readonly Dictionary<RecordId, HashSet<string>> loadedSlices = [];
+```
+
+Generated getters become strict:
+
+```csharp
+public partial IReadOnlyCollection<CodeSymbol> CalledSymbols
+{
+    get
+    {
+        Session.RequireSlice(Id, CodeSymbolSlices.CalledSymbols);
+        return Session.QueryOutgoing<Calls, CodeSymbol>(this);
+    }
+}
+```
+
+So partial loading is safe:
+
+```text
+loaded slice -> readable
+unloaded slice -> throws
+```
+
+That gives you selective hydration without lying.
+
+## Mutation rules need to be explicit
+
+Partial slice mutation has traps.
+
+I’d define rules like:
+
+```text
+Loaded fields/slices may be read.
+Any scalar field may be written if the entity is tracked.
+Reference changes require the reference field slice to be known when old-value-sensitive planning is needed.
+Deletes require either a full delete-safe slice or database-backed delete validation.
+```
+
+Especially deletes. Delete planning can become dangerous if the session doesn’t know all incoming references/children/edges. If Surface cannot prove the slice is delete-safe, throw.
+
+Something like:
+
+```csharp
+session.Delete(symbol);
+```
+
+may require:
+
+```csharp
+session.RequireDeleteSafe(symbol);
+```
+
+or the generated query must have loaded:
+
+```csharp
+.Include(CodeSymbolSlices.DeleteClosure)
+```
+
+Otherwise you’ll get “worked in test, ate production” behavior. Not ideal unless your hobby is forensic archaeology.
+
+## Embedded mode fits neatly
+
+For HTTP:
+
+```text
+LoadSliceAsync -> SELECT hydration payload -> populate dictionaries -> future sync reads/mutations
+```
+
+For embedded:
+
+```text
+Projection ExecuteAsync -> direct SurrealDB query -> projection rows
+LoadSliceAsync -> only hydrate dictionaries if future entity mutation/navigation is requested
+```
+
+So embedded does not remove `LoadSliceAsync`; it just makes projection queries the obvious default for read APIs.
+
+## The final shape I’d aim for
+
+```csharp
+// Read-only public API path
+var results = await workspace.Query.CodeSymbols
+    .Where(CodeSymbolQ.AnyText.Contains(text))
+    .OrderBy(CodeSymbolQ.QualifiedName)
+    .Limit(20)
+    .Select(CodeSymbolProjections.SearchResult)
     .ExecuteAsync(db, ct);
 ```
 
-This matters because sometimes the edge set is the actual thing you are querying.
+```csharp
+// Mutation/session path
+var session = await workspace.Query.CodeSymbols
+    .Where(CodeSymbolQ.Id.Eq(symbolId))
+    .Include(CodeSymbolSlices.Properties)
+    .Include(CodeSymbolSlices.CalledSymbols)
+    .LoadSliceAsync(db, ct);
 
-For example:
+var symbol = session.Get<CodeSymbol>(symbolId)!;
+symbol.Name = "NewName";
 
-```csharp id="r1tld7"
-var restrictedPairs = await workspace.Query.Edges.Restricts
-    .FromConstraints()
-    .ToUserStories()
-    .WhereOutIn(storyIds)
-    .SelectPairs()
-    .ExecuteAsync(db, ct);
+await session.CommitAsync(db, lease, ct);
+```
+
+That is the right architecture.
+
+The query defines the slice. The terminal defines whether that slice becomes **mutable session state** or **immutable projection output**. That’s clean, powerful, and very aligned with the premise.
+
+## Load*Async is the terminal
+
+And better still if we force that to only produce record ids for later hydration - that is cleaner still.
+
+Make **`Load` a selection terminal**, not a hydration terminal.
+
+```text
+Query -> Load IDs
+IDs   -> Hydrate session slice
+Query -> Select projection
+```
+
+That gives you a hard safety boundary:
+
+```text
+Load does not create mutable entities.
+Load does not populate a session.
+Load only identifies records.
+```
+
+Then future mutation requires an explicit second step.
+
+## Like this
+
+```csharp
+var symbolIds = await workspace.Query.CodeSymbols
+    .Where(CodeSymbolQ.Name.Contains("Parser"))
+    .OrderBy(CodeSymbolQ.QualifiedName)
+    .Limit(50)
+    .LoadAsync(transport, ct);
+```
+
+Where:
+
+```csharp
+Task<IReadOnlyList<CodeSymbolId>>
+```
+
+Then hydration is deliberately separate:
+
+```csharp id="1lydy5"
+var session = await workspace.Hydrate.CodeSymbols
+    .ByIds(symbolIds)
+    .Include(CodeSymbolSlices.Properties)
+    .Include(CodeSymbolSlices.CalledSymbols)
+    .ExecuteAsync(transport, ct);
+```
+
+Or:
+
+```csharp
+var session = await workspace.LoadSession
+    .CodeSymbols(symbolIds)
+    .With(CodeSymbolSlices.Properties)
+    .With(CodeSymbolSlices.CalledSymbols)
+    .ExecuteAsync(transport, ct);
+```
+
+I slightly prefer **`Hydrate`** for the second step because it says what actually happens.
+
+## Projection path stays separate
+
+```csharp
+var rows = await workspace.Query.CodeSymbols
+    .Where(CodeSymbolQ.Name.Contains("Parser"))
+    .OrderBy(CodeSymbolQ.QualifiedName)
+    .Limit(50)
+    .Select(CodeSymbolProjections.SearchResult)
+    .ExecuteAsync(transport, ct);
+```
+
+So the terminals become:
+
+```text
+.LoadAsync(...)              -> IReadOnlyList<TId>
+.Select(...).ExecuteAsync()  -> IReadOnlyList<TProjection>
+```
+
+No accidental mutation. No ambiguous “query returned entities.” Good.
+
+## For edge subsets
+
+This gets even better for graph queries.
+
+```csharp
+var calledIds = await workspace.Query.CodeSymbols
+    .For(symbolId)
+    .CalledSymbols()
+    .LoadAsync(transport, ct);
 ```
 
 Returns:
 
-```csharp id="aa1w76"
-public readonly record struct ConstraintRestrictionPair(
-    ConstraintId ConstraintId,
-    UserStoryId UserStoryId);
+```csharp
+IReadOnlyList<CodeSymbolId>
 ```
 
-Then your UI can group however it wants.
+For actual edge subsets:
 
-## Add generated “semantic shortcuts”
-
-Raw path APIs are powerful, but for Project Brain-style queries, generated semantic shortcuts will be worth their weight.
-
-For example, generate these from relation metadata:
-
-```csharp id="n15048"
-UserStoryQueries.WithOpenIssues()
-UserStoryQueries.WithIssues(IssueDisposition disposition)
-UserStoryQueries.WithFindings(FindingKind kind)
-UserStoryQueries.WithUnresolvedAmbiguity()
-UserStoryQueries.ConstrainedBy()
-FeatureQueries.RestrictedByConstraints()
-FeatureQueries.WithOpenIssues()
-ConstraintQueries.RestrictingUserStories()
-IssueQueries.ConcerningUserStories()
-FindingQueries.ConcerningDesignNodes()
+```csharp
+var callPairs = await workspace.Query.Edges.Calls
+    .From(symbolIds)
+    .LoadAsync(transport, ct);
 ```
 
-Then the callsite becomes close to how you speak:
+Returns something like:
 
-```csharp id="xq1xnz"
-var stories = await workspace.Query.UserStories
-    .WithUnresolvedAmbiguity()
-    .ForFeature(featureId)
-    .Select(UserStoryProjections.ReviewWorkItem)
-    .ExecuteAsync(db, ct);
+```csharp
+IReadOnlyList<EdgePair<CodeSymbolId, CodeSymbolId>>
 ```
 
-That is the sweet spot: **domain-fluent API over generated SurrealQL**, not generic ORM sludge.
+or generated:
 
-## Projection shape for edge-subset queries
-
-You probably want grouped projections often:
-
-```csharp id="6g5z62"
-public readonly record struct FeatureRestrictions(
-    FeatureId FeatureId,
-    string FeatureTitle,
-    IReadOnlyList<RestrictionSummary> Restrictions);
-
-public readonly record struct RestrictionSummary(
-    ConstraintId ConstraintId,
-    string Description);
+```csharp
+IReadOnlyList<CallsEdgeIdPair>
 ```
 
-Generated query could emit something shaped like:
+Then hydration remains explicit:
 
-```sql id="32qz50"
-SELECT
-    id.id() AS feature_id,
-    title,
-    (
-        SELECT
-            id.id() AS constraint_id,
-            description
-        FROM constraint
-        WHERE ->restricts->feature CONTAINS $parent.id
-    ) AS restrictions
-FROM feature
-WHERE id IN $feature_ids;
+```csharp
+var session = await workspace.Hydrate.CodeSymbols
+    .ByIds(callPairs.SelectMany(x => [x.SourceId, x.TargetId]))
+    .Include(CodeSymbolSlices.Navigation)
+    .ExecuteAsync(transport, ct);
 ```
 
-Or, depending on the actual stored direction, use edge table queries:
+## This solves the dangerous bit
 
-```sql id="rh3qx6"
-SELECT
-    out.id() AS feature_id,
-    in.id() AS constraint_id
-FROM restricts
-WHERE out IN $feature_ids;
+The dangerous version is:
+
+```csharp
+var session = await query.LoadSliceAsync(...);
 ```
 
-Then materialize/group in generated C# if that is simpler. Do not be religious here. If SurrealQL can return the shape cleanly, let it. If the query gets grotesque, return flat rows and group client-side. The rule is: **database filters, narrows, traverses; C# may shape small result sets.**
+because users will think the query result and mutable session are the same concept.
 
-## I’d model this as three query types
+This version says:
 
-### 1. Node query
-
-```csharp id="ibcf4r"
-workspace.Query.UserStories
-    .Where(...)
-    .Select(...)
+```text
+Query finds.
+Hydrate loads.
+Session mutates.
+Projection consumes.
 ```
 
-For table-first reads.
+Clean. Clear. Correct.
 
-### 2. Edge query
+## I’d name the second step carefully
 
-```csharp id="epmj26"
-workspace.Query.Edges.Concerns
-    .From<Issue>()
-    .To<UserStory>()
-    .Where(...)
-    .SelectPairs()
+Avoid:
+
+```csharp
+Load(...)
 ```
 
-For “subset of edges” reads.
+for both ID selection and session hydration.
 
-### 3. Path query
+Maybe:
 
-```csharp id="sy2rtv"
-workspace.Query.UserStories
-    .Path()
-    .Incoming<Concerns, Issue>()
-    .Incoming<InformedBy, Finding>()
-    .Where(FindingQ.Kind.Eq(FindingKind.Ambiguity))
-    .ReturnStart()
+```text
+Query.LoadAsync          -> IDs
+Hydrate.ByIds(...).ExecuteAsync -> session
 ```
 
-For “things connected to things connected to things”.
+Or if `Load` feels too hydration-flavoured already:
 
-That third one is the powerful one, but also easiest to overcomplicate. Start with generated named methods for your common paths, then expose raw path composition later.
-
-## For “all user stories that may have ambiguity to resolve”
-
-I’d want to be able to write one of these:
-
-```csharp id="kb53qf"
-var stories = await workspace.Query.UserStories
-    .WithUnresolvedAmbiguity()
-    .Select(UserStoryProjections.AmbiguityQueueItem)
-    .ExecuteAsync(db, ct);
+```text
+Query.IdsAsync
+Query.LoadIdsAsync
+Query.FindIdsAsync
 ```
 
-And maybe the explicit equivalent:
+Load is still good `Load`, just be brutally clear:
 
-```csharp id="8xsd36"
-var stories = await workspace.Query.UserStories
-    .WhereExistsIncoming<Concerns, Issue>(
-        IssueQ.Disposition.In(IssueDisposition.Open, IssueDisposition.Acknowledged)
-            .AndExistsIncoming<InformedBy, Finding>(
-                FindingQ.Kind.Eq(FindingKind.Ambiguity)))
-    .Select(UserStoryProjections.AmbiguityQueueItem)
-    .ExecuteAsync(db, ct);
+```csharp
+Task<IReadOnlyList<TId>> LoadAsync(...)
 ```
 
-The first is what you actually want to use. The second is the lower-level construct the generator/runtime can support.
+The return type does a lot of the talking.
 
-## My strong recommendation
+## Do it exactly this way
 
-Make **edge subsets** a first-class generated concept:
-
-```csharp id="gv7b1p"
-workspace.Query.Edges.Restricts
-workspace.Query.Edges.Concerns
-workspace.Query.Edges.InformedBy
+```text
+Load = ID selection only.
+Select = projection materialization only.
+Hydrate = session/entity materialization only.
 ```
 
-Then add fluent node shortcuts on top:
+That gives Surface a clean public story and keeps mutation on a short leash. 
 
-```csharp id="xsxgh9"
-UserStories.WithUnresolvedAmbiguity()
-Features.RestrictedByConstraints()
-Issues.ForDesignNode(...)
-```
-
-That gives you both:
-
-```text id="2cdy4t"
-precise graph-query power
-```
-
-and
-
-```text id="me5x4n"
-nice domain language
-```
-
-The wrong move would be making everything start from `workspace.Query.TableName`. Your actual mental model is often **relationship-first**. Surface should respect that.
+Good architecture.

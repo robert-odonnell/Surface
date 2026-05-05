@@ -169,17 +169,23 @@ public interface IEntity
 /// </summary>
 public sealed class SurrealSession : IHydrationSink
 {
-    private readonly Dictionary<RecordId, IEntity> entities = [];
-    private readonly Dictionary<RecordId, RecordId> parents = [];
-    private readonly Dictionary<(RecordId Owner, string Field), RecordId> references = [];
-    private readonly Dictionary<(RecordId Source, string Edge, RecordId Target), bool> edges = [];
+    private class MaterializedSessionState
+    {
+        public readonly Dictionary<RecordId, IEntity> Entities = [];
+        public readonly Dictionary<RecordId, RecordId> Parents = [];
+        public readonly Dictionary<(RecordId Owner, string Field), RecordId> References = [];
+        public readonly Dictionary<(RecordId Source, string Edge, RecordId Target), bool> Edges = [];
 
-    // Per-entity load-shape tracking. Each set lists the field names on that entity
-    // whose slice has been hydrated (or freshly authored via Track<T>). Generator-emitted
-    // property reads consult this map and throw LoadShapeViolationException if a slice
-    // they need wasn't loaded — the strict-with-escape contract that PR8's Fetch
-    // extends.
-    private readonly Dictionary<RecordId, HashSet<string>> loadedSlices = [];
+        // Per-entity load-shape tracking. Each set lists the field names on that entity
+        // whose slice has been hydrated (or freshly authored via Track<T>). Generator-emitted
+        // property reads consult this map and throw LoadShapeViolationException if a slice
+        // they need wasn't loaded — the strict-with-escape contract that PR8's Fetch
+        // extends.
+        public readonly Dictionary<RecordId, HashSet<string>> LoadedSlices = [];
+    }
+
+    private readonly MaterializedSessionState state = new();
+
 
     // One-shot lifecycle invariant: a session represents one loaded snapshot plus one
     // pending mutation batch. Successful CommitAsync or AbandonAsync flips `_closed` to
@@ -234,8 +240,8 @@ public sealed class SurrealSession : IHydrationSink
     public T GetParent<T>(IEntity owner) where T : class, IEntity
     {
         ThrowIfClosed();
-        if (parents.TryGetValue(owner.Id, out var parentId)
-            && entities.TryGetValue(parentId, out var parent)
+        if (state.Parents.TryGetValue(owner.Id, out var parentId)
+            && state.Entities.TryGetValue(parentId, out var parent)
             && parent is T typed)
         {
             return typed;
@@ -250,8 +256,8 @@ public sealed class SurrealSession : IHydrationSink
     public T? GetReferenceOrDefault<T>(IEntity owner, string fieldName) where T : class, IEntity
     {
         ThrowIfClosed();
-        if (references.TryGetValue((owner.Id, fieldName), out var refId)
-            && entities.TryGetValue(refId, out var entity)
+        if (state.References.TryGetValue((owner.Id, fieldName), out var refId)
+            && state.Entities.TryGetValue(refId, out var entity)
             && entity is T typed)
         {
             return typed;
@@ -269,7 +275,7 @@ public sealed class SurrealSession : IHydrationSink
     {
         ThrowIfClosed();
         var rid = RecordId.From(id);
-        return entities.TryGetValue(rid, out var entity) && entity is T typed ? typed : null;
+        return state.Entities.TryGetValue(rid, out var entity) && entity is T typed ? typed : null;
     }
 
     public IReadOnlyCollection<T> QueryChildren<T>(IEntity owner, string childTable)
@@ -277,11 +283,11 @@ public sealed class SurrealSession : IHydrationSink
     {
         ThrowIfClosed();
         var results = new List<T>();
-        foreach (var kv in parents)
+        foreach (var kv in state.Parents)
         {
             if (kv.Value == owner.Id
                 && kv.Key.IsForTable(childTable)
-                && entities.TryGetValue(kv.Key, out var child)
+                && state.Entities.TryGetValue(kv.Key, out var child)
                 && child is T typed)
             {
                 results.Add(typed);
@@ -301,13 +307,13 @@ public sealed class SurrealSession : IHydrationSink
     {
         ThrowIfClosed();
         var results = new List<T>();
-        foreach (var kv in edges)
+        foreach (var kv in state.Edges)
         {
             if (!kv.Value || kv.Key.Edge != edgeKind || kv.Key.Source != owner.Id)
             {
                 continue;
             }
-            if (entities.TryGetValue(kv.Key.Target, out var other) && other is T typed)
+            if (state.Entities.TryGetValue(kv.Key.Target, out var other) && other is T typed)
             {
                 results.Add(typed);
             }
@@ -324,13 +330,13 @@ public sealed class SurrealSession : IHydrationSink
     {
         ThrowIfClosed();
         var results = new List<T>();
-        foreach (var kv in edges)
+        foreach (var kv in state.Edges)
         {
             if (!kv.Value || kv.Key.Edge != edgeKind || kv.Key.Target != owner.Id)
             {
                 continue;
             }
-            if (entities.TryGetValue(kv.Key.Source, out var other) && other is T typed)
+            if (state.Entities.TryGetValue(kv.Key.Source, out var other) && other is T typed)
             {
                 results.Add(typed);
             }
@@ -348,7 +354,7 @@ public sealed class SurrealSession : IHydrationSink
     {
         ThrowIfClosed();
         var results = new List<IRecordId>();
-        foreach (var kv in edges)
+        foreach (var kv in state.Edges)
         {
             if (!kv.Value || kv.Key.Edge != edgeKind)
             {
@@ -368,7 +374,7 @@ public sealed class SurrealSession : IHydrationSink
     {
         ThrowIfClosed();
         var results = new List<IRecordId>();
-        foreach (var kv in edges)
+        foreach (var kv in state.Edges)
         {
             if (!kv.Value || kv.Key.Edge != edgeKind)
             {
@@ -404,7 +410,7 @@ public sealed class SurrealSession : IHydrationSink
     public T Track<T>(T entity) where T : class, IEntity
     {
         ThrowIfClosed();
-        if (entities.TryGetValue(entity.Id, out var existing))
+        if (state.Entities.TryGetValue(entity.Id, out var existing))
         {
             // Same instance — idempotent Track call, just return.
             if (ReferenceEquals(existing, entity))
@@ -418,7 +424,7 @@ public sealed class SurrealSession : IHydrationSink
                 $"Cannot track {entity.Id}: a different entity instance is already tracked under this id.");
         }
 
-        entities[entity.Id] = entity;
+        state.Entities[entity.Id] = entity;
         entity.Bind(this);
         Record(Command.Create(entity.Id));
         entity.Initialize(this);
@@ -432,7 +438,7 @@ public sealed class SurrealSession : IHydrationSink
     }
 
     /// <summary>True iff <paramref name="id"/> is currently tracked (loaded or freshly minted) in this session.</summary>
-    public bool IsTracked(IRecordId id) => entities.ContainsKey(RecordId.From(id));
+    public bool IsTracked(IRecordId id) => state.Entities.ContainsKey(RecordId.From(id));
 
     /// <summary>
     /// True iff the slice rooted at <c>(<paramref name="owner"/>, <paramref name="fieldName"/>)</c>
@@ -442,7 +448,7 @@ public sealed class SurrealSession : IHydrationSink
     /// property reads consult this before walking the in-memory cache.
     /// </summary>
     public bool IsSliceLoaded(IRecordId owner, string fieldName)
-        => loadedSlices.TryGetValue(RecordId.From(owner), out var set)
+        => state.LoadedSlices.TryGetValue(RecordId.From(owner), out var set)
            && set.Contains(fieldName);
 
     /// <summary>
@@ -497,7 +503,7 @@ public sealed class SurrealSession : IHydrationSink
     {
         if (!HydrationJson.TryReadRecordId(row, "id", out var id)) return;
 
-        if (entities.TryGetValue(id, out var existing))
+        if (state.Entities.TryGetValue(id, out var existing))
         {
             existing.HydratePartial(row, sink);
         }
@@ -544,7 +550,7 @@ public sealed class SurrealSession : IHydrationSink
                     {
                         if (childRow.ValueKind != JsonValueKind.Object) continue;
                         if (HydrationJson.TryReadRecordId(childRow, "id", out var childId)
-                            && entities.TryGetValue(childId, out var existingChild))
+                            && state.Entities.TryGetValue(childId, out var existingChild))
                         {
                             existingChild.HydratePartial(childRow, sink);
                         }
@@ -585,7 +591,7 @@ public sealed class SurrealSession : IHydrationSink
                         {
                             if (targetRow.ValueKind != JsonValueKind.Object) continue;
                             if (HydrationJson.TryReadRecordId(targetRow, "id", out var targetId)
-                                && entities.TryGetValue(targetId, out var existingTarget))
+                                && state.Entities.TryGetValue(targetId, out var existingTarget))
                             {
                                 existingTarget.HydratePartial(targetRow, sink);
                             }
@@ -634,11 +640,11 @@ public sealed class SurrealSession : IHydrationSink
         switch (kind)
         {
             case FieldKind.Parent:
-                parents[ownerId] = (RecordId)canonical!;
+                state.Parents[ownerId] = (RecordId)canonical!;
                 break;
             case FieldKind.Reference:
                 var refId = (RecordId)canonical!;
-                references[(ownerId, field)] = refId;
+                state.References[(ownerId, field)] = refId;
                 Pending.SetReferenceTarget(ownerId, field, refId);
                 break;
         }
@@ -654,10 +660,10 @@ public sealed class SurrealSession : IHydrationSink
         switch (kind)
         {
             case FieldKind.Parent:
-                parents.Remove(ownerId);
+                state.Parents.Remove(ownerId);
                 break;
             case FieldKind.Reference:
-                references.Remove((ownerId, field));
+                state.References.Remove((ownerId, field));
                 Pending.UnsetReferenceTarget(ownerId, field);
                 break;
         }
@@ -676,7 +682,7 @@ public sealed class SurrealSession : IHydrationSink
         ThrowIfClosed();
         var src = RecordId.From(source);
         var tgt = RecordId.From(target);
-        edges[(src, edgeKind, tgt)] = true;
+        state.Edges[(src, edgeKind, tgt)] = true;
         Record(Command.Relate(src, edgeKind, tgt));
     }
 
@@ -700,7 +706,7 @@ public sealed class SurrealSession : IHydrationSink
         ThrowIfClosed();
         var src = RecordId.From(source);
         var tgt = RecordId.From(target);
-        edges[(src, edgeKind, tgt)] = true;
+        state.Edges[(src, edgeKind, tgt)] = true;
         Record(Command.Relate(src, edgeKind, tgt, payload));
     }
 
@@ -718,7 +724,7 @@ public sealed class SurrealSession : IHydrationSink
         ThrowIfClosed();
         var src = RecordId.From(source);
         var tgt = RecordId.From(target);
-        edges[(src, edgeKind, tgt)] = true;
+        state.Edges[(src, edgeKind, tgt)] = true;
         Record(Command.RelateOnce(src, edgeKind, tgt));
     }
 
@@ -739,7 +745,7 @@ public sealed class SurrealSession : IHydrationSink
         ThrowIfClosed();
         var src = RecordId.From(source);
         var tgt = RecordId.From(target);
-        edges[(src, edgeKind, tgt)] = true;
+        state.Edges[(src, edgeKind, tgt)] = true;
         Record(Command.RelateOnce(src, edgeKind, tgt, payload));
     }
 
@@ -749,7 +755,7 @@ public sealed class SurrealSession : IHydrationSink
         ThrowIfClosed();
         var src = RecordId.From(source);
         var tgt = RecordId.From(target);
-        edges.Remove((src, edgeKind, tgt));
+        state.Edges.Remove((src, edgeKind, tgt));
         Record(Command.Unrelate(src, edgeKind, tgt));
     }
 
@@ -763,11 +769,11 @@ public sealed class SurrealSession : IHydrationSink
     {
         ThrowIfClosed();
         var src = RecordId.From(source);
-        foreach (var key in edges.Keys.ToList())
+        foreach (var key in state.Edges.Keys.ToList())
         {
             if (key.Source == src && key.Edge == edgeKind)
             {
-                edges.Remove(key);
+                state.Edges.Remove(key);
             }
         }
         Record(Command.UnrelateAllFrom(src, edgeKind));
@@ -781,11 +787,11 @@ public sealed class SurrealSession : IHydrationSink
     {
         ThrowIfClosed();
         var tgt = RecordId.From(target);
-        foreach (var key in edges.Keys.ToList())
+        foreach (var key in state.Edges.Keys.ToList())
         {
             if (key.Target == tgt && key.Edge == edgeKind)
             {
-                edges.Remove(key);
+                state.Edges.Remove(key);
             }
         }
         Record(Command.UnrelateAllTo(tgt, edgeKind));
@@ -855,7 +861,7 @@ public sealed class SurrealSession : IHydrationSink
     public void Delete(IEntity entity)
     {
         ThrowIfClosed();
-        if (!entities.TryGetValue(entity.Id, out var tracked) || !ReferenceEquals(tracked, entity))
+        if (!state.Entities.TryGetValue(entity.Id, out var tracked) || !ReferenceEquals(tracked, entity))
         {
             // Catches: unbound entities, entities from a different session, the same id
             // tracked under a different instance, and double-deletes (CleanupLocalState
@@ -987,7 +993,7 @@ public sealed class SurrealSession : IHydrationSink
     void IHydrationSink.Track(IEntity entity)
     {
         ThrowIfClosed();
-        if (entities.TryGetValue(entity.Id, out var existing))
+        if (state.Entities.TryGetValue(entity.Id, out var existing))
         {
             // Same instance — idempotent, fall through to the loadedAtStart bump.
             // Different instance — common during include-heavy queries where the same
@@ -1011,7 +1017,7 @@ public sealed class SurrealSession : IHydrationSink
         }
         else
         {
-            entities[entity.Id] = entity;
+            state.Entities[entity.Id] = entity;
             entity.Bind(this);
         }
         loadedAtStart.Add(entity.Id);
@@ -1020,30 +1026,30 @@ public sealed class SurrealSession : IHydrationSink
     void IHydrationSink.Parent(RecordId childId, RecordId parentId)
     {
         ThrowIfClosed();
-        parents[childId] = parentId;
+        state.Parents[childId] = parentId;
     }
 
     void IHydrationSink.Reference(RecordId ownerId, string fieldName, RecordId refId)
     {
         ThrowIfClosed();
-        references[(ownerId, fieldName)] = refId;
+        state.References[(ownerId, fieldName)] = refId;
         Pending.HydrateReference(ownerId, fieldName, refId);
     }
 
     void IHydrationSink.Edge(RecordId source, string edgeKind, RecordId target)
     {
         ThrowIfClosed();
-        edges[(source, edgeKind, target)] = true;
+        state.Edges[(source, edgeKind, target)] = true;
         relationsAtStart.Add((edgeKind, source, target));
     }
 
     void IHydrationSink.MarkSliceLoaded(RecordId ownerId, string fieldName)
     {
         ThrowIfClosed();
-        if (!loadedSlices.TryGetValue(ownerId, out var set))
+        if (!state.LoadedSlices.TryGetValue(ownerId, out var set))
         {
             set = new HashSet<string>(StringComparer.Ordinal);
-            loadedSlices[ownerId] = set;
+            state.LoadedSlices[ownerId] = set;
         }
         set.Add(fieldName);
     }
@@ -1072,31 +1078,31 @@ public sealed class SurrealSession : IHydrationSink
     /// </summary>
     private void CleanupLocalState(RecordId id)
     {
-        entities.Remove(id);
-        parents.Remove(id);
+        state.Entities.Remove(id);
+        state.Parents.Remove(id);
 
-        foreach (var k in parents.Where(kv => kv.Value == id).Select(kv => kv.Key).ToList())
+        foreach (var k in state.Parents.Where(kv => kv.Value == id).Select(kv => kv.Key).ToList())
         {
-            parents.Remove(k);
+            state.Parents.Remove(k);
         }
 
         // Clear OUTBOUND references — entries where `id` is the owner. Otherwise a
         // recreate-after-delete (Track of a fresh instance with the same id) would see
         // the dead entity's optional refs bleed through GetReferenceOrDefault, since
-        // entities[id] now hits the new instance.
+        // state.Entities[id] now hits the new instance.
         //
         // INBOUND references — entries where `id` is the target — are preserved on
         // purpose. The commit planner reads the inbound graph to resolve
         // [Reject] / [Unset] / [Cascade]; erasing those at session-side made the
         // decisions unreliable.
-        foreach (var k in references.Keys.Where(k => k.Owner == id).ToList())
+        foreach (var k in state.References.Keys.Where(k => k.Owner == id).ToList())
         {
-            references.Remove(k);
+            state.References.Remove(k);
         }
 
-        foreach (var k in edges.Keys.Where(k => k.Source == id || k.Target == id).ToList())
+        foreach (var k in state.Edges.Keys.Where(k => k.Source == id || k.Target == id).ToList())
         {
-            edges.Remove(k);
+            state.Edges.Remove(k);
         }
     }
 }
