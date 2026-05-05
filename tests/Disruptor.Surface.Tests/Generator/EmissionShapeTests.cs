@@ -601,6 +601,26 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
+    public void Emits_HydrateRoot_PerTable_WithTypedAndRawIdOverloads()
+    {
+        // Workspace.Hydrate.{Table}(ids) is the entry point for the Hydrate terminal.
+        // Two overloads per table — typed {Table}Id (ergonomic) and IRecordId (raw
+        // canonical, useful for cross-aggregate edge endpoints).
+        var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        Assert.Contains("public sealed class GeneratedHydrationRoot", allSrc);
+        Assert.Contains("public static GeneratedHydrationRoot Hydrate => GeneratedHydrationRoot.Instance;", allSrc);
+        // Typed-id overload — `Designs(IEnumerable<DesignId> ids)`.
+        Assert.Contains("Designs(global::System.Collections.Generic.IEnumerable<global::M.DesignId> ids)", allSrc);
+        Assert.Contains("Constraints(global::System.Collections.Generic.IEnumerable<global::M.ConstraintId> ids)", allSrc);
+        // Raw-id overload — `Designs(IEnumerable<IRecordId> ids)`.
+        Assert.Contains("Designs(global::System.Collections.Generic.IEnumerable<global::Disruptor.Surface.Runtime.IRecordId> ids)", allSrc);
+        // Body wires through Workspace.ReferenceRegistry, not a global.
+        Assert.Contains("global::M.Workspace.ReferenceRegistry", allSrc);
+    }
+
+    [Fact]
     public void Emits_QueryIds_PerTable_WithIdsAsyncExtension()
     {
         // IdsAsync is the "Load = ID selection" terminal: returns IReadOnlyList<{Table}Id>

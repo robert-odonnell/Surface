@@ -160,8 +160,7 @@ public sealed class ProjectionQueryTests
 
     public sealed class TestSymbol : IEntity
     {
-        private RecordId _id;
-        public RecordId Id => _id;
+        public RecordId Id => default;
         public SurrealSession? Session => null;
         public void Bind(SurrealSession session) { }
         public void Initialize(SurrealSession session) { }

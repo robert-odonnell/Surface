@@ -141,12 +141,13 @@ There is one `Load{Root}Async` method per `[AggregateRoot]`. The legacy load pat
 
 ## Query API
 
-Four terminal verbs share one query AST:
+Five terminal verbs share one query AST:
 
 - `IdsAsync(transport, ct)` — id-only selection. Returns `IReadOnlyList<{Table}Id>`; no entity hydration, no session. Generator-emitted per `[Table]`.
 - `Select(projection).ExecuteAsync(transport, ct)` — projection mode. Returns immutable `IReadOnlyList<TRow>`; no entity hydration, no session. The projection owns the SELECT list and the per-row materialiser.
 - `ExecuteAsync(transport, ct)` — read mode. Returns hydrated entities; the supporting session is internal and never exposed.
 - `LoadAsync(transport, lease, ct)` — write mode. Returns a `SurrealSession` you mutate and commit. Only emitted on `Query<TRoot>` where `TRoot.IsAggregateRoot`.
+- `Workspace.Hydrate.{Table}(ids).WithInclude(…).ExecuteAsync(transport, [lease])` — hydration terminal. Takes a list of ids (typically from `IdsAsync`), materialises each into a tracked `SurrealSession` along with any included slices.
 
 ### `Workspace.Query`
 
@@ -249,6 +250,43 @@ Constraints:
 - `Include*` calls before `.Select(...)` are rejected — projections are flat by definition. Use `ExecuteAsync` directly if you need traversal.
 - Field reads must be unconditional (no branches that skip `row.Read(...)`); discovery captures only the fields the lambda touches on the probe pass.
 - v1 supports primitive scalars + nullables. Typed ids and complex types defer until a real callsite needs them.
+
+### Hydration — `Workspace.Hydrate.{Table}(ids)`
+
+The hydration terminal pairs with `IdsAsync` for the `Load → Hydrate → Mutate → Commit` flow:
+
+```csharp
+// 1. Load — pure id selection.
+var symbolIds = await workspace.Query.CodeSymbols
+    .Where(CodeSymbolQ.Name.Contains("Parser"))
+    .Limit(20)
+    .IdsAsync(transport);
+
+// 2. Hydrate — materialise the chosen rows + slices into a tracked session.
+await using var lease = await WriterLease.AcquireAsync(transport, "code_symbols");
+var session = await workspace.Hydrate.CodeSymbols(symbolIds)
+    .WithInclude(/* IIncludeNode tree describing the slice shape */)
+    .ExecuteAsync(transport, lease);
+
+// 3. Mutate.
+foreach (var symbol in session.GetAll<CodeSymbol>()) { … }
+
+// 4. Commit.
+await session.CommitAsync(transport, lease);
+```
+
+Two overloads per table — typed `{Table}Id` for the ergonomic call site, raw `IRecordId` for cross-aggregate edge endpoints already collapsed to canonical record ids:
+
+```csharp
+public HydrationQuery<CodeSymbol> CodeSymbols(IEnumerable<CodeSymbolId> ids);
+public HydrationQuery<CodeSymbol> CodeSymbols(IEnumerable<IRecordId> ids);
+```
+
+The terminal exists in two flavours: a read-mode `ExecuteAsync(transport, ct)` (no lease) and a write-mode `ExecuteAsync(transport, lease, ct)`. The lease is never stored — its presence at the call site advertises write intent and ensures the caller has the same handle to pass into `session.CommitAsync` later.
+
+Empty-id list short-circuits: no transport call, empty session returned. `WithInclude` accepts the same `IIncludeNode` AST that read-mode queries use; the wire SQL is identical to `Query<T>.Where(IdIn).WithInclude(…).ExecuteAsync`.
+
+Today's `Workspace.Load{Root}Async(transport, rootId)` aggregate-load sugar continues to use the legacy `{Root}AggregateLoader.PopulateAsync` path unchanged. It stays as the one-shot convenience for full-aggregate mutate-and-commit flows; the new hydration terminal is for everything that doesn't fit the "load the whole aggregate" shape.
 
 ### Id-only selection — `IdsAsync`
 
