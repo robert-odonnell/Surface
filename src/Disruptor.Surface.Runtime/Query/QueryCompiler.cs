@@ -39,7 +39,7 @@ internal static class QueryCompiler
         var clauses = new List<string>(2);
         if (pinnedId is { } id)
         {
-            clauses.Add($"id = {NextParam(id)}");
+            clauses.Add($"id = {NormalizeBoundValue(id).RenderSurrealLiteral()}");
         }
         if (filter is not null)
         {
@@ -162,10 +162,10 @@ internal static class QueryCompiler
 
     public static string CompilePredicate(this IPredicate p) => p switch
     {
-        EqPredicate eq        => $"{eq.Field.Identifier()} = {NextParam(eq.Value)}",
-        RangePredicate rp     => $"{rp.Field.Identifier()} {RangeOpText(rp.Op)} {NextParam(rp.Value)}",
-        InPredicate ip        => $"{ip.Field.Identifier()} IN {NextParam(ip.Values)}",
-        ContainsPredicate cp  => $"string::contains({cp.Field.Identifier()}, {NextParam(cp.Substring)})",
+        EqPredicate eq        => $"{eq.Field.Identifier()} = {NormalizeBoundValue(eq.Value).RenderSurrealLiteral()}",
+        RangePredicate rp     => $"{rp.Field.Identifier()} {RangeOpText(rp.Op)} {NormalizeBoundValue(rp.Value).RenderSurrealLiteral()}",
+        InPredicate ip        => $"{ip.Field.Identifier()} IN {NormalizeBoundValue(ip.Values).RenderSurrealLiteral()}",
+        ContainsPredicate cp  => $"string::contains({cp.Field.Identifier()}, {NormalizeBoundValue(cp.Substring).RenderSurrealLiteral()})",
         AndPredicate a        => $"({string.Join(" AND ", a.Operands.Select(o => o.CompilePredicate()))})",
         OrPredicate  o        => $"({string.Join(" OR ", o.Operands.Select(op => op.CompilePredicate()))})",
         NotPredicate n        => $"!({n.Operand.CompilePredicate()})",
@@ -180,13 +180,6 @@ internal static class QueryCompiler
         RangeOp.Ge => ">=",
         _ => throw new NotSupportedException($"Unknown RangeOp: {op}")
     };
-
-    private static string NextParam(object? value)
-    {
-        //var name = $"p{bindings.Count}";
-        //bindings[name] = NormalizeBoundValue(value);
-        return NormalizeBoundValue(value).RenderSurrealLiteral();
-    }
 
     /// <summary>
     /// Collapses typed record ids (e.g. generator-emitted <c>ConstraintId</c>) to canonical

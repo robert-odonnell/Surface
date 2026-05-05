@@ -7,7 +7,7 @@ namespace Disruptor.Surface.Runtime.Query;
 /// untyped so the compiler stays narrow and the same AST shape can serve every operator
 /// the factory layer exposes.
 /// </summary>
-public interface IPredicate { }
+public interface IPredicate;
 
 /// <summary>Equality test: <c>field = $param</c>.</summary>
 public sealed record EqPredicate(string Field, object? Value) : IPredicate;

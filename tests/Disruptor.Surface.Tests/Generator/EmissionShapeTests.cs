@@ -84,7 +84,7 @@ public sealed class EmissionShapeTests
         var compositionRootFile = GeneratorHarness.FindGeneratedFile(result, "CompositionRoot.g.cs");
         Assert.NotNull(compositionRootFile);
 
-        var src = compositionRootFile!.ToString();
+        var src = compositionRootFile.ToString();
         Assert.Contains("public partial class Workspace", src);
         Assert.Contains("LoadDesignAsync", src);
         // Instance method, not static; takes transport + typed id + cancellation token.
@@ -123,7 +123,7 @@ public sealed class EmissionShapeTests
         var loader = GeneratorHarness.FindGeneratedFile(result, "RootAggregateLoader");
         Assert.NotNull(loader);
 
-        var loaderSrc = loader!.ToString();
+        var loaderSrc = loader.ToString();
 
         // [Inline]-marked Owned gets `owned.*` projection in the loader query.
         Assert.Contains("owned.*", loaderSrc);
@@ -181,7 +181,7 @@ public sealed class EmissionShapeTests
         var loader = GeneratorHarness.FindGeneratedFile(result, "DesignAggregateLoader");
         Assert.NotNull(loader);
 
-        var loaderSrc = loader!.ToString();
+        var loaderSrc = loader.ToString();
         // The edge subselect must reference _restricts AND OR over both source paths
         // (constraints' and rules' parent paths back to design — both empty paths here
         // since both are direct children of Design root).
@@ -207,7 +207,7 @@ public sealed class EmissionShapeTests
         var partial = GeneratorHarness.FindGeneratedFile(result, "M.Marker.g.cs");
         Assert.NotNull(partial);
 
-        var partialSrc = partial!.ToString();
+        var partialSrc = partial.ToString();
         Assert.Contains("partial class Marker", partialSrc);
         Assert.Contains("global::Disruptor.Surface.Runtime.IEntity", partialSrc);
         Assert.Contains(".Bind(", partialSrc);
@@ -222,7 +222,7 @@ public sealed class EmissionShapeTests
         var loader = GeneratorHarness.FindGeneratedFile(result, "DesignAggregateLoader");
         Assert.NotNull(loader);
 
-        var src = loader!.ToString();
+        var src = loader.ToString();
         Assert.Contains("internal static class DesignAggregateLoader", src);
         Assert.Contains("public static async Task PopulateAsync", src);
     }
@@ -315,7 +315,7 @@ public sealed class EmissionShapeTests
         var designBuilder = GeneratorHarness.FindGeneratedFile(result, "DesignTraversalBuilder");
         Assert.NotNull(designBuilder);
 
-        var src = designBuilder!.ToString();
+        var src = designBuilder.ToString();
 
         // Builder type is sealed and exposes Where + an Include per [Children].
         Assert.Contains("public sealed class DesignTraversalBuilder", src);
@@ -371,7 +371,7 @@ public sealed class EmissionShapeTests
         var rootBuilder = GeneratorHarness.FindGeneratedFile(result, "RootTraversalBuilder");
         Assert.NotNull(rootBuilder);
 
-        var s = rootBuilder!.ToString();
+        var s = rootBuilder.ToString();
         Assert.Contains("public RootTraversalBuilder IncludeOwned(", s);     // [Reference, Inline]
         Assert.Contains("public RootTraversalBuilder IncludeChildren(", s);  // [Children]
         Assert.DoesNotContain("IncludeForeign", s);                          // plain [Reference] skipped
@@ -403,7 +403,7 @@ public sealed class EmissionShapeTests
         var loadFile = GeneratorHarness.FindGeneratedFile(result, "DesignQueryLoad");
         Assert.NotNull(loadFile);
 
-        var src = loadFile!.ToString();
+        var src = loadFile.ToString();
         Assert.Contains("global::Disruptor.Surface.Runtime.DesignAggregateLoader.PopulateAsync", src);
         Assert.Contains("new global::Disruptor.Surface.Runtime.SurrealSession(global::M.Workspace.ReferenceRegistry)", src);
         Assert.Contains("new global::M.DesignId(query.PinnedId.Value.Value)", src);
@@ -420,7 +420,7 @@ public sealed class EmissionShapeTests
         var loadFile = GeneratorHarness.FindGeneratedFile(result, "DesignQueryLoad");
         Assert.NotNull(loadFile);
 
-        var src = loadFile!.ToString();
+        var src = loadFile.ToString();
 
         Assert.Contains("if (query.PinnedId is null)", src);
         Assert.Contains("throw new global::System.InvalidOperationException", src);
@@ -463,7 +463,7 @@ public sealed class EmissionShapeTests
         var leafBuilder = GeneratorHarness.FindGeneratedFile(result, "LeafTraversalBuilder");
         Assert.NotNull(leafBuilder);
 
-        var s = leafBuilder!.ToString();
+        var s = leafBuilder.ToString();
         Assert.Contains("public sealed class LeafTraversalBuilder", s);
         Assert.Contains("public LeafTraversalBuilder Where(", s);
         // No Include* methods — Leaf has none of [Children] / [Reference, Inline].

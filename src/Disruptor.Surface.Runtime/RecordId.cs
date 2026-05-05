@@ -14,12 +14,6 @@ public readonly record struct RecordId(string Table, string Value) : IRecordId, 
     public static RecordId New(string table, string? value = null)
         => new(table, value ?? Ulid.NewUlid().ToString());
 
-    /// <summary>Well-known root slot for a table — <c>{table}:root</c>.</summary>
-    public static RecordId Root(string table) => new(table, "root");
-
-    /// <summary>Well-known named slot on a table, e.g. <c>{table}:next</c> for staged roots during COW.</summary>
-    public static RecordId Slot(string table, string name) => new(table, name);
-
     /// <summary>
     /// Collapse any <see cref="IRecordId"/> (typed per-table or canonical) to the canonical
     /// <see cref="RecordId"/> form SurrealSession internals key off.

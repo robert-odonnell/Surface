@@ -130,7 +130,8 @@ foreach (var chunk in Workspace.Schema)
 For a new aggregate, create a session with the generated reference registry, track entities, then commit:
 
 ```csharp
-await using var lease = await WriterLease.AcquireAsync(transport, "design");
+var workspace = new Workspace();
+await using var lease = await workspace.AcquireWriterAsync(transport);
 
 var session = new SurrealSession(Workspace.ReferenceRegistry);
 
@@ -172,7 +173,7 @@ foreach (var item in loaded.Constraints)
 To edit, load a fresh session, mutate the generated properties, and commit:
 
 ```csharp
-await using var lease = await WriterLease.AcquireAsync(transport, "design");
+await using var lease = await workspace.AcquireWriterAsync(transport);
 
 var writeSession = await workspace.LoadDesignAsync(transport, design.Id);
 var editable = writeSession.Get<Design>(design.Id)!;
@@ -261,7 +262,7 @@ foreach (var (src, dst) in pairs.Select(p => (p.Source, p.Target)))
 Switch the terminal verb from `ExecuteAsync` to `LoadAsync` to get a write-mode session for the same query AST. Aggregate-root tables only — non-roots compile-error if you try.
 
 ```csharp
-await using var lease = await WriterLease.AcquireAsync(transport, "design");
+await using var lease = await workspace.AcquireWriterAsync(transport);
 var session = await Workspace.Query.Designs
     .WithId(designId)
     .IncludeDetails()

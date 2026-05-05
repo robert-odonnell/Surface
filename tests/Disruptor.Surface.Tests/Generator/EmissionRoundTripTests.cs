@@ -1,7 +1,6 @@
 using System.Reflection;
 using System.Text.Json;
 using Disruptor.Surface.Runtime;
-using Microsoft.CodeAnalysis;
 using Xunit;
 
 namespace Disruptor.Surface.Tests.Generator;
@@ -88,7 +87,7 @@ public sealed class EmissionRoundTripTests
         SetProperty(design, "Description", "round-trip test");
 
         var session = new SurrealSession();
-        var transport = new RecordingTransport();
+        _ = new FakeTransport();
         session.Track((IEntity)design);
 
         // After Track + Flush, the buffered Description write should have replayed into
@@ -111,7 +110,7 @@ public sealed class EmissionRoundTripTests
         var design = NewEntity(assembly, "M.Design");
 
         var session = new SurrealSession();
-        var sink = (IHydrationSink)session;
+        IHydrationSink sink = session;
 
         // Use a real Ulid so RecordIdFormat.Validate passes.
         var ulidStr = Ulid.NewUlid().ToString();
@@ -206,7 +205,7 @@ public sealed class EmissionRoundTripTests
         var transport = new ScriptedTransport(scriptedResponse);
 
         var executeMethod = queryWithIncludes.GetType().GetMethod("ExecuteAsync")!;
-        var task = (Task)executeMethod.Invoke(queryWithIncludes, [transport, default(CancellationToken)])!;
+        var task = (Task)executeMethod.Invoke(queryWithIncludes, [transport, CancellationToken.None])!;
         await task;
         var resultProp = task.GetType().GetProperty("Result")!;
         var resultList = (System.Collections.IList)resultProp.GetValue(task)!;
@@ -317,9 +316,9 @@ public sealed class EmissionRoundTripTests
                 }
             ],"status":"OK"}]
             """);
-        var lease = await WriterLease.AcquireAsync(transport, "design", default);
+        var lease = await WriterLease.AcquireAsync(transport);
 
-        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, default(CancellationToken)])!;
+        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -359,9 +358,9 @@ public sealed class EmissionRoundTripTests
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
 
         var transport = new RecordingLoadTransport(BuildEmptyLoadResponse(designUlid));
-        var lease = await WriterLease.AcquireAsync(transport, "design", default);
+        var lease = await WriterLease.AcquireAsync(transport);
 
-        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, default(CancellationToken)])!;
+        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -453,7 +452,7 @@ public sealed class EmissionRoundTripTests
         var fetchMethod = typeof(SurrealSession).GetMethods()
             .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
             .MakeGenericMethod(assembly.GetType("M.Design")!);
-        var task = (Task)fetchMethod.Invoke(session, [topUpQuery, fetchTransport, default(CancellationToken)])!;
+        var task = (Task)fetchMethod.Invoke(session, [topUpQuery, fetchTransport, CancellationToken.None])!;
         await task;
 
         // After Fetch, Notes is loaded.
@@ -508,9 +507,9 @@ public sealed class EmissionRoundTripTests
                 }
             ],"status":"OK"}]
             """);
-        var lease = await WriterLease.AcquireAsync(loadTransport, "design", default);
+        var lease = await WriterLease.AcquireAsync(loadTransport);
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
-        var loadTask = (Task)loadAsync.Invoke(null, [loadQuery, loadTransport, lease, default(CancellationToken)])!;
+        var loadTask = (Task)loadAsync.Invoke(null, [loadQuery, loadTransport, lease, CancellationToken.None])!;
         await loadTask;
         var session = (SurrealSession)loadTask.GetType().GetProperty("Result")!.GetValue(loadTask)!;
 
@@ -542,7 +541,7 @@ public sealed class EmissionRoundTripTests
         var fetchMethod = typeof(SurrealSession).GetMethods()
             .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
             .MakeGenericMethod(assembly.GetType("M.Design")!);
-        var fetchTask = (Task)fetchMethod.Invoke(session, [fetchQuery, fetchTransport, default(CancellationToken)])!;
+        var fetchTask = (Task)fetchMethod.Invoke(session, [fetchQuery, fetchTransport, CancellationToken.None])!;
         await fetchTask;
 
         // Description STILL reflects the user's pending write — Fetch did not clobber it.
@@ -559,7 +558,7 @@ public sealed class EmissionRoundTripTests
         var session = new SurrealSession();
 
         // Close the session by committing.
-        await session.CommitAsync(new RecordingLoadTransport("[{\"result\":null,\"status\":\"OK\"}]"), null, default);
+        await session.CommitAsync(new RecordingLoadTransport("[{\"result\":null,\"status\":\"OK\"}]"), null, CancellationToken.None);
 
         var queryRoot = assembly.GetType("M.Workspace")!
             .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
@@ -573,7 +572,7 @@ public sealed class EmissionRoundTripTests
         // Invoke itself — await the task to surface them.
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            var task = (Task)fetchMethod.Invoke(session, [query, new RecordingLoadTransport("[]"), default(CancellationToken)
+            var task = (Task)fetchMethod.Invoke(session, [query, new RecordingLoadTransport("[]"), CancellationToken.None
                 ]
             )!;
             await task;
@@ -609,9 +608,9 @@ public sealed class EmissionRoundTripTests
                 }
             ],"status":"OK"}]
             """);
-        var lease = await WriterLease.AcquireAsync(loadTransport, "design", default);
+        var lease = await WriterLease.AcquireAsync(loadTransport);
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
-        var task = (Task)loadAsync.Invoke(null, [query, loadTransport, lease, default(CancellationToken)])!;
+        var task = (Task)loadAsync.Invoke(null, [query, loadTransport, lease, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -637,9 +636,9 @@ public sealed class EmissionRoundTripTests
         var loadAsync = loadClass.GetMethod("LoadAsync")!;
 
         var transport = new RecordingLoadTransport(BuildEmptyLoadResponse(designUlid));
-        var lease = await WriterLease.AcquireAsync(transport, "design", default);
+        var lease = await WriterLease.AcquireAsync(transport);
 
-        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, default(CancellationToken)])!;
+        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -686,9 +685,9 @@ public sealed class EmissionRoundTripTests
             ],"status":"OK"}]
             """;
         var transport = new RecordingLoadTransport(scriptedResponse);
-        var lease = await WriterLease.AcquireAsync(transport, "design", default);
+        var lease = await WriterLease.AcquireAsync(transport);
 
-        var task = (Task)loadAsync.Invoke(null, [withIncludes, transport, lease, default(CancellationToken)])!;
+        var task = (Task)loadAsync.Invoke(null, [withIncludes, transport, lease, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -728,11 +727,11 @@ public sealed class EmissionRoundTripTests
 
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
         var transport = new RecordingLoadTransport("[]");
-        var lease = await WriterLease.AcquireAsync(transport, "design", default);
+        var lease = await WriterLease.AcquireAsync(transport);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            var task = (Task)loadAsync.Invoke(null, [query, transport, lease, default(CancellationToken)])!;
+            var task = (Task)loadAsync.Invoke(null, [query, transport, lease, CancellationToken.None])!;
             await task;
         });
         Assert.Contains("WithId", ex.Message);
@@ -805,15 +804,15 @@ public sealed class EmissionRoundTripTests
     /// <summary>
     /// Recording transport that fans the WriterLease seq-fetch (a different SurrealQL
     /// shape) away from the actual load query. <see cref="NonLeaseSqlSeen"/> filters out
-    /// the lease's <c>SELECT seq FROM writer_lease:design</c> so assertions about the
+    /// the lease's <c>SELECT seq FROM writer_lease:main</c> so assertions about the
     /// load SQL don't have to step around it.
     /// </summary>
     private sealed class RecordingLoadTransport(string loadResponse) : ISurrealTransport
     {
-        public List<string> SqlSeen { get; } = [];
+        private List<string> SqlSeen { get; } = [];
 
         public List<string> NonLeaseSqlSeen
-            => SqlSeen.Where(s => !s.Contains("writer_lease", StringComparison.Ordinal)).ToList();
+            => [..SqlSeen.Where(s => !s.Contains("writer_lease", StringComparison.Ordinal))];
 
         public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
         {
@@ -911,7 +910,7 @@ public sealed class EmissionRoundTripTests
         var transport = new ScriptedTransport(scriptedResponse);
 
         var executeMethod = query.GetType().GetMethod("ExecuteAsync")!;
-        var task = (Task)executeMethod.Invoke(query, [transport, default(CancellationToken)])!;
+        var task = (Task)executeMethod.Invoke(query, [transport, CancellationToken.None])!;
         await task;
         var resultList = (System.Collections.IList)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -946,13 +945,10 @@ public sealed class EmissionRoundTripTests
     private static void SetProperty(object instance, string name, object? value)
         => instance.GetType().GetProperty(name)!.SetValue(instance, value);
 
-    /// <summary>Captures every SQL string passed through the transport for assertion.</summary>
-    private sealed class RecordingTransport : ISurrealTransport
+    private sealed class FakeTransport : ISurrealTransport
     {
-        public List<string> SqlSeen { get; } = [];
         public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
         {
-            SqlSeen.Add(sql);
             return Task.FromResult(JsonDocument.Parse("[]"));
         }
         public ValueTask DisposeAsync() => default;

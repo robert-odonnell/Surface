@@ -68,7 +68,7 @@ The main runtime concepts are:
 - `ISurrealTransport`: abstraction for executing SurrealQL.
 - `SurrealHttpClient`: HTTP implementation of `ISurrealTransport`.
 - `SurrealSession`: identity map, synchronous read surface, and pending write batch.
-- `WriterLease`: optional cross-process writer coordination for an aggregate.
+- `WriterLease`: optional cross-process writer coordination — single workspace-wide lease, acquired via the generated `workspace.AcquireWriterAsync(transport)` accessor.
 - `RecordId` and generated `{Entity}Id` types: strongly typed SurrealDB record ids.
 - `SurrealArray<T>`: mutation-aware inline array field wrapper.
 
@@ -79,7 +79,7 @@ The usual flow is:
    - **Read mode** — `Workspace.Query.{Table}.Where(...).ExecuteAsync(transport)` for surgical projections without aggregate hydration; `Workspace.Query.Edges.{Kind}.WhereIn(...).ExecuteAsync(transport)` for flat edge pairs.
    - **Load mode** — `Workspace.LoadDesignAsync(transport, id)` (legacy) or `Workspace.Query.Designs.WithId(id).Include*(...).LoadAsync(transport, lease)` (filtered) for a write-mode `SurrealSession`.
 3. Read and mutate entities through normal properties and methods.
-4. Acquire a `WriterLease` for writes when cross-process coordination matters.
+4. Acquire a `WriterLease` via `workspace.AcquireWriterAsync(transport)` for writes when cross-process coordination matters.
 5. Call `session.CommitAsync(transport, lease, ct)`.
 
 Filtered loads enforce strict-with-escape: reads of slices the user didn't include throw `LoadShapeViolationException`; `session.FetchAsync(...)` is the typed escape hatch that hydrates an additional slice into the existing session, preserving any in-flight user mutations.

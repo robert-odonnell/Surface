@@ -226,12 +226,14 @@ The planned phases are:
 
 ## Writer Coordination
 
-`WriterLease` is optional but intended for cross-process write coordination. The protocol is **optimistic concurrency on a monotonic sequence**: each aggregate has one `writer_lease:<slug>` record holding a single `seq: int`. The aggregate name is validated as a lower_snake_case slug via `RecordIdFormat` at acquire time.
+`WriterLease` is optional but intended for cross-process write coordination. **Single-writer paradigm** — one `writer_lease:main` record per workspace gates every commit, regardless of which aggregate the commit touches. There is no per-aggregate slug; concurrent writers across all aggregates race for the same lease.
+
+The protocol is **optimistic concurrency on a monotonic sequence**: the lease row holds a single `seq: int`. The workspace's generated `[CompositionRoot]` exposes `AcquireWriterAsync(transport)` as the canonical acquisition surface.
 
 The typical write flow is:
 
 ```csharp
-var lease = await WriterLease.AcquireAsync(transport, "design");
+await using var lease = await workspace.AcquireWriterAsync(transport);
 var session = await workspace.LoadDesignAsync(transport, id);
 
 // mutate
@@ -239,11 +241,11 @@ var session = await workspace.LoadDesignAsync(transport, id);
 await session.CommitAsync(transport, lease);
 ```
 
-`AcquireAsync` reads the current `seq` for the aggregate (defaulting to 0 if no row exists) and captures it on the lease. `CommitAsync` splices a transactional CAS clause around the data writes — `BEGIN TRANSACTION; IF current_seq != captured THEN THROW … END; UPSERT seq + 1;` — so the commit lands atomically with a sequence advance, or aborts entirely on mismatch and the caller sees `WriterLeaseStolenException`. The session closes either way.
+`AcquireAsync` reads the current `seq` (defaulting to 0 if no row exists) and captures it on the lease. `CommitAsync` splices a transactional CAS clause around the data writes — `BEGIN TRANSACTION; IF current_seq != captured THEN THROW … END; UPSERT seq + 1;` — so the commit lands atomically with a sequence advance, or aborts entirely on mismatch and the caller sees `WriterLeaseStolenException`. The session closes either way.
 
-There is no TTL, no holder id, no theft-recovery timer. Crashed writers are forgotten on the spot — they leave their captured seq in memory only, which is invisible to everyone else; the next acquirer just reads the current seq fresh and proceeds. `DisposeAsync` is a no-op.
+There is no TTL, no holder id, no theft-recovery timer, no aggregate slug. Crashed writers are forgotten on the spot — they leave their captured seq in memory only, which is invisible to everyone else; the next acquirer just reads the current seq fresh and proceeds. `DisposeAsync` is a no-op.
 
-This is optimistic concurrency, not pessimistic locking. Two writers can both `AcquireAsync` the same aggregate and both mutate locally; only the first to commit wins, the second gets `WriterLeaseStolenException` at commit time and must reload-and-retry. Suits the library's one-shot session character: load → mutate → commit happens fast enough that races are rare and retries are cheap.
+This is optimistic concurrency, not pessimistic locking. Two writers can both acquire and both mutate locally; only the first to commit wins, the second gets `WriterLeaseStolenException` at commit time and must reload-and-retry. Suits the library's one-shot session character: load → mutate → commit happens fast enough that races are rare and retries are cheap.
 
 ## Transport Boundary
 

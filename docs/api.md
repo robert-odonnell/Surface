@@ -438,11 +438,14 @@ After `CommitAsync` or `AbandonAsync`, `IsClosed` is `true` and public reads/wri
 
 ### `WriterLease`
 
-`WriterLease` coordinates cross-process writers through a `writer_lease:<aggregate>`
-record per aggregate, using optimistic concurrency on a monotonic `seq` counter:
+`WriterLease` coordinates cross-process writers through a single `writer_lease:main`
+record per workspace, using optimistic concurrency on a monotonic `seq` counter.
+**Single-writer paradigm** — one outstanding lease across all aggregates; concurrent
+acquirers race for the commit's CAS check. Acquire it via the generated
+`Workspace.AcquireWriterAsync(transport)` accessor:
 
 ```csharp
-var lease = await WriterLease.AcquireAsync(transport, "design");
+await using var lease = await workspace.AcquireWriterAsync(transport);
 await session.CommitAsync(transport, lease);
 ```
 
@@ -450,18 +453,17 @@ Protocol: `AcquireAsync` reads the current `seq` (defaulting to 0 if no row exis
 captures it on the lease. `CommitAsync` splices a `BEGIN TRANSACTION; IF seq_on_db !=
 captured THEN THROW … END; UPSERT seq + 1;` fragment around the data writes — atomic
 with the data, throws `WriterLeaseStolenException` if another writer advanced `seq`
-first. The aggregate name is validated as a lower_snake_case slug via `RecordIdFormat`,
-so `"design"` works but `"Design 1"` is rejected at the call site.
+first.
 
-No TTL, no holder id, no clock skew, no theft-recovery timer. Crashed writers are
-forgotten — the next acquirer reads the current `seq` fresh and proceeds. `DisposeAsync`
-is a no-op.
+No TTL, no holder id, no clock skew, no theft-recovery timer, no aggregate slug. Crashed
+writers are forgotten — the next acquirer reads the current `seq` fresh and proceeds.
+`DisposeAsync` is a no-op.
 
 Key members:
 
-- `AcquireAsync(transport, aggregateName, ct)`.
+- `AcquireAsync(transport, ct)` — the underlying primitive. Prefer the generated
+  `Workspace.AcquireWriterAsync(transport)` accessor at call sites.
 - `ExpectedSequence`: the seq value this lease captured (or last successfully committed).
-- `AggregateName`: the slug-validated aggregate name.
 - `SchemaScript`: DDL for the runtime lease table. Generated schema includes it.
 
 Exception:

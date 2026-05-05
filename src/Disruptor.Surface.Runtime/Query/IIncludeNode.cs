@@ -22,7 +22,7 @@ namespace Disruptor.Surface.Runtime.Query;
 /// columns from <c>SELECT *</c>.
 /// </para>
 /// </summary>
-public interface IIncludeNode { }
+public interface IIncludeNode;
 
 /// <summary>
 /// Inline-record projection: emits <c>field.*</c> alongside the level's <c>*</c>.

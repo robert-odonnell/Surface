@@ -94,7 +94,7 @@ var matches = await Workspace.Query.Constraints
     .ExecuteAsync(transport);
 
 // Write session — caller composes lease + session + commit.
-await using var lease = await WriterLease.AcquireAsync(transport, "design");
+await using var lease = await workspace.AcquireWriterAsync(transport);
 var rw = await workspace.LoadDesignAsync(transport, designId);
 
 var design = rw.Get<Design>(designId)!;
@@ -193,7 +193,8 @@ Plus aggregate / relation marker attributes:
 ## Key concepts
 
 - **Aggregate.** A `[AggregateRoot]` and everything reachable through `[Children]`.
-  The unit of load (`Workspace.Load{Root}Async`) and write coordination (`WriterLease`).
+  The unit of load (`Workspace.Load{Root}Async`). Write coordination is workspace-wide
+  — a single `WriterLease` gates commits across all aggregates, not per-aggregate.
 - **Composition root.** A user-declared partial class tagged `[CompositionRoot]` that
   the generator grafts the per-aggregate `Load*Async` instance methods onto. The class
   is yours — ctor, transport, caches, telemetry. The library only adds load methods.
@@ -222,15 +223,17 @@ Plus aggregate / relation marker attributes:
 - **Safe SQL formatting.** All record ids, identifiers, and string literals route through
   `SurrealFormatter` — bare `table:value` when safe, Surreal's `table:⟨value⟩` escape
   when not. Especially relevant if you set `[assembly: RecordIdValue<string>]`.
-- **Writer lease.** Optimistic CAS on a monotonic `seq` counter, one
-  `writer_lease:<aggregate>` row per aggregate. `AcquireAsync` reads the current `seq`
-  and captures it on the lease; `CommitAsync` splices a transactional CAS check + `seq + 1`
-  upsert around the data writes — atomic with the data, throws
-  `WriterLeaseStolenException` if another writer advanced `seq` first. No TTL, no
-  holder id, no theft-recovery timer; crashed writers leave their captured seq in
-  memory only and the next acquirer reads the current seq fresh. Suits the library's
-  one-shot session character: load → mutate → commit happens fast enough that races are
-  rare and retries are cheap.
+- **Writer lease.** Optimistic CAS on a monotonic `seq` counter. **Single-writer
+  paradigm** — one `writer_lease:main` row per workspace gates every commit, regardless
+  of which aggregate is being touched; concurrent acquirers race for the same lease.
+  `workspace.AcquireWriterAsync(transport)` reads the current `seq` and captures it on
+  the lease; `CommitAsync` splices a transactional CAS check + `seq + 1` upsert around
+  the data writes — atomic with the data, throws `WriterLeaseStolenException` if
+  another writer advanced `seq` first. No TTL, no holder id, no theft-recovery timer,
+  no aggregate slug; crashed writers leave their captured seq in memory only and the
+  next acquirer reads the current seq fresh. Suits the library's one-shot session
+  character: load → mutate → commit happens fast enough that races are rare and
+  retries are cheap.
 - **Commit pipeline.** Recorded commands → `PendingState` (compacted indexed view, plus
   per-field `ReferenceTransition` snapshots) → `CommitPlanner` (three-phase reference-
   delete resolve: cascade/unset to fixpoint, then collect Reject blockers) →

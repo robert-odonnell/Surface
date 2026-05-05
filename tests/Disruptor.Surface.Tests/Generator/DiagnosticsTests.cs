@@ -13,14 +13,14 @@ public sealed class DiagnosticsTests
     [Fact]
     public void CG001_TableMustBePartial()
     {
-        var src = """
-            using Disruptor.Surface.Annotations;
-            namespace M;
-            [Table] public class NotPartial {
-                [Id] public partial NotPartialId Id { get; set; }
-            }
-            """;
-        var (_, _, _, compileDiags) = GeneratorHarness.Run(src);
+        const string src = """
+                           using Disruptor.Surface.Annotations;
+                           namespace M;
+                           [Table] public class NotPartial {
+                               [Id] public partial NotPartialId Id { get; set; }
+                           }
+                           """;
+        _ = GeneratorHarness.Run(src);
         // CG001 reports against `compileDiags` (Errors), not run-time diagnostics.
         // Actually wait — CG001 fires from ModelGenerator.Emit, so it shows up in run diagnostics.
         var (_, _, runDiags, _) = GeneratorHarness.Run(src);
@@ -34,13 +34,13 @@ public sealed class DiagnosticsTests
         // the runtime still works because PartialEmitter unconditionally emits the _id
         // anchor and IEntity.Id, and IdEmitter unconditionally emits the {Name}Id struct.
         // CG007 was retired alongside this change.
-        var src = """
-            using Disruptor.Surface.Annotations;
-            namespace M;
-            [Table] public partial class NoId {
-                [Property] public partial string Name { get; set; }
-            }
-            """;
+        const string src = """
+                           using Disruptor.Surface.Annotations;
+                           namespace M;
+                           [Table] public partial class NoId {
+                               [Property] public partial string Name { get; set; }
+                           }
+                           """;
         var (_, _, runDiags, _) = GeneratorHarness.Run(src);
         Assert.DoesNotContain(runDiags, d => d.Id == "CG007");
         Assert.Empty(runDiags.Where(d => d.Severity == DiagnosticSeverity.Error));
@@ -49,14 +49,14 @@ public sealed class DiagnosticsTests
     [Fact]
     public void CG008_TableHasMultipleIds()
     {
-        var src = """
-            using Disruptor.Surface.Annotations;
-            namespace M;
-            [Table] public partial class TwoIds {
-                [Id] public partial TwoIdsId IdA { get; set; }
-                [Id] public partial TwoIdsId IdB { get; set; }
-            }
-            """;
+        const string src = """
+                           using Disruptor.Surface.Annotations;
+                           namespace M;
+                           [Table] public partial class TwoIds {
+                               [Id] public partial TwoIdsId IdA { get; set; }
+                               [Id] public partial TwoIdsId IdB { get; set; }
+                           }
+                           """;
         var (_, _, runDiags, _) = GeneratorHarness.Run(src);
         Assert.Contains(runDiags, d => d.Id == "CG008");
     }
@@ -69,20 +69,20 @@ public sealed class DiagnosticsTests
         // [Reference] in the CLR emit, [Reference] before [Property] in schema), so
         // the combo silently produced a scalar CLR setter writing into a record<>
         // schema column. CG024 rejects the combo at the model boundary.
-        var src = """
-            using Disruptor.Surface.Annotations;
-            namespace M;
+        const string src = """
+                           using Disruptor.Surface.Annotations;
+                           namespace M;
 
-            [Table] public partial class Owner {
-                [Id] public partial OwnerId Id { get; set; }
-                // Conflict: Property + Reference are mutually-exclusive role attributes.
-                [Property, Reference] public partial Target Both { get; }
-            }
+                           [Table] public partial class Owner {
+                               [Id] public partial OwnerId Id { get; set; }
+                               // Conflict: Property + Reference are mutually-exclusive role attributes.
+                               [Property, Reference] public partial Target Both { get; }
+                           }
 
-            [Table] public partial class Target {
-                [Id] public partial TargetId Id { get; set; }
-            }
-            """;
+                           [Table] public partial class Target {
+                               [Id] public partial TargetId Id { get; set; }
+                           }
+                           """;
         var (_, _, runDiags, _) = GeneratorHarness.Run(src);
         Assert.Contains(runDiags, d => d.Id == "CG024");
         // The message names both offending attributes so the user knows which to drop.
@@ -99,14 +99,14 @@ public sealed class DiagnosticsTests
         // means the user-side and generator-side can't combine, so EmitHydrate
         // would write `_someField = ...` for storage that never got emitted (CS0103).
         // CG022 catches this with a clear message before bad .g.cs is produced.
-        var src = """
-            using Disruptor.Surface.Annotations;
-            namespace M;
-            [Table] public partial class HasNonPartialProperty {
-                [Id] public partial HasNonPartialPropertyId Id { get; set; }
-                [Property] public string Description { get; set; }
-            }
-            """;
+        const string src = """
+                           using Disruptor.Surface.Annotations;
+                           namespace M;
+                           [Table] public partial class HasNonPartialProperty {
+                               [Id] public partial HasNonPartialPropertyId Id { get; set; }
+                               [Property] public string Description { get; set; }
+                           }
+                           """;
         var (_, _, runDiags, _) = GeneratorHarness.Run(src);
         Assert.Contains(runDiags, d => d.Id == "CG022");
     }
@@ -114,7 +114,7 @@ public sealed class DiagnosticsTests
     [Fact]
     public void CG011_EntityReachable_FromTwoAggregateRoots()
     {
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             using System.Collections.Generic;
             namespace M;
@@ -142,7 +142,7 @@ public sealed class DiagnosticsTests
     [Fact]
     public void CG018_MultipleCompositionRoots()
     {
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             namespace M;
 
@@ -156,7 +156,7 @@ public sealed class DiagnosticsTests
     [Fact]
     public void CG019_CompositionRoot_NotPartial()
     {
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             namespace M;
 
@@ -171,7 +171,7 @@ public sealed class DiagnosticsTests
     {
         // `Lonely` is listed as Design's Children member but has no [Parent] back to
         // Design — the loader's $parent.id-scoped query has nothing to anchor on.
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             using System.Collections.Generic;
             namespace M;
@@ -196,7 +196,7 @@ public sealed class DiagnosticsTests
         // Constraint is in the Design aggregate (via [Children]); Finding is in the
         // Review aggregate. A [Reference] from Constraint to Finding crosses
         // aggregate boundaries — should fire CG021.
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             using System.Collections.Generic;
             namespace M;
@@ -231,7 +231,7 @@ public sealed class DiagnosticsTests
     {
         // Details is referenced from Design but isn't a member of any aggregate
         // (no [Parent] back to a root). Shared/foreign records like this are fine.
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             using System.Collections.Generic;
             namespace M;
@@ -252,7 +252,7 @@ public sealed class DiagnosticsTests
     [Fact]
     public void HappyPath_ProducesNoDiagnostics()
     {
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             using Disruptor.Surface.Runtime;
             using System.Collections.Generic;
@@ -282,7 +282,7 @@ public sealed class DiagnosticsTests
     {
         // Uri has no SurrealDB scalar mapping. Without the diagnostic, SchemaEmitter
         // would silently comment out the field and reads/writes would fail at the DB.
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             using System;
             namespace M;
@@ -300,7 +300,7 @@ public sealed class DiagnosticsTests
     {
         // SurrealArray<T> goes through the array<object> + sub-field schema path; it's
         // not a scalar but it's mappable — CG025 must not flag it.
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             using Disruptor.Surface.Runtime;
             namespace M;
@@ -320,7 +320,7 @@ public sealed class DiagnosticsTests
         // [Children]<string> — concrete element, but not a [Table]. Without the
         // diagnostic, the emitted Session.QueryChildren<string>(...) would surface
         // as a generic-constraint CS error in generated code (T : IEntity, new()).
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             using System.Collections.Generic;
             namespace M;
@@ -338,7 +338,7 @@ public sealed class DiagnosticsTests
     {
         // [Parent] target must be a [Table] — pointing at a plain class would emit
         // Session.GetParent<T>(this) where T isn't IEntity.
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             namespace M;
             public sealed class NotATable { }
@@ -358,7 +358,7 @@ public sealed class DiagnosticsTests
         // field, _session, identity-map). The diagnostic catches the mistake at the
         // model boundary instead of letting confusing CS errors surface from the
         // generated partial.
-        var src = """
+        const string src = """
             using Disruptor.Surface.Annotations;
             namespace M;
             [Table] public partial class Bad {
