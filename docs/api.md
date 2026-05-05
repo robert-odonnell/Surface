@@ -459,6 +459,45 @@ catch (SurrealException ex) when (ex.Message.Contains("not executed", StringComp
 
 This is caller-side; the library doesn't auto-replay because the side effects of partial replay aren't generally safe. `WriterLeaseStolenException` is the one transactional failure the library translates by name — caught and rethrown as a typed exception by `SurrealSession.CommitAsync` so the reload-and-retry loop is unambiguous.
 
+### `SurrealEmbeddedTransport`
+
+In-process `ISurrealTransport` backed by SurrealDB embedded with a RocksDB file store. Lives in the optional `Disruptor.Surface.Transport.Embedded` package — drop-in replacement for `SurrealHttpClient` when consumers want to skip the `/rpc` round-trip. Useful for code-index full rebuilds, bulk imports, single-process workloads where the HTTP body-size ceiling bites.
+
+```csharp
+await using var transport = new SurrealEmbeddedTransport(
+    filePath: "code-index.db",
+    @namespace: "code-index",
+    database: "main");
+
+await Workspace.ApplySchemaAsync(transport);
+// … rest of the pipeline reads exactly like the HTTP path.
+```
+
+Key behaviours:
+
+- **Bundled engine is `surrealdb-core 3.0.5`** (per the `SurrealDb.Embedded.RocksDb` 0.10.x package). The pre-v3 statement-count ceiling that the HTTP path used to hit on large commits doesn't apply.
+- **Single-writer in-process** — a `SemaphoreSlim(1, 1)` serialises any script that begins with `BEGIN TRANSACTION` (the WriterLease pre-commit fragment). Reads and non-transactional scripts skip the lock so concurrent reads stay parallel; transactional commits queue, keeping the WriterLease's CAS-on-sequence as the contention point of last resort rather than a permanent hot path.
+- **CBOR → JSON projection** — the SDK speaks CBOR; the runtime parsers expect the JSON-RPC envelope shape. `CborJsonProjection` walks the SDK's `SurrealDbResponse` and emits `[{result, status}, …]` with custom converters for record ids (`"table:value"`), datetimes (ISO 8601), decimals (string-quoted), durations, byte arrays. Goes around the SDK's own `RecordIdJsonConverter` which writes just the id portion.
+- **Input-side stays inlined** — `SurrealFormatter` already renders every value as a SurrealQL literal (record ids, datetimes, etc.); no `Things` flow through any binding dictionary, so the original `/rpc` Thing-binding problem doesn't recur on the embedded path either.
+
+Two ctors:
+
+```csharp
+// Owns a fresh client; disposes it on transport teardown.
+new SurrealEmbeddedTransport(filePath, @namespace, database, engineOptions?);
+
+// Wraps a caller-owned ISurrealDbClient (e.g. shared with the SDK's typed read APIs).
+// Caller manages the client's lifetime.
+new SurrealEmbeddedTransport(existingClient);
+```
+
+`Client` exposes the underlying `ISurrealDbClient` so consumer code can layer the SDK's typed APIs alongside the Disruptor.Surface session abstraction.
+
+Caveats:
+
+- **Native binary distribution** — the embedded RocksDB engine ships native libraries via the `SurrealDb.Embedded.RocksDb` package. Consumer deployments need the right `runtimes/<rid>/native/...` payload for their target platform.
+- **Cross-process write coordination doesn't apply** — RocksDB is single-process. The WriterLease is still useful for in-process discipline (the in-process semaphore complements it) but the cross-process safety story it provides on the HTTP path doesn't translate.
+
 ### `SurrealConfig`
 
 ```csharp

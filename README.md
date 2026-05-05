@@ -117,11 +117,18 @@ await rw.CommitAsync(transport, lease);
 
 ```
 src/
-  Disruptor.Surface.Generator/  — Roslyn source generator (netstandard2.0, analyzer)
-  Disruptor.Surface.Runtime/    — runtime library: SurrealSession, IEntity, IRelationKind, RecordId,
-                        WriterLease, SurrealHttpClient, CommitPlanner, HydrationJson, …
-  Disruptor.Surface.Sample/     — console-app harness that exercises the full pipeline against
-                        a live SurrealDB; also the canonical worked example schema
+  Disruptor.Surface.Generator/             — Roslyn source generator (netstandard2.0, analyzer)
+  Disruptor.Surface.Runtime/               — runtime library: SurrealSession, IEntity, IRelationKind,
+                                             RecordId, WriterLease, SurrealHttpClient, CommitPlanner,
+                                             HydrationJson, …
+  Disruptor.Surface.Transport.Embedded/    — optional in-process transport backed by SurrealDB
+                                             embedded with a RocksDB file store. Drop-in replacement
+                                             for SurrealHttpClient when consumers want to skip the
+                                             /rpc round-trip (large commits, code-index full
+                                             rebuilds, single-process workloads).
+  Disruptor.Surface.Sample/                — console-app harness that exercises the full pipeline
+                                             against a live SurrealDB; also the canonical worked
+                                             example schema
 ```
 
 `Disruptor.Surface.Sample` references both the generator (as an analyzer, no runtime dep) and the

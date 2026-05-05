@@ -11,6 +11,7 @@
     <Project Path="src/Disruptor.Surface.Generator/Disruptor.Surface.Generator.csproj" />
     <Project Path="src/Disruptor.Surface.Runtime/Disruptor.Surface.Runtime.csproj" />
     <Project Path="src/Disruptor.Surface.Sample/Disruptor.Surface.Sample.csproj" />
+    <Project Path="src/Disruptor.Surface.Transport.Embedded/Disruptor.Surface.Transport.Embedded.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Disruptor.Surface.Tests/Disruptor.Surface.Tests.csproj" />
