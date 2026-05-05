@@ -133,6 +133,10 @@ public Task<SurrealSession> LoadDesignAsync(
 
 There is one `Load{Root}Async` method per `[AggregateRoot]`. The legacy load path remains alongside the unified `Workspace.Query.{Root}.WithId(...).LoadAsync(...)` shape — both produce the same hydrated session for a no-`Include*` call.
 
+#### Schema migrations are out of scope
+
+`ApplySchemaAsync` is forward-only and additive: every chunk uses `DEFINE … IF NOT EXISTS`, so re-applying is safe and idempotent for adds, but the library does **not** emit `REMOVE FIELD`, `REMOVE TABLE`, or any kind of diff between the model and the live database. Renaming a field, narrowing a type, dropping a table, and similar destructive shape changes are out of scope — too many context-dependent decisions (data preservation, online-vs-offline, downstream consumers) to wrap in a one-size helper without burning the caller. If you need migration semantics, run your own DDL alongside `ApplySchemaAsync`: iterate `Workspace.Schema` directly, splice your `REMOVE`/`UPDATE` statements where appropriate, and version the migration steps externally.
+
 ## Query API
 
 Two terminal verbs share one query AST:
