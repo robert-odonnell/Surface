@@ -470,6 +470,17 @@ public sealed class SurrealSession : IHydrationSink
         where T : class, IEntity, new()
     {
         ThrowIfClosed();
+        ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(transport);
+
+        if (query.PinnedId is not { } pinnedId)
+        {
+            throw new InvalidOperationException("FetchAsync requires Query.WithId(...) so top-up is scoped to an already-tracked aggregate root.");
+        }
+        if (!state.Entities.ContainsKey(pinnedId))
+        {
+            throw new InvalidOperationException($"FetchAsync target '{pinnedId}' is not tracked in this session.");
+        }
 
         var sql = query.Compile();
         using var doc = await transport.ExecuteAsync(sql, ct);
@@ -483,11 +494,11 @@ public sealed class SurrealSession : IHydrationSink
             case JsonValueKind.Array:
                 foreach (var row in rows.EnumerateArray())
                 {
-                    HydrateMergingRoot<T>(row, sink, query.Includes);
+                    HydrateMergingRoot<T>(row, sink, query.Includes, pinnedId);
                 }
                 break;
             case JsonValueKind.Object:
-                HydrateMergingRoot<T>(rows, sink, query.Includes);
+                HydrateMergingRoot<T>(rows, sink, query.Includes, pinnedId);
                 break;
             // Null / Undefined / scalar — nothing to merge.
         }
@@ -498,20 +509,22 @@ public sealed class SurrealSession : IHydrationSink
     /// entities receive HydratePartial (uncommitted writes preserved); new entities get
     /// the full Hydrate via <c>new T()</c>.
     /// </summary>
-    private void HydrateMergingRoot<T>(JsonElement row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes)
+    private void HydrateMergingRoot<T>(JsonElement row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes, RecordId pinnedId)
         where T : class, IEntity, new()
     {
         if (!HydrationJson.TryReadRecordId(row, "id", out var id)) return;
 
-        if (state.Entities.TryGetValue(id, out var existing))
+        if (!id.Equals(pinnedId))
         {
-            existing.HydratePartial(row, sink);
+            throw new InvalidOperationException(
+                $"FetchAsync expected root '{pinnedId}' but received '{id}'.");
         }
-        else
+        if (!state.Entities.TryGetValue(id, out var existing))
         {
-            var entity = new T();
-            entity.Hydrate(row, sink);
+            throw new InvalidOperationException(
+                $"FetchAsync expected tracked root '{pinnedId}', but it is not tracked.");
         }
+        existing.HydratePartial(row, sink);
 
         HydrateMergingNested(row, includes, sink);
     }

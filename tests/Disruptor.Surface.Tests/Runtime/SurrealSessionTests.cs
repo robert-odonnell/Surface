@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Disruptor.Surface.Runtime;
+using Disruptor.Surface.Runtime.Query;
 using Xunit;
 
 namespace Disruptor.Surface.Tests.Runtime;
@@ -155,6 +156,45 @@ public sealed class SurrealSessionTests
 
         Assert.Null(ex);
         Assert.Same(first, session.Get<StubEntity>(id));
+    }
+
+    [Fact]
+    public async Task FetchAsync_RequiresPinnedId()
+    {
+        var session = new SurrealSession();
+        var id = new RecordId("designs", "x");
+        ((IHydrationSink)session).Track(new StubEntity(id));
+        var query = new Query<StubEntity>("designs");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.FetchAsync(query, new NullTransport()));
+    }
+
+    [Fact]
+    public async Task FetchAsync_RequiresPinnedRootToBeTracked()
+    {
+        var session = new SurrealSession();
+        var query = new Query<StubEntity>("designs").WithId(new RecordId("designs", "x"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.FetchAsync(query, new NullTransport()));
+    }
+
+    [Fact]
+    public async Task FetchAsync_RejectsMismatchedRootRows()
+    {
+        var session = new SurrealSession();
+        var tracked = new RecordId("designs", "tracked");
+        ((IHydrationSink)session).Track(new StubEntity(tracked));
+        var query = new Query<StubEntity>("designs").WithId(tracked);
+        var transport = new StaticJsonTransport("""
+            [
+              {
+                "status":"OK",
+                "result":[{"id":"designs:other"}]
+              }
+            ]
+            """);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.FetchAsync(query, transport));
     }
 
     [Fact]
@@ -657,5 +697,12 @@ public sealed class SurrealSessionTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
             => Task.FromException<JsonDocument>(ex);
+    }
+
+    private sealed class StaticJsonTransport(string json) : ISurrealTransport
+    {
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
+            => Task.FromResult(JsonDocument.Parse(json));
     }
 }
