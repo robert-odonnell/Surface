@@ -1,0 +1,402 @@
+# Quickstart
+
+This guide builds a small Disruptor.Surface model, applies its generated SurrealDB schema, creates data, commits it, and reloads it.
+
+## 1. Add The Packages
+
+In a consumer project, reference the runtime package normally and the generator as a private analyzer dependency:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Disruptor.Surface.Runtime" Version="0.1.0-preview.9" />
+  <PackageReference Include="Disruptor.Surface.Generator" Version="0.1.0-preview.9" PrivateAssets="all" />
+</ItemGroup>
+```
+
+When working against this repository directly, use project references like the sample project:
+
+```xml
+<ItemGroup>
+  <ProjectReference Include="..\Disruptor.Surface.Runtime\Disruptor.Surface.Runtime.csproj" />
+  <ProjectReference Include="..\Disruptor.Surface.Generator\Disruptor.Surface.Generator.csproj"
+                    OutputItemType="Analyzer"
+                    ReferenceOutputAssembly="false" />
+</ItemGroup>
+```
+
+## 2. Declare A Model
+
+Create partial classes and mark the persistent members:
+
+```csharp
+using Disruptor.Surface.Annotations;
+using Disruptor.Surface.Runtime;
+
+namespace MyApp.Model;
+
+[Table, AggregateRoot]
+public partial class Design
+{
+    [Id] public partial DesignId Id { get; set; }
+
+    [Property] public partial string Title { get; set; }
+    [Reference, Cascade, Inline] public partial Details? Details { get; set; }
+
+    [Children] public partial IReadOnlyCollection<Constraint> Constraints { get; }
+}
+
+[Table]
+public partial class Constraint
+{
+    [Id] public partial ConstraintId Id { get; set; }
+
+    [Parent] public partial Design Design { get; set; }
+    [Property] public partial string Text { get; set; }
+}
+
+[Table]
+public partial class Details
+{
+    [Property] public partial string Summary { get; set; }
+}
+```
+
+Add one composition root class:
+
+```csharp
+using Disruptor.Surface.Annotations;
+
+namespace MyApp.Model;
+
+[CompositionRoot]
+public partial class Workspace
+{
+}
+```
+
+Build the project. The generator will emit typed ids, property bodies, schema metadata, and `Workspace.LoadDesignAsync(...)`.
+
+## 3. Configure SurrealDB
+
+Start SurrealDB. The sample harness expects this shape:
+
+```sh
+surreal start --bind 127.0.0.1:8000 \
+              --default-namespace project-brain \
+              --default-database workspace \
+              --username root --password secret \
+              rocksdb://path/to/db
+```
+
+Create a transport:
+
+```csharp
+using Disruptor.Surface.Runtime;
+using MyApp.Model;
+
+var config = new SurrealConfig(
+    Url: new Uri("http://127.0.0.1:8000"),
+    Namespace: "project-brain",
+    Database: "workspace",
+    User: "root",
+    Password: "secret",
+    Timeout: TimeSpan.FromSeconds(30));
+
+using var http = new HttpClient();
+await using var transport = new SurrealHttpClient(config, http);
+```
+
+You can also use `SurrealConfig.Default()` or `SurrealConfig.FromConnectionString(...)`.
+
+## 4. Apply The Schema
+
+Generated schema chunks are idempotent, so applying them at startup is safe:
+
+```csharp
+await Workspace.ApplySchemaAsync(transport);
+```
+
+For custom logging, filtering, or migration control, iterate chunks directly:
+
+```csharp
+foreach (var chunk in Workspace.Schema)
+{
+    await transport.ExecuteAsync(chunk);
+}
+```
+
+## 5. Create And Commit Data
+
+For a new aggregate, create a session with the generated reference registry, track entities, then commit:
+
+```csharp
+var workspace = new Workspace();
+await using var lease = await workspace.AcquireWriterAsync(transport);
+
+var session = new SurrealSession(Workspace.ReferenceRegistry);
+
+var design = session.Track(new Design
+{
+    Title = "First design",
+    Details = new Details { Summary = "Initial draft" }
+});
+
+var constraint = session.Track(new Constraint
+{
+    Design = design,
+    Text = "Must support one-shot commits"
+});
+
+await session.CommitAsync(transport, lease);
+```
+
+Object-initializer values are buffered until `Track` binds the entity to the session. Nested entity values, such as `Details`, are automatically tracked when written through a reference field.
+
+## 6. Load And Edit Data
+
+Use the generated composition-root load method for aggregate reads:
+
+```csharp
+var workspace = new Workspace();
+var readSession = await workspace.LoadDesignAsync(transport, design.Id);
+
+var loaded = readSession.Get<Design>(design.Id)
+    ?? throw new InvalidOperationException("Design did not hydrate.");
+
+Console.WriteLine(loaded.Title);
+foreach (var item in loaded.Constraints)
+{
+    Console.WriteLine(item.Text);
+}
+```
+
+To edit, load a fresh session, mutate the generated properties, and commit:
+
+```csharp
+await using var lease = await workspace.AcquireWriterAsync(transport);
+
+var writeSession = await workspace.LoadDesignAsync(transport, design.Id);
+var editable = writeSession.Get<Design>(design.Id)!;
+
+editable.Title = "Updated design";
+
+await writeSession.CommitAsync(transport, lease);
+```
+
+A `SurrealSession` is one-shot. After `CommitAsync` or `AbandonAsync`, the session closes and further reads or writes throw. Load a new session for the next unit of work.
+
+## 7. Query Without Loading An Aggregate
+
+For workloads that don't fit the "load the whole aggregate" shape — UI lists, search, dashboards, single-field updates — the generated query layer offers four read terminals on one shared AST. Each `[Table]` gets a sibling predicate factory (`{Name}Q`) and a query root on `Workspace.Query`:
+
+```csharp
+// 1. Hydrated entity reads — full row data, tracked in an opaque internal session.
+var matches = await Workspace.Query.Constraints
+    .Where(ConstraintQ.Description.Contains("security"))
+    .ExecuteAsync(transport);
+foreach (var c in matches)
+{
+    Console.WriteLine($"{c.Id}: {c.Description}");
+}
+
+// 2. Id-only selection — IReadOnlyList<ConstraintId>, no entity hydration.
+var ids = await Workspace.Query.Constraints
+    .Where(ConstraintQ.Description.Contains("security"))
+    .OrderBy(ConstraintQ.Description)
+    .Limit(50)
+    .IdsAsync(transport);
+
+// 3. Projection — typed DTOs, only the columns the projection touches travel back.
+public sealed record ConstraintRow(ConstraintId Id, string? Description);
+
+public static readonly ISurfaceProjection<ConstraintRow> ConstraintRowProj =
+    SurfaceProjection.For<ConstraintRow>(row => new ConstraintRow(
+        Id:          new ConstraintId(row.Read(ConstraintQ.Id).Value),
+        Description: row.Read(ConstraintQ.Description)));
+
+var rows = await Workspace.Query.Constraints
+    .Where(ConstraintQ.Description.Contains("security"))
+    .Limit(20)
+    .Select(ConstraintRowProj)
+    .ExecuteAsync(transport);
+```
+
+Predicate operators on `PropertyExpr<T>`: `Eq`, `Lt`/`Le`/`Gt`/`Ge`, `In(...)`, plus the string-only `Contains` extension. Compose multiple predicates with `Predicate.And/Or/Not`. Server-side `OrderBy` / `ThenBy` / `Limit` / `Start` chain on every terminal — render as `ORDER BY … LIMIT … START …` at the tail of the SurrealQL.
+
+Pin a single record by id and pull traversed slices in the same call:
+
+```csharp
+var rows = await Workspace.Query.Designs
+    .WithId(designId)
+    .IncludeDetails()                            // [Reference, Inline] — field.* projection
+    .IncludeConstraints(c => c                  // [Children] — nested SELECT
+        .Where(ConstraintQ.Description.Contains("security"))
+        .IncludeDetails())
+    .ExecuteAsync(transport);
+
+var design = rows.Single();
+foreach (var c in design.Constraints)
+    Console.WriteLine(c.Description);
+```
+
+Relation traversals follow forward (outgoing) or inverse (incoming) edges and pull the targets in the same query. Single-target relations take a configure lambda for filtering at the target side; multi-target unions and cross-aggregate relations are leaves:
+
+```csharp
+// Forward, single-target within-aggregate — drill into target's own slices.
+var c = await Workspace.Query.Constraints
+    .WithId(constraintId)
+    .IncludeRestrictions(r => r
+        .Where(StoryQ.Description.Contains("auth"))
+        .IncludeDetails())
+    .ExecuteAsync(transport);
+foreach (var story in c.Single().Restrictions)
+    Console.WriteLine(story.Description);
+
+// Inverse, multi-target — leaf, no lambda.
+var f = await Workspace.Query.Features
+    .WithId(featureId)
+    .IncludeRestrictions()
+    .ExecuteAsync(transport);
+
+// Cross-aggregate — id-typed result, just like the entity-side reads.
+var design = (await Workspace.Query.Designs
+    .WithId(designId)
+    .IncludeAssessments()
+    .ExecuteAsync(transport)).Single();
+foreach (var reviewId in design.Assessments)
+    Console.WriteLine(reviewId);
+```
+
+Edges also have their own root for flat `(source, target)` pair reads, when you want raw edges without hydrating either side as an entity:
+
+```csharp
+var pairs = await Workspace.Query.Edges.Restricts
+    .WhereIn(constraintIds)
+    .ExecuteAsync(transport);
+
+foreach (var (src, dst) in pairs.Select(p => (p.Source, p.Target)))
+    Console.WriteLine($"{src} → {dst}");
+```
+
+## 8. Hydrate Specific Ids Into A Tracked Session
+
+The fifth query terminal — `Workspace.Hydrate.{Table}(ids)` — pairs with `IdsAsync` for the `Load → Hydrate → Mutate → Commit` flow. Use it when the slice you want to mutate isn't aggregate-shaped (search results, paged scrollers, edge fanout):
+
+```csharp
+// 1. Load — id selection only.
+var symbolIds = await Workspace.Query.CodeSymbols
+    .Where(CodeSymbolQ.Name.Contains("Parser"))
+    .Limit(20)
+    .IdsAsync(transport);
+
+// 2. Hydrate — materialise into a tracked session, with a write-mode lease.
+await using var lease = await workspace.AcquireWriterAsync(transport);
+var session = await Workspace.Hydrate.CodeSymbols(symbolIds)
+    .ExecuteAsync(transport, lease);
+
+// 3. Mutate.
+foreach (var symbol in session.GetAll<CodeSymbol>())
+    symbol.LastSeen = DateTimeOffset.UtcNow;
+
+// 4. Commit.
+await session.CommitAsync(transport, lease);
+```
+
+Two overloads per table — typed `{Table}Id` for the ergonomic call site, raw `IRecordId` for cross-aggregate edge endpoints already collapsed to canonical record ids. The read-mode `ExecuteAsync(transport, ct)` (no lease) is also available for "load and read" flows that won't commit. Empty-id list short-circuits to an empty session with no transport call.
+
+`WithInclude(IIncludeNode)` accepts the same node AST as `Query<T>.WithInclude(...)` — wire SQL is identical to `Query<T>.Where(IdIn).WithInclude(...).ExecuteAsync` would emit. Per-relation ergonomic `Include*` helpers for the hydration path are deferred until a real callsite needs them.
+
+## 9. Filtered Loads And Top-Up Fetch
+
+Switch the terminal verb from `ExecuteAsync` to `LoadAsync` to get a write-mode session for the same query AST. Aggregate-root tables only — non-roots compile-error if you try.
+
+```csharp
+await using var lease = await workspace.AcquireWriterAsync(transport);
+var session = await Workspace.Query.Designs
+    .WithId(designId)
+    .IncludeDetails()
+    .IncludeConstraints(c => c.IncludeDetails())
+    .LoadAsync(transport, lease);
+
+var design = session.Get<Design>(designId)!;
+foreach (var c in design.Constraints) { /* works — Included */ }
+```
+
+Reads against slices that weren't included throw `LoadShapeViolationException`. The exception's message points at `session.FetchAsync(...)` — a top-up extension query that hydrates additional slices into the existing session:
+
+```csharp
+try
+{
+    var epics = design.Epics;
+}
+catch (LoadShapeViolationException)
+{
+    await session.FetchAsync(
+        Workspace.Query.Designs.WithId(designId).IncludeEpics(e => e.IncludeDetails()),
+        transport);
+    var epics = design.Epics;            // works — slice now loaded
+}
+```
+
+`Fetch` preserves uncommitted user mutations: if the user has already written to `design.Description` since load, a Fetch that re-hydrates the same row leaves the pending value alone (a `HasPendingWrite` guard skips field-level overwrites).
+
+## 10. Add Relations
+
+Declare a forward relation attribute and its inverse:
+
+```csharp
+using Disruptor.Surface.Annotations;
+
+namespace MyApp.Model;
+
+public sealed class RestrictsAttribute : ForwardRelation;
+public sealed class RestrictedByAttribute : InverseRelation<RestrictsAttribute>;
+```
+
+Use the attributes on relation collection properties:
+
+```csharp
+[Table, AggregateRoot]
+public partial class Design
+{
+    [Id] public partial DesignId Id { get; set; }
+
+    [Property] public partial string Title { get; set; }
+    [Children] public partial IReadOnlyCollection<Constraint> Constraints { get; }
+    [Children] public partial IReadOnlyCollection<UserStory> UserStories { get; }
+}
+
+[Table]
+public partial class Constraint
+{
+    [Id] public partial ConstraintId Id { get; set; }
+    [Parent] public partial Design Design { get; set; }
+    [Property] public partial string Text { get; set; }
+
+    [Restricts] public partial IReadOnlyCollection<UserStory> RestrictedStories { get; }
+
+    public void Restricts(UserStory story) => Session.Relate<Restricts>(this, story);
+}
+
+[Table]
+public partial class UserStory
+{
+    [Id] public partial UserStoryId Id { get; set; }
+    [Parent] public partial Design Design { get; set; }
+    [Property] public partial string Summary { get; set; }
+
+    [RestrictedBy] public partial IReadOnlyCollection<Constraint> Restrictions { get; }
+}
+```
+
+The generator emits `Restricts : IRelationKind`. Use `Session.Relate<Restricts>(...)`, `Session.Unrelate<Restricts>(...)`, `Session.QueryOutgoing<Restricts, T>(...)`, and `Session.QueryIncoming<Restricts, T>(...)` instead of string edge names.
+
+## 11. Run The Repository Sample
+
+From this repository:
+
+```sh
+dotnet run --project src/Disruptor.Surface.Sample
+```
+
+The sample applies schema, seeds `Design` and `Review` aggregates, commits them, reloads them, prints loaded data, and demonstrates writer lease theft detection.

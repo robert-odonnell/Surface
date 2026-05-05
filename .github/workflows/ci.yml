@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore Disruptor.Surface.slnx
+
+      - name: Build
+        run: dotnet build Disruptor.Surface.slnx --configuration Release --no-restore
+
+      # Disruptor.Surface.Sample's harness intentionally skipped — it round-trips against a live
+      # SurrealDB which CI doesn't have. Build coverage above is enough to catch
+      # generator + runtime regressions; the harness is the human smoke test.
+      - name: Test
+        run: dotnet test tests/Disruptor.Surface.Tests/Disruptor.Surface.Tests.csproj --configuration Release --no-build --verbosity normal
