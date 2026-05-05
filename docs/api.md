@@ -377,6 +377,25 @@ Useful members:
 - `ExecuteAsync(sql, ct)`: transport contract used by generated loaders, commits, and the query layer.
 - `SqlAsync(sql, ct)`: returns `SurrealResultSet` for direct SQL use.
 
+#### Reading `SurrealException` messages
+
+`SurrealHttpClient` walks the JSON-RPC response array and throws `SurrealException` on the **first** statement with `status: "ERR"`, propagating that statement's verbatim `result` text. For most failures (field coercion, schema violation, predicate type mismatch) this surfaces the real per-statement error directly in `ex.Message`.
+
+The exception is the transaction-rollup case. When SurrealDB aborts a `BEGIN…COMMIT` script and returns a single envelope like `{"status":"ERR","result":"the query was not executed due to a failed transaction"}` without per-statement detail, the message is generic. Recovery pattern:
+
+```csharp
+catch (SurrealException ex) when (ex.Message.Contains("not executed", StringComparison.OrdinalIgnoreCase))
+{
+    // Re-run the same script statement-by-statement, no BEGIN/COMMIT, against a
+    // throwaway transaction or a sandbox namespace. Each statement now reports its
+    // own ERR independently — the actual culprit (field type mismatch, missing
+    // table, malformed RELATE) appears with its own message. Then fix and retry
+    // the original transactional commit.
+}
+```
+
+This is caller-side; the library doesn't auto-replay because the side effects of partial replay aren't generally safe. `WriterLeaseStolenException` is the one transactional failure the library translates by name — caught and rethrown as a typed exception by `SurrealSession.CommitAsync` so the reload-and-retry loop is unambiguous.
+
 ### `SurrealConfig`
 
 ```csharp
@@ -420,6 +439,9 @@ Write methods:
 | `SetField(owner, field, value, kind)` | Low-level field write used by generated setters. |
 | `UnsetField(owner, field, kind)` | Low-level field clear used by generated setters. |
 | `Relate<TKind>(source, target)` | Queue relation creation. |
+| `Relate<TKind>(source, target, payload)` | Queue relation creation with a typed payload — renders as `RELATE source->edge->target CONTENT { … }`. Use for edges that carry data (confidence, run id, resolution method). |
+| `RelateOnce<TKind>(source, target)` | Idempotent relation creation. The edge id is derived deterministically from `(source, kind, target)` via SHA-256, so re-issuing the same triple lands on the same edge row instead of stacking duplicates. Renders as `UPSERT edge_table:<hash> CONTENT { in, out }`. The right verb for re-indexing / re-import workloads. |
+| `RelateOnce<TKind>(source, target, payload)` | Idempotent relate with payload — same deterministic id; payload merges with the auto-injected `in`/`out` fields. Re-running with a different payload overwrites the edge row's data fields (UPSERT semantics). |
 | `Unrelate<TKind>(source, target)` | Queue relation deletion. |
 | `UnrelateAllFrom<TKind>(source)` | Queue bulk deletion of all outgoing edges of a kind. |
 | `UnrelateAllTo<TKind>(target)` | Queue bulk deletion of all incoming edges of a kind. |
@@ -435,6 +457,18 @@ Boundary methods:
 | `AbandonAsync(ct)` | Drop pending writes and close the session. |
 
 After `CommitAsync` or `AbandonAsync`, `IsClosed` is `true` and public reads/writes throw.
+
+#### Large commits and batching
+
+A single `CommitAsync` lands the whole pending batch as one SurrealQL script — atomic when a `WriterLease` is supplied, atomic per-statement otherwise. For very large workloads (tens of thousands of records, bulk re-imports, code-index full-rebuilds) you'll eventually hit the practical ceiling: SurrealDB statement limits, HTTP body size, request timeout, or memory pressure on either side.
+
+The library doesn't auto-chunk. The reason is that the right chunking strategy depends on what the data looks like, and **the implementor knows how to slice their data better than the library does**:
+
+- A code-index rebuild can split by *symbol* (each chunk = one source file's worth of nodes + edges) and accept that intermediate states are visible because nothing else is reading mid-rebuild.
+- A financial ledger can't split at all — the whole batch must be one transaction.
+- A bulk import from a queue can split by *batch id* with a separate marker table tracking which ranges are committed.
+
+The recommended pattern: chunk on the caller side by creating one `SurrealSession` per chunk, committing each in sequence (or in parallel, with separate `WriterLease` instances if isolation matters), and tracking progress externally (a marker record, a log line, a sentinel field on a coordinator entity). The library gives you `session.Pending.Records.Count` and `session.Log.Count` so you can decide when a session has accumulated enough to flush. Don't fight the unit-of-work boundary — if a single logical transaction truly is huge, you have a modelling problem, not a transport problem.
 
 ### `WriterLease`
 
@@ -474,17 +508,32 @@ Exception:
 
 ### `RecordIdFormat`
 
-Single-source-of-truth validator for typed-id `Value` strings:
+Single-source-of-truth validator for typed-id `Value` strings. Three forms are accepted:
+
+| Form | Shape | Mint |
+| --- | --- | --- |
+| **Ulid** | 26 chars uppercase Crockford base32 | `Ulid.NewUlid().ToString()` (default for `RecordId.New`) |
+| **Slug** | starts with `[a-z]`, body `[a-z0-9_]`, ≤ 32 chars | hand-written for stable-named records (singletons, config rows) |
+| **Content hash** | bare `[0-9a-f]{24}` or prefixed `[a-z]_[0-9a-f]{24}` | `RecordIdFormat.HashText(text, prefix?)` — SHA-256 truncated to 12 bytes |
 
 ```csharp
-RecordIdFormat.Validate("primary");        // "primary"
-RecordIdFormat.Validate("01HXY...26chars"); // returns the Ulid string
-RecordIdFormat.Validate("Bad Value");      // throws FormatException
+RecordIdFormat.Validate("primary");                           // slug
+RecordIdFormat.Validate("01HXY...26chars");                   // ulid
+RecordIdFormat.Validate("0123456789abcdef01234567");          // bare hash
+RecordIdFormat.Validate("m_0123456789abcdef01234567");        // prefixed hash
+RecordIdFormat.Validate("Bad Value");                         // throws FormatException
 
-RecordIdFormat.IsValid("primary");          // true
-RecordIdFormat.IsValid(null);               // false
-RecordIdFormat.MaxSlugLength;               // 32
+var hash    = RecordIdFormat.HashText("System.IDisposable");          // bare 24-char hex
+var tagged  = RecordIdFormat.HashText("System.IDisposable", 'm');     // "m_<hash>"
+
+RecordIdFormat.IsValid("primary");                             // true
+RecordIdFormat.IsValid(null);                                  // false
+RecordIdFormat.MaxSlugLength;                                  // 32
+RecordIdFormat.HashLength;                                     // 24
+RecordIdFormat.PrefixedHashLength;                             // 26
 ```
+
+The hash form is the deterministic / content-addressed path: same input always yields the same id, so it's the natural pick when the record is keyed by something the caller knows up front (a code symbol's full name, a canonical message, a normalised URL). Birthday-collision-safe up to ~10¹⁴ ids at 96 bits. The optional single-letter prefix is for cheap visual categorisation (e.g. `m_` for module, `t_` for type, `f_` for function); it doesn't change collision behaviour.
 
 The generator routes every `{Name}Id(string Value)` ctor through `Validate`, so user code can't construct an id with a malformed value — the throw happens at construction, not at commit time.
 
@@ -493,10 +542,13 @@ The generator routes every `{Name}Id(string Value)` ctor through `Validate`, so 
 Canonical id type:
 
 ```csharp
-var id = RecordId.New("designs");
-var root = RecordId.Root("settings");
-var slot = RecordId.Slot("settings", "current");
-var parsed = RecordId.Parse("designs:01J...");
+var fresh   = RecordId.New("designs");                                      // ulid value
+var pinned  = new RecordId("designs", "primary");                           // slug value
+var parsed  = RecordId.Parse("designs:01J...");                             // round-trip parse
+
+// Deterministic content-addressed id — same (table, text) always yields the same id.
+var symbol  = RecordId.FromText("symbols", "Disruptor.Surface.Runtime.SurrealSession");
+var tagged  = RecordId.FromText("symbols", "ICodeSymbol", prefix: 'i');     // "symbols:i_<hash>"
 ```
 
 Important members:
@@ -505,7 +557,9 @@ Important members:
 - `Value`
 - `ToLiteral()`
 - `ToString()`
-- `From(IRecordId id)`
+- `From(IRecordId id)` — collapse a typed id (or any `IRecordId`) to a canonical `RecordId`.
+- `New(table, value?)` — fresh ulid-backed id.
+- `FromText(table, text, prefix?)` — deterministic content-addressed id; convenience over `RecordIdFormat.HashText`.
 - `TryParse(...)`
 - `IsForTable(table)`
 

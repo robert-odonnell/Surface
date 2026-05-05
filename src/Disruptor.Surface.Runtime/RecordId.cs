@@ -15,6 +15,18 @@ public readonly record struct RecordId(string Table, string Value) : IRecordId, 
         => new(table, value ?? Ulid.NewUlid().ToString());
 
     /// <summary>
+    /// Deterministic, content-addressed record id. The value is derived from
+    /// <paramref name="text"/> via <see cref="RecordIdFormat.HashText"/> — same input
+    /// always yields the same id, so this is the natural pick when the record is
+    /// keyed by something the caller knows up front (a code symbol's full name, a
+    /// canonical message, …) rather than minted at create time. Optional
+    /// <paramref name="prefix"/> is a single ASCII lowercase letter for visual
+    /// categorisation.
+    /// </summary>
+    public static RecordId FromText(string table, string text, char? prefix = null)
+        => new(table, RecordIdFormat.HashText(text, prefix));
+
+    /// <summary>
     /// Collapse any <see cref="IRecordId"/> (typed per-table or canonical) to the canonical
     /// <see cref="RecordId"/> form SurrealSession internals key off.
     /// </summary>

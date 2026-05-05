@@ -46,8 +46,14 @@ public static partial class SurrealFormatter
         IRecordId r => Runtime.RecordId.From(r).RecordId(),
         Guid g => g.ToString().StringLiteral(),
         Ulid u => u.ToString().StringLiteral(),
-        DateTime dt => dt.ToUniversalTime().ToString("O").StringLiteral(),
-        DateTimeOffset dto => dto.ToString("O").StringLiteral(),
+        // DateTime / DateTimeOffset render as SurrealQL datetime literals (`d"…"`), not
+        // plain strings. SchemaEmitter maps these CLR types to `TYPE datetime`; a string
+        // assignment to a schemafull datetime field is rejected by SurrealDB. The
+        // d-prefix tells the parser to coerce the inner ISO 8601 to datetime so writes
+        // and predicate operands both land correctly. Round-trip "O" gives sub-second
+        // precision; SurrealDB accepts both `Z` (UTC) and offset suffix forms.
+        DateTime dt => "d" + dt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture).StringLiteral(),
+        DateTimeOffset dto => "d" + dto.ToString("O", CultureInfo.InvariantCulture).StringLiteral(),
         Enum e => e.ToString().StringLiteral(),
         IEnumerable e => "[" + string.Join(", ", e.Cast<object?>().Select(RenderSurrealLiteral)) + "]",
         _ => JsonSerializer.Serialize(value, SurrealJson.SerializerOptions),

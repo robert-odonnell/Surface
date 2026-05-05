@@ -680,6 +680,69 @@ public sealed class SurrealSession : IHydrationSink
         Record(Command.Relate(src, edgeKind, tgt));
     }
 
+    /// <summary>
+    /// Relate variant that attaches a payload to the edge: <c>RELATE src-&gt;edge-&gt;tgt CONTENT { … }</c>.
+    /// Use when the relation itself carries data — confidence scores, resolution method,
+    /// run id, anything the schema declares as a field on the edge table. Each value
+    /// renders through <c>SurrealFormatter</c> just like a property write, so record ids,
+    /// strings, numbers, booleans, datetimes, and arrays all serialise correctly. Unlike
+    /// scalar field writes, no diffing is performed — every call produces a fresh
+    /// <c>RELATE</c> command with the supplied content. Pair with <c>Session.Relate&lt;TKind&gt;(src, tgt)</c>
+    /// when no payload is needed.
+    /// </summary>
+    public void Relate(
+        IRecordId source,
+        IRecordId target,
+        string edgeKind,
+        IReadOnlyDictionary<string, object?> payload)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        ThrowIfClosed();
+        var src = RecordId.From(source);
+        var tgt = RecordId.From(target);
+        edges[(src, edgeKind, tgt)] = true;
+        Record(Command.Relate(src, edgeKind, tgt, payload));
+    }
+
+    /// <summary>
+    /// Idempotent <c>Relate</c>. The edge id is derived deterministically from
+    /// <c>(source, edgeKind, target)</c>, so re-issuing the same triple lands on the
+    /// same edge row instead of stacking duplicates — exactly what repeated indexing /
+    /// re-import workloads need. Renders as
+    /// <c>UPSERT edge_table:&lt;hash&gt; CONTENT { in, out, … }</c> at commit time.
+    /// Pair with the regular <see cref="Relate(IRecordId, IRecordId, string)"/> when you
+    /// want each call to materialise a fresh edge.
+    /// </summary>
+    public void RelateOnce(IRecordId source, IRecordId target, string edgeKind)
+    {
+        ThrowIfClosed();
+        var src = RecordId.From(source);
+        var tgt = RecordId.From(target);
+        edges[(src, edgeKind, tgt)] = true;
+        Record(Command.RelateOnce(src, edgeKind, tgt));
+    }
+
+    /// <summary>
+    /// Idempotent <c>Relate</c> with edge payload — same deterministic id behaviour as
+    /// <see cref="RelateOnce(IRecordId, IRecordId, string)"/>; the supplied
+    /// <paramref name="payload"/> joins the auto-injected <c>in</c>/<c>out</c> fields in
+    /// the <c>CONTENT</c> clause. Re-running with a different payload overwrites the
+    /// edge row's data fields (the <c>UPSERT</c> semantics).
+    /// </summary>
+    public void RelateOnce(
+        IRecordId source,
+        IRecordId target,
+        string edgeKind,
+        IReadOnlyDictionary<string, object?> payload)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        ThrowIfClosed();
+        var src = RecordId.From(source);
+        var tgt = RecordId.From(target);
+        edges[(src, edgeKind, tgt)] = true;
+        Record(Command.RelateOnce(src, edgeKind, tgt, payload));
+    }
+
     /// <summary>Removes a single specific edge. No-op if the edge isn't currently tracked.</summary>
     public void Unrelate(IRecordId source, IRecordId target, string edgeKind)
     {
@@ -732,6 +795,11 @@ public sealed class SurrealSession : IHydrationSink
     // these so it can pass entity references straight through without an explicit .Id
     // accessor. Cross-aggregate emission keeps using the IRecordId surface.
     public void Relate(IEntity source, IEntity target, string edgeKind)         => Relate(source.Id, target.Id, edgeKind);
+    public void Relate(IEntity source, IEntity target, string edgeKind, IReadOnlyDictionary<string, object?> payload)
+        => Relate(source.Id, target.Id, edgeKind, payload);
+    public void RelateOnce(IEntity source, IEntity target, string edgeKind)     => RelateOnce(source.Id, target.Id, edgeKind);
+    public void RelateOnce(IEntity source, IEntity target, string edgeKind, IReadOnlyDictionary<string, object?> payload)
+        => RelateOnce(source.Id, target.Id, edgeKind, payload);
     public void Unrelate(IEntity source, IEntity target, string edgeKind)       => Unrelate(source.Id, target.Id, edgeKind);
     public void UnrelateAllFrom(IEntity source, string edgeKind)                => UnrelateAllFrom(source.Id, edgeKind);
     public void UnrelateAllTo(IEntity target, string edgeKind)                  => UnrelateAllTo(target.Id, edgeKind);
@@ -743,6 +811,18 @@ public sealed class SurrealSession : IHydrationSink
         => Relate(source, target, TKind.EdgeName);
     public void Relate<TKind>(IEntity source, IEntity target) where TKind : IRelationKind
         => Relate(source.Id, target.Id, TKind.EdgeName);
+    public void Relate<TKind>(IRecordId source, IRecordId target, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
+        => Relate(source, target, TKind.EdgeName, payload);
+    public void Relate<TKind>(IEntity source, IEntity target, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
+        => Relate(source.Id, target.Id, TKind.EdgeName, payload);
+    public void RelateOnce<TKind>(IRecordId source, IRecordId target) where TKind : IRelationKind
+        => RelateOnce(source, target, TKind.EdgeName);
+    public void RelateOnce<TKind>(IEntity source, IEntity target) where TKind : IRelationKind
+        => RelateOnce(source.Id, target.Id, TKind.EdgeName);
+    public void RelateOnce<TKind>(IRecordId source, IRecordId target, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
+        => RelateOnce(source, target, TKind.EdgeName, payload);
+    public void RelateOnce<TKind>(IEntity source, IEntity target, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
+        => RelateOnce(source.Id, target.Id, TKind.EdgeName, payload);
     public void Unrelate<TKind>(IRecordId source, IRecordId target) where TKind : IRelationKind
         => Unrelate(source, target, TKind.EdgeName);
     public void Unrelate<TKind>(IEntity source, IEntity target) where TKind : IRelationKind

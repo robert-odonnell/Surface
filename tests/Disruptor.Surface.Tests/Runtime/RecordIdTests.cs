@@ -75,4 +75,27 @@ public sealed class RecordIdTests
         Assert.True(id.IsForTable("designs"));
         Assert.False(id.IsForTable("Designs"));
     }
+
+    [Fact]
+    public void FromText_ProducesDeterministicIdForGivenTable()
+    {
+        // Same table+text always yields the same RecordId — the contract that makes
+        // this useful for content-addressed records like code-index entries.
+        var a = RecordId.FromText("symbols", "Disruptor.Surface.Runtime.SurrealSession");
+        var b = RecordId.FromText("symbols", "Disruptor.Surface.Runtime.SurrealSession");
+
+        Assert.Equal(a, b);
+        Assert.Equal("symbols", a.Table);
+        Assert.Equal(RecordIdFormat.HashLength, a.Value.Length);
+    }
+
+    [Fact]
+    public void FromText_WithPrefix_EmbedsPrefixInValue()
+    {
+        var id = RecordId.FromText("symbols", "Foo", prefix: 'm');
+
+        Assert.Equal("symbols", id.Table);
+        Assert.StartsWith("m_", id.Value);
+        Assert.Equal(RecordIdFormat.PrefixedHashLength, id.Value.Length);
+    }
 }

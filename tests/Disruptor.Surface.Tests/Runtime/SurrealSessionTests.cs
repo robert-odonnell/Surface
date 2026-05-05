@@ -250,6 +250,111 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
+    public void Relate_WithPayload_AttachesEdgeContent()
+    {
+        // Edges in SurrealDB can carry their own properties (confidence scores, run id,
+        // resolution method, …). The payload-aware overload threads the dict through
+        // Command.Relate's EdgeContent so SurrealCommandEmitter renders RELATE … CONTENT
+        // { … } instead of bare RELATE.
+        var session = new SurrealSession();
+        var src = new RecordId("findings", "f");
+        var tgt = new RecordId("observations", "o");
+        var payload = new Dictionary<string, object?>
+        {
+            ["confidence"] = 0.92,
+            ["method"] = "static-analysis",
+        };
+
+        session.Relate<StubKind>(src, tgt, payload);
+
+        var relate = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
+        Assert.Equal("stub_edge", relate.Key);
+        Assert.NotNull(relate.EdgeContent);
+        Assert.Equal(0.92, relate.EdgeContent!["confidence"]);
+        Assert.Equal("static-analysis", relate.EdgeContent["method"]);
+    }
+
+    [Fact]
+    public void RelateOnce_RecordsAsRelateOnceCommand_AndStillTracksEdge()
+    {
+        // RelateOnce takes the same shape on the in-memory edge tracker (so reads of
+        // session.QueryOutgoing etc. resolve identically) but records a different
+        // CommandOp so the emitter renders UPSERT-with-deterministic-id at commit.
+        var session = new SurrealSession();
+        var src = new RecordId("findings", "f");
+        var tgt = new RecordId("issues", "i");
+
+        session.RelateOnce<StubKind>(src, tgt);
+
+        var cmd = session.Log.Entries.Single(e =>
+            e.Op == CommandOp.Relate || e.Op == CommandOp.RelateOnce);
+        Assert.Equal(CommandOp.RelateOnce, cmd.Op);
+        Assert.Equal("stub_edge", cmd.Key);
+    }
+
+    [Fact]
+    public void RelateOnce_ProducesDeterministicEdgeId_AcrossInvocations()
+    {
+        // The whole point: same (src, kind, tgt) triple → same edge row id, every run.
+        // Render twice in separate sessions; the UPSERT target id must match.
+        string Render(string srcVal)
+        {
+            var session = new SurrealSession();
+            session.RelateOnce(new RecordId("findings", srcVal), new RecordId("issues", "i"), "stub_edge");
+            return SurrealCommandEmitter.Emit(session.Log.Entries);
+        }
+
+        var first = Render("f");
+        var second = Render("f");
+        Assert.Equal(first, second);
+        Assert.StartsWith("UPSERT stub_edge:", first);
+        Assert.Contains("CONTENT { in: findings:f, out: issues:i }", first);
+
+        // Different src → different id (no aliasing).
+        var different = Render("g");
+        Assert.NotEqual(first, different);
+    }
+
+    [Fact]
+    public void RelateOnce_WithPayload_MergesCallerFieldsWithInOut()
+    {
+        // Caller-supplied payload joins the auto-injected `in` / `out` fields in the
+        // CONTENT clause. SurrealDB needs `in`/`out` for graph-edge semantics; the
+        // payload contributes the user's data on top.
+        var session = new SurrealSession();
+        var payload = new Dictionary<string, object?>
+        {
+            ["confidence"] = 0.92,
+            ["method"] = "static-analysis",
+        };
+
+        session.RelateOnce<StubKind>(new RecordId("findings", "f"), new RecordId("issues", "i"), payload);
+        var sql = SurrealCommandEmitter.Emit(session.Log.Entries);
+
+        Assert.Contains("UPSERT stub_edge:", sql);
+        Assert.Contains("in: findings:f", sql);
+        Assert.Contains("out: issues:i", sql);
+        Assert.Contains("confidence: 0.92", sql);
+        Assert.Contains("method: \"static-analysis\"", sql);
+    }
+
+    [Fact]
+    public void Relate_WithoutPayload_LeavesEdgeContentNull()
+    {
+        // Regression: the legacy zero-payload overload must not start emitting an empty
+        // CONTENT clause. EdgeContent stays null so SurrealCommandEmitter takes the
+        // bare-RELATE branch.
+        var session = new SurrealSession();
+        var src = new RecordId("a", "1");
+        var tgt = new RecordId("b", "2");
+
+        session.Relate<StubKind>(src, tgt);
+
+        var relate = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
+        Assert.Null(relate.EdgeContent);
+    }
+
+    [Fact]
     public void QueryOutgoing_Returns_Targets_OnlyWhenOwnerIsSource()
     {
         var session = new SurrealSession();

@@ -63,6 +63,34 @@ public static class SurrealCommandEmitter
                     sb.Append(";\n");
                     break;
 
+                case CommandOp.RelateOnce:
+                {
+                    // Deterministic edge id: same (source, kind, target) triple always
+                    // produces the same hash, so UPSERT collides with the prior row on
+                    // re-relate instead of accumulating duplicates. The hash key uses
+                    // pipe separators (illegal in SurrealQL identifiers, so unambiguous)
+                    // and includes both table names so cross-table aliasing can't blur
+                    // the (designs:abc, owns, tasks:abc) and (designs:abc, owns, notes:abc)
+                    // triples into the same edge row. The `in`/`out` fields are required
+                    // for SurrealDB to treat the row as a graph edge; merging them into
+                    // EdgeContent keeps the renderer's CONTENT branch unified.
+                    var src = c.Target;
+                    var tgt = (RecordId)c.Value!;
+                    var edgeTable = c.Key!;
+                    _ = edgeTable.Identifier(); // validate; the rendered identifier comes through FormatId(edgeId) below
+                    var hash = RecordIdFormat.HashText($"{src.Table}:{src.Value}|{edgeTable}|{tgt.Table}:{tgt.Value}");
+                    var edgeId = new RecordId(edgeTable, hash);
+                    var merged = new Dictionary<string, object?>(c.EdgeContent ?? new Dictionary<string, object?>())
+                    {
+                        ["in"] = src,
+                        ["out"] = tgt,
+                    };
+                    sb.Append("UPSERT ").Append(FormatId(edgeId)).Append(" CONTENT ");
+                    AppendContent(merged);
+                    sb.Append(";\n");
+                    break;
+                }
+
                 case CommandOp.Unrelate:
                     sb.Append("DELETE ").Append(c.Key!.Identifier())
                       .Append(" WHERE in = ").Append(FormatId(c.Target))
@@ -131,6 +159,7 @@ public enum CommandOp
     Unset,             // UPDATE record:id UNSET key
     Delete,            // DELETE record:id
     Relate,            // RELATE source->edge->target
+    RelateOnce,        // UPSERT edge:<deterministic-hash(source, edge, target)> CONTENT { in: source, out: target, … } — idempotent re-relate
     Unrelate,          // DELETE edge WHERE in = source AND out = target
     UnrelateAllFrom,   // DELETE edge WHERE in = source         — bulk; persisted edges too
     UnrelateAllTo      // DELETE edge WHERE out = target        — bulk; persisted edges too
@@ -173,6 +202,16 @@ public readonly record struct Command(
 
     public static Command Relate(RecordId source, string edgeTable, RecordId target, IReadOnlyDictionary<string, object?>? content = null) =>
         new(CommandOp.Relate, source, edgeTable, target, EdgeContent: Freeze(content));
+
+    /// <summary>
+    /// Idempotent edge create. The edge id is derived deterministically from
+    /// <c>(source, edgeTable, target)</c> via <see cref="RecordIdFormat.HashText"/> at
+    /// emit time, so re-running the same triple lands on the same row regardless of
+    /// how many times <c>RelateOnce</c> is called. Renders as
+    /// <c>UPSERT edge_table:&lt;hash&gt; CONTENT { in, out, … }</c>.
+    /// </summary>
+    public static Command RelateOnce(RecordId source, string edgeTable, RecordId target, IReadOnlyDictionary<string, object?>? content = null) =>
+        new(CommandOp.RelateOnce, source, edgeTable, target, EdgeContent: Freeze(content));
 
     public static Command Unrelate(RecordId source, string edgeTable, RecordId target) =>
         new(CommandOp.Unrelate, source, edgeTable, target);

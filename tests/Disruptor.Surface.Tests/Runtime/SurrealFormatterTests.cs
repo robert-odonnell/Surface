@@ -72,4 +72,41 @@ public sealed class SurrealFormatterTests
         Assert.Equal("\"line1\\nline2\\ttab\\rcr\"",
             "line1\nline2\ttab\rcr".StringLiteral());
     }
+
+    [Fact]
+    public void RenderSurrealLiteral_DateTime_ProducesDPrefixedDatetimeLiteral()
+    {
+        // SchemaEmitter maps DateTime to `TYPE datetime`; SurrealDB rejects a plain
+        // string assignment to a schemafull datetime field. The d-prefix coerces the
+        // inner ISO 8601 to a datetime literal at parse time, so writes and predicate
+        // operands both land correctly.
+        var dt = new DateTime(2026, 5, 5, 12, 34, 56, DateTimeKind.Utc);
+
+        var rendered = ((object)dt).RenderSurrealLiteral();
+
+        Assert.Equal("d\"2026-05-05T12:34:56.0000000Z\"", rendered);
+    }
+
+    [Fact]
+    public void RenderSurrealLiteral_DateTime_LocalKind_NormalizesToUtc()
+    {
+        // Local-kind DateTime gets coerced to UTC before rendering so the wire value
+        // is always interpretable without depending on the server's timezone.
+        var local = new DateTime(2026, 5, 5, 14, 0, 0, DateTimeKind.Local);
+
+        var rendered = ((object)local).RenderSurrealLiteral();
+
+        Assert.StartsWith("d\"", rendered);
+        Assert.EndsWith("Z\"", rendered);
+    }
+
+    [Fact]
+    public void RenderSurrealLiteral_DateTimeOffset_ProducesDPrefixedDatetimeLiteralWithOffset()
+    {
+        var dto = new DateTimeOffset(2026, 5, 5, 12, 34, 56, TimeSpan.FromHours(2));
+
+        var rendered = ((object)dto).RenderSurrealLiteral();
+
+        Assert.Equal("d\"2026-05-05T12:34:56.0000000+02:00\"", rendered);
+    }
 }
