@@ -585,6 +585,18 @@ public interface ISurrealTransport : IAsyncDisposable
 
 A SurrealQL string in, a `JsonDocument` out. No vars — bindings are inlined as SurrealQL literals upstream by `QueryCompiler` / `SurrealCommandEmitter` / etc. via `SurrealFormatter`. Implement this for a custom transport (test recorders, alternate connectivity, retry policy); most users use `SurrealHttpClient`.
 
+### Embedded vs HTTP — picking the right terminal
+
+The query surface is identical across transports — `SurrealHttpClient` and `SurrealEmbeddedTransport` both implement `ISurrealTransport` and `ISurrealExecutor`, and every terminal (`ExecuteAsync`, `IdsAsync`, `Select(...).ExecuteAsync`, `Hydrate.{Table}(ids).ExecuteAsync`, `LoadAsync`) works the same against either. The right terminal to pick depends on the transport's cost model:
+
+**HTTP transport — round-trips are expensive.**
+The classical pattern: `LoadAsync` to materialise a coherent aggregate slice into a tracked session, mutate sync, commit once. A handful of subselect-laden requests is cheaper than walking the graph one round-trip per node. `IdsAsync` + `Hydrate.{Table}(ids)` is the right shape when the slice you want isn't aggregate-shaped (search results, paged scrollers, edge fanout) — keeps round-trips bounded while still giving you a tracked session.
+
+**Embedded transport — round-trips are cheap.**
+Same query surface, different incentives. Projections become the obvious default for read APIs: `SELECT field1, field2 FROM table WHERE …` is cheap, the result rows are immutable DTOs, no session-machinery overhead. Reach for slice hydration (`Hydrate.{Table}(ids).ExecuteAsync` or `LoadAsync`) only when you're about to mutate. The value of pre-loading neighbouring slices into C# dictionaries drops sharply when SurrealDB is in-process — most of what those dictionaries replace is "avoid another round-trip", which doesn't apply.
+
+The runtime doesn't pick for you — there are no capability flags or transport-aware code paths in the query layer. The terminal you call is the strategy you've chosen; same code runs the same way against either transport.
+
 ### `ISurrealExecutor` and `SurrealCommand`
 
 ```csharp
