@@ -159,6 +159,29 @@ public sealed class Query<T>
         => ExecuteIntoSessionAsync(new SurrealSession(), transport, ct);
 
     /// <summary>
+    /// Bind a typed projection to this query. The returned <see cref="ProjectionQuery{T, TRow}"/>
+    /// preserves the chain (Where / OrderBy / Limit / Start / WithId still work) but its
+    /// terminal <c>ExecuteAsync</c> compiles to <c>SELECT field1, field2 FROM …</c> via
+    /// <see cref="QueryCompiler.CompileProjection"/> and materialises each row through the
+    /// projection's lambda — no entity hydration, no session.
+    /// <para>
+    /// Projections are flat by definition; chaining <see cref="WithInclude"/> after
+    /// <c>.Select(...)</c> is rejected at compile time (the projection chain doesn't expose
+    /// the include surface).
+    /// </para>
+    /// </summary>
+    public ProjectionQuery<T, TRow> Select<TRow>(ISurfaceProjection<TRow> projection)
+    {
+        ArgumentNullException.ThrowIfNull(projection);
+        if (Includes.Count > 0)
+        {
+            throw new InvalidOperationException(
+                "Cannot bind a projection to a query with Include* calls. Projections are flat; use ExecuteAsync if you need traversal, or drop the includes before .Select(...).");
+        }
+        return new ProjectionQuery<T, TRow>(this, projection);
+    }
+
+    /// <summary>
     /// Compile this query to SurrealQL + parameter bindings without executing. Used by
     /// <see cref="SurrealSession.FetchAsync{T}"/> and any other caller that wants to
     /// inspect or splice the rendered query before sending.

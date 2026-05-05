@@ -44,6 +44,41 @@ internal static class QueryCompiler
     }
 
     /// <summary>
+    /// Build the SurrealQL for a projection selection: <c>SELECT field1, field2 FROM table …</c>.
+    /// Mirrors <see cref="CompileIdsOnly"/> but takes an explicit comma-separated SELECT list
+    /// derived from <see cref="ISurfaceProjection{TRow}.SelectFields"/>. Each field name is
+    /// passed through <see cref="SurrealFormatter.Identifier"/> for validation.
+    /// Includes are not supported on this path: projections are flat by definition.
+    /// </summary>
+    public static string CompileProjection(
+        string table,
+        IReadOnlyList<string> selectFields,
+        IPredicate? filter,
+        RecordId? pinnedId,
+        IReadOnlyList<OrderClause>? orderClauses = null,
+        int? limit = null,
+        int? start = null)
+    {
+        if (selectFields.Count == 0)
+        {
+            throw new ArgumentException("Projection requires at least one field.", nameof(selectFields));
+        }
+
+        var sb = new StringBuilder();
+        sb.Append("SELECT ");
+        for (var i = 0; i < selectFields.Count; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            sb.Append(selectFields[i].Identifier());
+        }
+        sb.Append(" FROM ").Append(table.Identifier());
+
+        AppendWhereOrderLimitStart(sb, filter, pinnedId, orderClauses, limit, start);
+        sb.Append(';');
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Build the SurrealQL for an id-only selection: <c>SELECT id FROM table …</c>.
     /// The terminal verb on <see cref="Query{T}"/> for "load just the matching ids,
     /// nothing else" — paired with the per-table generator-emitted <c>IdsAsync</c>

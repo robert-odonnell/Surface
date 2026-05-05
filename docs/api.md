@@ -141,9 +141,10 @@ There is one `Load{Root}Async` method per `[AggregateRoot]`. The legacy load pat
 
 ## Query API
 
-Three terminal verbs share one query AST:
+Four terminal verbs share one query AST:
 
 - `IdsAsync(transport, ct)` — id-only selection. Returns `IReadOnlyList<{Table}Id>`; no entity hydration, no session. Generator-emitted per `[Table]`.
+- `Select(projection).ExecuteAsync(transport, ct)` — projection mode. Returns immutable `IReadOnlyList<TRow>`; no entity hydration, no session. The projection owns the SELECT list and the per-row materialiser.
 - `ExecuteAsync(transport, ct)` — read mode. Returns hydrated entities; the supporting session is internal and never exposed.
 - `LoadAsync(transport, lease, ct)` — write mode. Returns a `SurrealSession` you mutate and commit. Only emitted on `Query<TRoot>` where `TRoot.IsAggregateRoot`.
 
@@ -214,6 +215,40 @@ public sealed class Query<T> where T : class, IEntity, new()
 ```
 
 `Where` AND-merges across calls. `WithId` overwrites. `WithInclude` is the primitive the generated `Include*` extensions call into. `Compile()` renders the AST to a SurrealQL string with every binding inlined as a literal via `SurrealFormatter` — no separate parameter dictionary.
+
+### Projections — `Select(projection).ExecuteAsync`
+
+Projections compile to `SELECT field1, field2 FROM table …` — only the columns the projection touches travel back, and each row materialises straight into a user-defined record (typically a positional `record`):
+
+```csharp
+public sealed record SymbolSearchResult(string Name, string QualifiedName, int Line);
+
+public static class SymbolProjections
+{
+    public static readonly ISurfaceProjection<SymbolSearchResult> SearchResult =
+        SurfaceProjection.For<SymbolSearchResult>(row => new SymbolSearchResult(
+            Name:          row.Read(CodeSymbolQ.Name),
+            QualifiedName: row.Read(CodeSymbolQ.QualifiedName),
+            Line:          row.Read(CodeSymbolQ.Line)));
+}
+
+var results = await workspace.Query.CodeSymbols
+    .Where(CodeSymbolQ.Name.Contains("Parser"))
+    .OrderBy(CodeSymbolQ.QualifiedName)
+    .Limit(20)
+    .Select(SymbolProjections.SearchResult)
+    .ExecuteAsync(transport);
+// IReadOnlyList<SymbolSearchResult> — no session, no tracking.
+```
+
+The library does **not** generate projection types; the user owns the `TRow` shape and the materialise lambda. At construction time the lambda runs once with a probe row that captures each `Read(PropertyExpr<T>)` call into the SELECT field list (in first-read order). At query time the lambda runs once per row with a JSON-backed row that deserialises each value via `SurrealJson.SerializerOptions`.
+
+Constraints:
+- The lambda must call `row.Read(...)` at least once (zero fields = zero meaningful SELECT).
+- The target type's constructor must accept default values during the probe — typically a positional record with no inline validation. Constructors that throw on null/empty surface as `ProjectionDiscoveryException` with hints.
+- `Include*` calls before `.Select(...)` are rejected — projections are flat by definition. Use `ExecuteAsync` directly if you need traversal.
+- Field reads must be unconditional (no branches that skip `row.Read(...)`); discovery captures only the fields the lambda touches on the probe pass.
+- v1 supports primitive scalars + nullables. Typed ids and complex types defer until a real callsite needs them.
 
 ### Id-only selection — `IdsAsync`
 
