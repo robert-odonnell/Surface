@@ -255,6 +255,17 @@ public sealed class SurrealSession : IHydrationSink
     // ──────────────────────────── reads (sync) ───────────────────────────────
 
     public T GetParent<T>(IEntity owner) where T : class, IEntity
+        => GetParentOrDefault<T>(owner)
+           ?? throw new InvalidOperationException($"Entity {owner.Id} has no registered parent of type {typeof(T).Name}.");
+
+    /// <summary>
+    /// Look up the registered parent without throwing on miss. Returns null when the
+    /// owner has no parent link, when the parent isn't tracked, or when the tracked
+    /// parent isn't assignable to <typeparamref name="T"/>. Used by generator-emitted
+    /// <see cref="IEntity.SaveAsync"/> for forward-dependency walks where a missing
+    /// parent simply means "no FK to dispatch in CONTENT", not an error.
+    /// </summary>
+    public T? GetParentOrDefault<T>(IEntity owner) where T : class, IEntity
     {
         ThrowIfClosed();
         if (state.Parents.TryGetValue(owner.Id, out var parentId)
@@ -263,7 +274,7 @@ public sealed class SurrealSession : IHydrationSink
         {
             return typed;
         }
-        throw new InvalidOperationException($"Entity {owner.Id} has no registered parent of type {typeof(T).Name}.");
+        return null;
     }
 
     public T GetReference<T>(IEntity owner, string fieldName) where T : class, IEntity
@@ -982,6 +993,118 @@ public sealed class SurrealSession : IHydrationSink
             // IsTracked checks to "yes, in DB now".
             session.state.Entities[entity.Id] = entity;
             _savedThisPass.Add(entity.Id);
+        }
+    }
+
+    /// <summary>
+    /// Dispatches a RELATE through <paramref name="tx"/>: creates an edge of kind
+    /// <typeparamref name="TKind"/> from <paramref name="source"/> to <paramref name="target"/>.
+    /// Updates the in-memory edge index too so subsequent reads see the new edge.
+    /// Use the <see cref="RecordId.Idempotent"/> default for safe re-dispatch (the
+    /// schema's UNIQUE INDEX rejects duplicates regardless).
+    /// </summary>
+    public async Task RelateAsync<TKind>(
+        IRecordId source,
+        IRecordId target,
+        Disruptor.Surreal.Transaction tx,
+        CancellationToken ct = default) where TKind : IRelationKind
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(tx);
+        ThrowIfClosed();
+        try
+        {
+            var src = RecordId.From(source);
+            var tgt = RecordId.From(target);
+            var edge = RecordId.Idempotent(TKind.EdgeName);
+            state.Edges[(src, TKind.EdgeName, tgt)] = true;
+            var sb = new StringBuilder();
+            SurrealCommandEmitter.EmitOne(Command.Relate(src, edge, tgt), sb);
+            await tx.QueryAsync(sb.ToString(), bindings: null, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            closed = true;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Dispatches a DELETE-edge through <paramref name="tx"/>: removes edges of kind
+    /// <typeparamref name="TKind"/> matching the supplied endpoints. At least one of
+    /// <paramref name="source"/> / <paramref name="target"/> must be non-null; both
+    /// non-null targets a single edge, one-side-null is the bulk form (every matching
+    /// edge of the kind, persisted-or-not).
+    /// </summary>
+    public async Task UnrelateAsync<TKind>(
+        IRecordId? source,
+        IRecordId? target,
+        Disruptor.Surreal.Transaction tx,
+        CancellationToken ct = default) where TKind : IRelationKind
+    {
+        if (source is null && target is null)
+        {
+            throw new ArgumentException(
+                "UnrelateAsync requires at least one of source or target to be non-null.");
+        }
+        ArgumentNullException.ThrowIfNull(tx);
+        ThrowIfClosed();
+        try
+        {
+            var src = source is null ? (RecordId?)null : RecordId.From(source);
+            var tgt = target is null ? (RecordId?)null : RecordId.From(target);
+            // Drop matching loaded edges from the in-memory snapshot too.
+            foreach (var key in state.Edges.Keys.ToList())
+            {
+                if (key.Edge != TKind.EdgeName) continue;
+                if (src is { } s && key.Source != s) continue;
+                if (tgt is { } t && key.Target != t) continue;
+                state.Edges.Remove(key);
+            }
+            var sb = new StringBuilder();
+            SurrealCommandEmitter.EmitOne(Command.Unrelate(src, TKind.EdgeName, tgt), sb);
+            await tx.QueryAsync(sb.ToString(), bindings: null, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            closed = true;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Dispatches a DELETE for <paramref name="entity"/> through <paramref name="tx"/>.
+    /// Runs <see cref="IEntity.OnDeleting"/> first so user-side cleanup (child clears,
+    /// reverse references) lands ahead of the entity's own DELETE. Removes the entity
+    /// from the in-memory snapshot (<see cref="CleanupLocalState"/>). The session stays
+    /// open — the app may continue with further SaveAsync / DeleteAsync calls in the
+    /// same transaction.
+    /// <para>
+    /// Cascade planning ([Reject] / [Unset] / [Cascade] semantics on incoming references)
+    /// is deferred to a follow-up — for now, the user is responsible for deleting
+    /// dependents first or accepting whatever the schema's REFERENCE ON DELETE clause
+    /// dictates. Re-anchoring the cascade against the snapshot lands when PendingState
+    /// retires.
+    /// </para>
+    /// </summary>
+    public async Task DeleteAsync(IEntity entity, Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        ArgumentNullException.ThrowIfNull(tx);
+        ThrowIfClosed();
+        try
+        {
+            entity.OnDeleting();
+            var sb = new StringBuilder();
+            SurrealCommandEmitter.EmitOne(Command.Delete(entity.Id), sb);
+            await tx.QueryAsync(sb.ToString(), bindings: null, ct).ConfigureAwait(false);
+            CleanupLocalState(entity.Id);
+        }
+        catch
+        {
+            closed = true;
+            throw;
         }
     }
 

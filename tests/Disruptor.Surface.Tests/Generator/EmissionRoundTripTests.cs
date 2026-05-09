@@ -125,6 +125,67 @@ public sealed class EmissionRoundTripTests
     }
 
     [Fact]
+    public async Task SaveAsync_AutoRecursesIntoChildren()
+    {
+        // Two-table fixture: Design root + Constraint child via [Parent]. User constructs
+        // the parent + child, Tracks the child (which cascade-Tracks the parent through
+        // the [Parent] setter), then SaveAsync(design) should walk children and dispatch
+        // the constraint AFTER the design (parent's row must exist before child's FK
+        // resolves inside the txn).
+        const string source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            using System.Collections.Generic;
+            namespace M;
+
+            [Table, AggregateRoot] public partial class Design {
+                [Id] public partial DesignId Id { get; set; }
+                [Property] public partial string Description { get; set; }
+                [Children] public partial IReadOnlyCollection<Constraint> Constraints { get; }
+            }
+
+            [Table] public partial class Constraint {
+                [Id] public partial ConstraintId Id { get; set; }
+                [Parent] public partial Design Design { get; set; }
+                [Property] public partial string Description { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+        var assembly = GeneratorHarness.CompileAndLoad(source);
+        var design = NewEntity(assembly, "M.Design");
+        var constraint = NewEntity(assembly, "M.Constraint");
+        SetProperty(design, "Description", "design root");
+        SetProperty(constraint, "Description", "child constraint");
+        SetProperty(constraint, "Design", design);
+
+        var session = new SurrealSession();
+        // Track the child explicitly — that cascade-Tracks the parent via the [Parent]
+        // setter, which registers the parent-child link in state.Parents so the
+        // children walk in design's SaveAsync sees the constraint.
+        var trackMethod = typeof(SurrealSession).GetMethods()
+            .First(m => m.Name == "Track" && m.IsGenericMethod);
+        trackMethod.MakeGenericMethod(assembly.GetType("M.Constraint")!).Invoke(session, [constraint]);
+
+        var fake = new Disruptor.Surface.Tests.Runtime.FakeSurreal.RecordingConnection();
+        await using var db = new Disruptor.Surreal.Surreal(fake);
+        await using var tx = await db.BeginTransactionAsync();
+
+        await session.SaveAsync((IEntity)design, tx);
+
+        // Wire shape: begin, then CREATE designs:..., then CREATE constraints:...
+        // Children dispatched AFTER the parent.
+        Assert.Equal("begin", fake.Sent[0].Method);
+        var queries = fake.Sent.Where(s => s.Method == "query").ToList();
+        Assert.Equal(2, queries.Count);
+        var firstSql = ((Disruptor.Surreal.Values.StringValue)((Disruptor.Surreal.Values.ArrayValue)queries[0].Params!).Array[0]).Value;
+        var secondSql = ((Disruptor.Surreal.Values.StringValue)((Disruptor.Surreal.Values.ArrayValue)queries[1].Params!).Array[0]).Value;
+        Assert.Contains("CREATE designs:", firstSql);
+        Assert.Contains("CREATE constraints:", secondSql);
+        Assert.Contains("design:", secondSql); // child's [Parent] FK back to design
+    }
+
+    [Fact]
     public async Task SaveAsync_EmittedPerEntity_DispatchesCreateWithContent()
     {
         // Smoke test for the per-entity SaveAsync generator emit. Compile the minimal

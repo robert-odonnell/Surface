@@ -985,10 +985,10 @@ internal static class PartialEmitter
             .AppendLine();
 
         // Forward dependency walk: [Reference] + [Parent], skip relation-role properties.
-        // [Reference]/[Parent] live in the session, not as backing fields, so we read
-        // through the property accessor — which only works once the session has bound
-        // the entity. SurrealSession.SaveAsync does that via EnsureBoundForSave before
-        // calling this method, so the property reads here are safe.
+        // [Reference]/[Parent] live in the session (state.References / state.Parents),
+        // not as backing fields, so we read through OrDefault session helpers. Reads
+        // require a bound session — SurrealSession.SaveAsync runs EnsureBoundForSave
+        // before calling this method, so they're safe.
         var hasForwardDeps = false;
         foreach (var p in table.Properties)
         {
@@ -997,15 +997,24 @@ internal static class PartialEmitter
             if (!isFwdDep) continue;
             hasForwardDeps = true;
             var local = $"__dep_{ToCamel(p.Name)}";
-            // Read via the OrDefault path so a missing optional ref is null rather than
-            // throwing. For mandatory refs the user is responsible for setting them; if
-            // they didn't, the FK in the dispatched CONTENT will be missing and the
-            // server-side schema will fail the CREATE — which is the right error.
             var typeArg = StripNullable(p.Type.FullyQualifiedName);
+            // [Parent] reads from state.Parents (one parent per entity); [Reference]
+            // reads from state.References (per-field). Different dicts, different
+            // accessors. Both OrDefault to make missing-link a no-op rather than throw.
+            if (p.Kinds.HasFlag(PropertyKind.Parent))
+            {
+                builder
+                    .Append(indent).Append("    var ").Append(local)
+                    .Append(" = Session.GetParentOrDefault<").Append(typeArg).AppendLine(">(this);");
+            }
+            else
+            {
+                builder
+                    .Append(indent).Append("    var ").Append(local)
+                    .Append(" = Session.GetReferenceOrDefault<").Append(typeArg).Append(">(this, \"")
+                    .Append(SurrealNaming.ToFieldName(p.Name)).AppendLine("\");");
+            }
             builder
-                .Append(indent).Append("    var ").Append(local)
-                .Append(" = Session.GetReferenceOrDefault<").Append(typeArg).Append(">(this, \"")
-                .Append(SurrealNaming.ToFieldName(p.Name)).AppendLine("\");")
                 .Append(indent).Append("    if (").Append(local).Append(" is not null && !ctx.IsTracked(((")
                 .Append(EntityInterface).Append(')').Append(local).AppendLine(").Id))")
                 .Append(indent).Append("        await ctx.SaveAsync(").Append(local).AppendLine(", ct);");
@@ -1054,6 +1063,26 @@ internal static class PartialEmitter
             .Append(indent).AppendLine("    await ctx.Transaction.QueryAsync(__sb.ToString(), bindings: null, ct);")
             .AppendLine()
             .Append(indent).AppendLine("    ctx.MarkSaved(this);");
+
+        // Children walk: AFTER self-dispatch (children's [Parent] FK needs this row to
+        // exist in the txn before their CREATE lands). For each [Children] collection,
+        // iterate via the property accessor (returns IReadOnlyCollection<T>); recurse
+        // into any not-yet-saved entries via ctx.SaveAsync.
+        var hasChildren = false;
+        foreach (var p in table.Properties)
+        {
+            if (!p.Kinds.HasFlag(PropertyKind.Children)) continue;
+            hasChildren = true;
+            var elemLocal = $"__child_{ToCamel(p.Name)}";
+            builder
+                .AppendLine()
+                .Append(indent).Append("    foreach (var ").Append(elemLocal).Append(" in this.").Append(p.Name).AppendLine(")")
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        if (!ctx.IsTracked(((").Append(EntityInterface).Append(')').Append(elemLocal).AppendLine(").Id))")
+                .Append(indent).Append("            await ctx.SaveAsync(").Append(elemLocal).AppendLine(", ct);")
+                .Append(indent).AppendLine("    }");
+        }
+        _ = hasChildren; // structure-only, no follow-up emission needed
 
         builder.Append(indent).AppendLine("}");
     }
