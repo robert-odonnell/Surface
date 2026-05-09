@@ -50,13 +50,9 @@ public static class CommitPlanner
 
         // Bulk unrelates run in the removal phase so additions queued for the same
         // (kind, source) / (kind, target) pair re-establish the edge after the DELETE.
-        foreach (var (kind, source) in pending.BulkUnrelateFrom)
+        foreach (var (kind, source, target) in pending.BulkUnrelates)
         {
-            relationRemovals.Add(Command.UnrelateAllFrom(source, kind));
-        }
-        foreach (var (kind, target) in pending.BulkUnrelateTo)
-        {
-            relationRemovals.Add(Command.UnrelateAllTo(target, kind));
+            relationRemovals.Add(Command.Unrelate(source, kind, target));
         }
 
         var plan = new List<Command>(preDeletes.Count + creates.Count + fieldUpdates.Count
@@ -353,13 +349,14 @@ public static class CommitPlanner
         List<Command> removals,
         List<Command> additions)
     {
-        // Two factories — pick once based on the sticky Idempotent flag so the
-        // RELATE-with-explicit-edge-id form lands whenever the user reached for
-        // RelateOnce. Auto-id RELATE goes on the wire for non-idempotent calls.
+        // Uniqueness is enforced at the schema level by the `DEFINE INDEX … UNIQUE`
+        // on (in, out). The planner's existed-at-start optimization avoids emitting
+        // a RELATE that would otherwise collide with the index — re-running on a
+        // loaded edge is a no-op, not an error. The edge id (Random Ulid / Slug /
+        // Idempotent) is whatever the user supplied at Relate time; the emit layer
+        // resolves the Idempotent sentinel via <see cref="RecordId.Resolve"/>.
         Command BuildRelate(IReadOnlyDictionary<string, object?>? content)
-            => rel.Idempotent
-                ? Command.RelateOnce(rel.Source, rel.Kind, rel.Target, content)
-                : Command.Relate(rel.Source, rel.Kind, rel.Target, content);
+            => Command.Relate(rel.Source, rel.Edge, rel.Target, content);
 
         switch (rel.State)
         {

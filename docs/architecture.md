@@ -233,7 +233,13 @@ The planned phases are:
 
 Fresh records (Create intent + no prior existence) fold their pending sets into a single `CREATE record:id CONTENT { … }` statement. SurrealDB's `TYPE RELATION ENFORCED` validates relation endpoints against the in-progress transactional state at the moment of `RELATE`; the single-statement form lands the endpoint fully populated before any relation-creating statement runs, where a bare `CREATE id;` followed by per-field `UPDATE id SET …` (or `UPSERT`) can leave the record in a state the enforcer rejects.
 
-Idempotent relations (`session.RelateOnce`) flow through `pending.Relations` with a sticky flag and emit `RELATE source -> edge_table:<deterministic-hash> -> target [CONTENT { … }]` — a graph-traversable edge with a content-derived id, safe to re-run.
+Edge uniqueness is enforced at the schema layer: every relation table is emitted with a `DEFINE INDEX … COLUMNS in, out UNIQUE`. The runtime always emits an explicit edge id; the strategy is carried by the `RecordId edge` argument to `Relate`:
+
+- **Random** — `RecordId.New(table)` mints a Ulid client-side; renders as `RELATE src->edge_table:<ulid>->tgt`. Each fresh Ulid is distinct, so re-running on the same triple after commit collides with the UNIQUE INDEX.
+- **Slug** — `new RecordId(table, slug)` carries a user-chosen stable name; renders as `RELATE src->edge_table:<slug>->tgt`. Re-running with the same slug is idempotent.
+- **Idempotent** — `RecordId.Idempotent(table)` defers the value to emit time, where it resolves to `HashText("{src}|{table}|{tgt}")`. Same triple always lands on the same row; no reload required.
+
+The typed-kind shorthand `session.Relate<TKind>(src, tgt)` defaults to the Idempotent strategy. The commit planner's `ExistedAtStart` check still skips `RELATE` for edges loaded as part of the aggregate, avoiding the round-trip even when the strategy would have been a no-op.
 
 `SurrealCommandEmitter` renders the final command list to a single SurrealQL script plus parameters.
 

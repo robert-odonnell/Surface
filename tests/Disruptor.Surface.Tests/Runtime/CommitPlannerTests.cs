@@ -62,7 +62,7 @@ public sealed class CommitPlannerTests
 
         pending.ApplyCommand(Command.Create(a));
         pending.ApplyCommand(Command.Create(b));
-        pending.ApplyCommand(Command.Relate(a, "rel", b));
+        pending.ApplyCommand(Command.Relate(a, RecordId.Idempotent("rel"), b));
         pending.ApplyCommand(Command.Unrelate(a, "rel", b));
 
         var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
@@ -115,7 +115,7 @@ public sealed class CommitPlannerTests
 
         pending.ApplyCommand(Command.Create(a));
         pending.ApplyCommand(Command.Create(b));
-        pending.ApplyCommand(Command.Relate(a, "restricts", b));
+        pending.ApplyCommand(Command.Relate(a, RecordId.Idempotent("restricts"), b));
 
         // A scalar field set on a new record gets folded into the Upsert CONTENT — won't
         // appear as a separate Set. To actually see fieldUpdates we touch a loaded record.
@@ -240,7 +240,7 @@ public sealed class CommitPlannerTests
         var pending2 = new PendingState(loaded, existingEdges);
 
         pending2.ApplyCommand(Command.Unrelate(a, "restricts", c));
-        pending2.ApplyCommand(Command.Relate(b, "restricts", c));
+        pending2.ApplyCommand(Command.Relate(b, RecordId.Idempotent("restricts"), c));
 
         var plan = CommitPlanner.Build(pending2, NullReferenceRegistry.Instance);
 
@@ -251,18 +251,20 @@ public sealed class CommitPlannerTests
     }
 
     [Fact]
-    public void BulkUnrelateFrom_IsEmittedInRemovalPhase_BeforeRelationAdditions()
+    public void BulkUnrelate_SourceOnly_IsEmittedInRemovalPhase_BeforeRelationAdditions()
     {
         var pending = Empty();
         var src = new RecordId("constraints", "c");
         var tgt = new RecordId("user_stories", "u");
 
-        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
-        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Unrelate(src, "restricts", target: null));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), tgt));
 
         var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
 
-        var bulkIdx = IndexOfFirst(plan, c => c.Op == CommandOp.UnrelateAllFrom);
+        // Both removal (bulk Unrelate, target encoded as null) and addition (Relate)
+        // appear; the bulk DELETE must precede the RELATE so the new edge survives.
+        var bulkIdx = IndexOfFirst(plan, c => c.Op == CommandOp.Unrelate && c.Value is null);
         var relateIdx = IndexOfFirst(plan, c => c.Op == CommandOp.Relate);
 
         Assert.True(bulkIdx >= 0, "expected bulk unrelate command in plan");
@@ -295,7 +297,7 @@ public sealed class CommitPlannerTests
         var src = new RecordId("constraints", "c");
         var tgt = new RecordId("user_stories", "u");
 
-        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), tgt));
         pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
 
         var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
@@ -312,7 +314,7 @@ public sealed class CommitPlannerTests
         var existing = new HashSet<(string, RecordId, RecordId)> { ("restricts", src, tgt) };
         var pending = new PendingState([], existing);
 
-        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), tgt));
         pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
 
         var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
@@ -330,7 +332,7 @@ public sealed class CommitPlannerTests
         var pending = new PendingState([], existing);
 
         pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
-        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), tgt));
 
         var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
         Assert.Empty(plan);
@@ -345,7 +347,7 @@ public sealed class CommitPlannerTests
         var tgt = new RecordId("user_stories", "u");
 
         pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
-        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), tgt));
 
         var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
         Assert.Single(plan);
@@ -360,7 +362,7 @@ public sealed class CommitPlannerTests
         var existing = new HashSet<(string, RecordId, RecordId)> { ("restricts", src, tgt) };
         var pending = new PendingState([], existing);
 
-        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), tgt));
 
         var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
         Assert.Empty(plan);
@@ -635,48 +637,23 @@ public sealed class CommitPlannerTests
     }
 
     [Fact]
-    public void RelateOnce_FlowsThroughPlanner_AndEmitsRelateWithDeterministicEdgeId()
+    public void Relate_FlowsEdgeStrategy_ThroughPendingState_ToEmittedSql()
     {
-        // The PendingState ApplyCommand path used to silently drop CommandOp.RelateOnce,
-        // so calling session.RelateOnce(...) produced no RELATE on the wire — relations
-        // never materialized for any caller using the idempotent verb. The fix routes
-        // RelateOnce through pending.Relations with the Idempotent flag, so EmitRelation
-        // picks the deterministic-id RELATE shape SurrealDB accepts on TYPE RELATION
-        // ENFORCED tables.
-        var pending = Empty();
-        var src = new RecordId("code_symbols", "src");
-        var tgt = new RecordId("code_symbols", "tgt");
-        pending.ApplyCommand(Command.RelateOnce(src, "calls", tgt,
-            new Dictionary<string, object?> { ["kind"] = "call" }));
-
-        var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
-        var sql = SurrealCommandEmitter.Emit(plan);
-
-        Assert.Contains("RELATE code_symbols:src->calls:", sql);
-        Assert.Contains("->code_symbols:tgt CONTENT { kind: \"call\" };", sql);
-        // Critical: the auto-id RELATE form (no explicit edge id) is what the previous
-        // path emitted when RelateOnce was downgraded; it must NOT be the shape emitted
-        // for an idempotent-flagged relation.
-        Assert.DoesNotContain("RELATE code_symbols:src->calls->", sql);
-    }
-
-    [Fact]
-    public void Relate_RemainsAutoId_AndDoesNotMimic_RelateOnce()
-    {
-        // Regression: plain Relate must keep the auto-id RELATE source->edge->target
-        // shape. Mixing RelateOnce semantics into plain Relate would silently change
-        // edge-row identity for everyone who relies on the existing duplicate behaviour.
+        // The edge RecordId carries the strategy. Slug renders verbatim; Idempotent
+        // resolves to a deterministic hash; Random would render a pre-minted Ulid.
+        // Uniqueness is guaranteed at the schema layer by `DEFINE INDEX … UNIQUE` on
+        // (in, out); the RELATE statement itself carries no UNIQUE clause.
         var pending = Empty();
         var src = new RecordId("a", "1");
         var tgt = new RecordId("b", "2");
-        pending.ApplyCommand(Command.Relate(src, "links", tgt,
+        pending.ApplyCommand(Command.Relate(src, new RecordId("links", "primary"), tgt,
             new Dictionary<string, object?> { ["k"] = "v" }));
 
         var plan = CommitPlanner.Build(pending, NullReferenceRegistry.Instance);
         var sql = SurrealCommandEmitter.Emit(plan);
 
-        Assert.Contains("RELATE a:1->links->b:2 CONTENT { k: \"v\" };", sql);
-        Assert.DoesNotContain("RELATE a:1->links:", sql);
+        Assert.Contains("RELATE a:1->links:primary->b:2 CONTENT { k: \"v\" };", sql);
+        Assert.DoesNotContain("UNIQUE", sql);
     }
 
     private sealed class StubRegistry : IReferenceRegistry

@@ -119,7 +119,7 @@ public sealed class PendingStateTests
         var src = new RecordId("constraints", "c");
         var tgt = new RecordId("user_stories", "u");
 
-        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), tgt));
         pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
 
         var rel = pending.Relations[("restricts", src, tgt)];
@@ -129,51 +129,63 @@ public sealed class PendingStateTests
     }
 
     [Fact]
-    public void UnrelateAllFrom_DropsPriorRelateEntries_ForSameSourceAndKind()
+    public void Unrelate_SourceOnly_DropsPriorRelateEntries_ForSameSourceAndKind()
     {
         var pending = Empty();
         var src = new RecordId("constraints", "c");
         var t1 = new RecordId("user_stories", "u1");
         var t2 = new RecordId("user_stories", "u2");
 
-        pending.ApplyCommand(Command.Relate(src, "restricts", t1));
-        pending.ApplyCommand(Command.Relate(src, "restricts", t2));
-        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), t1));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), t2));
+        pending.ApplyCommand(Command.Unrelate(src, "restricts", target: null));
 
         // Per-edge entries are gone — the bulk DELETE WHERE in=src will clear them at
         // the DB. The bulk intent is recorded once, deduped via HashSet semantics.
         Assert.Empty(pending.Relations);
-        Assert.Single(pending.BulkUnrelateFrom);
-        Assert.Contains(("restricts", src), pending.BulkUnrelateFrom);
+        Assert.Single(pending.BulkUnrelates);
+        Assert.Contains(("restricts", (RecordId?)src, (RecordId?)null), pending.BulkUnrelates);
     }
 
     [Fact]
-    public void UnrelateAllFrom_ThenRelate_KeepsTheLaterRelate()
+    public void Unrelate_SourceOnly_ThenRelate_KeepsTheLaterRelate()
     {
         var pending = Empty();
         var src = new RecordId("constraints", "c");
         var tgt = new RecordId("user_stories", "u");
 
-        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
-        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Unrelate(src, "restricts", target: null));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), tgt));
 
         // The bulk-clear is recorded; the subsequent Relate adds a per-edge entry the
         // planner emits AFTER the bulk DELETE — so the final state has just (src→tgt).
         Assert.Single(pending.Relations);
-        Assert.Single(pending.BulkUnrelateFrom);
+        Assert.Single(pending.BulkUnrelates);
     }
 
     [Fact]
-    public void UnrelateAllFrom_IsDeduped()
+    public void Unrelate_SourceOnly_IsDeduped()
     {
         var pending = Empty();
         var src = new RecordId("constraints", "c");
 
-        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
-        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
-        pending.ApplyCommand(Command.UnrelateAllFrom(src, "restricts"));
+        pending.ApplyCommand(Command.Unrelate(src, "restricts", target: null));
+        pending.ApplyCommand(Command.Unrelate(src, "restricts", target: null));
+        pending.ApplyCommand(Command.Unrelate(src, "restricts", target: null));
 
-        Assert.Single(pending.BulkUnrelateFrom);
+        Assert.Single(pending.BulkUnrelates);
+    }
+
+    [Fact]
+    public void Unrelate_TargetOnly_RecordsBulkIntent_WithSourceNull()
+    {
+        var pending = Empty();
+        var tgt = new RecordId("user_stories", "u");
+
+        pending.ApplyCommand(Command.Unrelate(source: null, "restricts", tgt));
+
+        Assert.Single(pending.BulkUnrelates);
+        Assert.Contains(("restricts", (RecordId?)null, (RecordId?)tgt), pending.BulkUnrelates);
     }
 
     [Fact]
@@ -184,7 +196,7 @@ public sealed class PendingStateTests
         var tgt = new RecordId("user_stories", "u");
 
         pending.ApplyCommand(Command.Unrelate(src, "restricts", tgt));
-        pending.ApplyCommand(Command.Relate(src, "restricts", tgt));
+        pending.ApplyCommand(Command.Relate(src, RecordId.Idempotent("restricts"), tgt));
 
         var rel = pending.Relations[("restricts", src, tgt)];
         Assert.Equal(RelationFinalState.Related, rel.State);

@@ -26,8 +26,8 @@ namespace Disruptor.Surface.Generator.Emit;
 ///   <item>Forward/inverse relation property — sync collection from directional
 ///         <c>QueryOutgoing</c> / <c>QueryIncoming</c> for same-aggregate edges, or
 ///         <c>QueryRelatedIds</c> / <c>QueryInverseRelatedIds</c> for cross-aggregate
-///         edges. Relation writes go through <c>Session.Relate</c>,
-///         <c>Unrelate</c>, <c>UnrelateAllFrom</c>, and <c>UnrelateAllTo</c>.</item>
+///         edges. Relation writes go through <c>Session.Relate</c> and
+///         <c>Session.Unrelate</c> (one form, optional source/target for bulk).</item>
 /// </list>
 /// </summary>
 internal static class PartialEmitter

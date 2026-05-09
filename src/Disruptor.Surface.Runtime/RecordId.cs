@@ -27,6 +27,39 @@ public readonly record struct RecordId(string Table, string Value) : IRecordId, 
         => new(table, RecordIdFormat.HashText(text, prefix));
 
     /// <summary>
+    /// Deferred edge-id strategy: the <c>Value</c> is left empty as a sentinel and the
+    /// commit emitter computes it at write time as <c>HashText("{source}|{Table}|{target}")</c>
+    /// — same triple → same hash, so re-running the same Relate lands on the same edge
+    /// row. Pair with <see cref="SurrealSession.Relate(IRecordId, IRecordId, RecordId)"/>
+    /// to express idempotent edges without changing the entity-id surface.
+    /// <para>
+    /// Only meaningful as the <c>edge</c> argument to a relate command — using an
+    /// idempotent id elsewhere will produce empty-value strings in rendered SurrealQL.
+    /// </para>
+    /// </summary>
+    public static RecordId Idempotent(string table) => new(table, "");
+
+    /// <summary>
+    /// True iff this id is the deferred-idempotent sentinel: <see cref="Table"/> is set
+    /// and <see cref="Value"/> is empty. The empty value is unambiguous — every other
+    /// id form (Ulid, slug, hash) is at least one character long and is rejected by
+    /// <see cref="RecordIdFormat.Validate"/> if empty.
+    /// </summary>
+    public bool IsIdempotent => Value.Length == 0 && !string.IsNullOrEmpty(Table);
+
+    /// <summary>
+    /// Resolve a deferred-idempotent edge id against its <paramref name="source"/> and
+    /// <paramref name="target"/> endpoints. No-op for already-resolved ids; for the
+    /// idempotent sentinel, returns a concrete <see cref="RecordId"/> whose value is
+    /// <see cref="RecordIdFormat.HashText"/> of <c>{source}|{Table}|{target}</c>. Same
+    /// triple always lands on the same row.
+    /// </summary>
+    public RecordId Resolve(RecordId source, RecordId target)
+        => IsIdempotent
+            ? new RecordId(Table, RecordIdFormat.HashText($"{source}|{Table}|{target}"))
+            : this;
+
+    /// <summary>
     /// Collapse any <see cref="IRecordId"/> (typed per-table or canonical) to the canonical
     /// <see cref="RecordId"/> form SurrealSession internals key off.
     /// </summary>

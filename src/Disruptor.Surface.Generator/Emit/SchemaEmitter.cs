@@ -413,11 +413,19 @@ internal static class SchemaEmitter
           .Append("TO ").AppendLine(string.Join("|", targetTables))
           .AppendLine("ENFORCED;");
 
+        // Schema-level uniqueness on (in, out) — duplicate edges between the same pair
+        // are rejected at the index. The runtime relies on this as the sole uniqueness
+        // guard: a duplicate RELATE errors against the index, so idempotent re-imports
+        // require loading the aggregate first (the commit planner skips RELATE for
+        // edges already present at session start).
+        sb.Append("DEFINE INDEX IF NOT EXISTS unique_relationship ON TABLE ")
+          .Append(edgeName).AppendLine(" COLUMNS in, out UNIQUE;");
+
         // Edge payload fields (only present for ForwardRelation<TPayload> kinds).
         // Mirrors the per-property emission for entity tables — same scalar-type
         // mapper, same `IF NOT EXISTS` idempotency, same DEFAULT seeding so untouched
         // fields don't break SCHEMAFULL inserts. Keeps relation tables write-safe via
-        // either RELATE … CONTENT { … } or session.RelateOnce(...) with a payload dict.
+        // RELATE … [CONTENT { … }] with optional payload dict.
         foreach (var field in fwdKind.PayloadFields)
         {
             var (fieldType, fieldDefault) = MapScalarType(field.Type);

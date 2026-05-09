@@ -672,18 +672,22 @@ public sealed class SurrealSession : IHydrationSink
     }
 
     /// <summary>
-    /// Adds an edge of the given <paramref name="edgeKind"/> from <paramref name="source"/>
-    /// to <paramref name="target"/>. Endpoints are id-typed so the same call covers
-    /// within-aggregate (both endpoints loaded as entities) and cross-aggregate (one or
-    /// both endpoints live elsewhere).
+    /// Adds an edge between <paramref name="source"/> and <paramref name="target"/>.
+    /// The <paramref name="edge"/> RecordId carries both the table name (always
+    /// required) and the id strategy: a Random Ulid (<see cref="RecordId.New"/>), a
+    /// user-supplied Slug (<c>new RecordId(table, slug)</c>), or the deferred
+    /// <see cref="RecordId.Idempotent"/> sentinel that resolves to a deterministic
+    /// hash of the linkage triple at emit time. Endpoints are id-typed so the same
+    /// call covers within-aggregate (both endpoints loaded as entities) and
+    /// cross-aggregate (one or both endpoints live elsewhere).
     /// </summary>
-    public void Relate(IRecordId source, IRecordId target, string edgeKind)
+    public void Relate(IRecordId source, IRecordId target, RecordId edge)
     {
         ThrowIfClosed();
         var src = RecordId.From(source);
         var tgt = RecordId.From(target);
-        state.Edges[(src, edgeKind, tgt)] = true;
-        Record(Command.Relate(src, edgeKind, tgt));
+        state.Edges[(src, edge.Table, tgt)] = true;
+        Record(Command.Relate(src, edge, tgt));
     }
 
     /// <summary>
@@ -699,148 +703,83 @@ public sealed class SurrealSession : IHydrationSink
     public void Relate(
         IRecordId source,
         IRecordId target,
-        string edgeKind,
+        RecordId edge,
         IReadOnlyDictionary<string, object?> payload)
     {
         ArgumentNullException.ThrowIfNull(payload);
         ThrowIfClosed();
         var src = RecordId.From(source);
         var tgt = RecordId.From(target);
-        state.Edges[(src, edgeKind, tgt)] = true;
-        Record(Command.Relate(src, edgeKind, tgt, payload));
+        state.Edges[(src, edge.Table, tgt)] = true;
+        Record(Command.Relate(src, edge, tgt, payload));
     }
 
     /// <summary>
-    /// Idempotent <c>Relate</c>. The edge id is derived deterministically from
-    /// <c>(source, edgeKind, target)</c>, so re-issuing the same triple lands on the
-    /// same edge row instead of stacking duplicates — exactly what repeated indexing /
-    /// re-import workloads need. Renders as
-    /// <c>UPSERT edge_table:&lt;hash&gt; CONTENT { in, out, … }</c> at commit time.
-    /// Pair with the regular <see cref="Relate(IRecordId, IRecordId, string)"/> when you
-    /// want each call to materialise a fresh edge.
+    /// Removes edges. At least one of <paramref name="source"/> / <paramref name="target"/>
+    /// must be non-null. Both non-null targets a single edge; one-side-null is the
+    /// bulk form (every matching edge of <paramref name="edgeKind"/>, persisted-or-not)
+    /// and renders as <c>DELETE edgeKind WHERE in = source</c> or
+    /// <c>… WHERE out = target</c> at commit time.
     /// </summary>
-    public void RelateOnce(IRecordId source, IRecordId target, string edgeKind)
+    public void Unrelate(IRecordId? source, IRecordId? target, string edgeKind)
     {
+        if (source is null && target is null)
+        {
+            throw new ArgumentException(
+                "Unrelate requires at least one of source or target to be non-null.");
+        }
         ThrowIfClosed();
-        var src = RecordId.From(source);
-        var tgt = RecordId.From(target);
-        state.Edges[(src, edgeKind, tgt)] = true;
-        Record(Command.RelateOnce(src, edgeKind, tgt));
-    }
+        var src = source is null ? (RecordId?)null : RecordId.From(source);
+        var tgt = target is null ? (RecordId?)null : RecordId.From(target);
 
-    /// <summary>
-    /// Idempotent <c>Relate</c> with edge payload — same deterministic id behaviour as
-    /// <see cref="RelateOnce(IRecordId, IRecordId, string)"/>; the supplied
-    /// <paramref name="payload"/> joins the auto-injected <c>in</c>/<c>out</c> fields in
-    /// the <c>CONTENT</c> clause. Re-running with a different payload overwrites the
-    /// edge row's data fields (the <c>UPSERT</c> semantics).
-    /// </summary>
-    public void RelateOnce(
-        IRecordId source,
-        IRecordId target,
-        string edgeKind,
-        IReadOnlyDictionary<string, object?> payload)
-    {
-        ArgumentNullException.ThrowIfNull(payload);
-        ThrowIfClosed();
-        var src = RecordId.From(source);
-        var tgt = RecordId.From(target);
-        state.Edges[(src, edgeKind, tgt)] = true;
-        Record(Command.RelateOnce(src, edgeKind, tgt, payload));
-    }
+        // In-memory snapshot — for both-non-null, drop the specific edge; for either
+        // bulk form, drop every matching loaded edge so reads stay accurate.
+        foreach (var key in state.Edges.Keys.ToList())
+        {
+            if (key.Edge != edgeKind) continue;
+            if (src is { } s && key.Source != s) continue;
+            if (tgt is { } t && key.Target != t) continue;
+            state.Edges.Remove(key);
+        }
 
-    /// <summary>Removes a single specific edge. No-op if the edge isn't currently tracked.</summary>
-    public void Unrelate(IRecordId source, IRecordId target, string edgeKind)
-    {
-        ThrowIfClosed();
-        var src = RecordId.From(source);
-        var tgt = RecordId.From(target);
-        state.Edges.Remove((src, edgeKind, tgt));
         Record(Command.Unrelate(src, edgeKind, tgt));
-    }
-
-    /// <summary>
-    /// Removes every edge of <paramref name="edgeKind"/> originating at <paramref name="source"/>,
-    /// loaded or not. Renders as <c>DELETE edgeKind WHERE in = source</c> at commit
-    /// time, so persisted edges that weren't hydrated into this session are cleared too.
-    /// Drops matching loaded edges from the in-memory snapshot so reads stay accurate.
-    /// </summary>
-    public void UnrelateAllFrom(IRecordId source, string edgeKind)
-    {
-        ThrowIfClosed();
-        var src = RecordId.From(source);
-        foreach (var key in state.Edges.Keys.ToList())
-        {
-            if (key.Source == src && key.Edge == edgeKind)
-            {
-                state.Edges.Remove(key);
-            }
-        }
-        Record(Command.UnrelateAllFrom(src, edgeKind));
-    }
-
-    /// <summary>
-    /// Removes every edge of <paramref name="edgeKind"/> landing on <paramref name="target"/>,
-    /// loaded or not. Renders as <c>DELETE edgeKind WHERE out = target</c> at commit time.
-    /// </summary>
-    public void UnrelateAllTo(IRecordId target, string edgeKind)
-    {
-        ThrowIfClosed();
-        var tgt = RecordId.From(target);
-        foreach (var key in state.Edges.Keys.ToList())
-        {
-            if (key.Target == tgt && key.Edge == edgeKind)
-            {
-                state.Edges.Remove(key);
-            }
-        }
-        Record(Command.UnrelateAllTo(tgt, edgeKind));
     }
 
     // Entity-typed convenience overloads — generator-emitted within-aggregate code calls
     // these so it can pass entity references straight through without an explicit .Id
     // accessor. Cross-aggregate emission keeps using the IRecordId surface.
-    public void Relate(IEntity source, IEntity target, string edgeKind)         => Relate(source.Id, target.Id, edgeKind);
-    public void Relate(IEntity source, IEntity target, string edgeKind, IReadOnlyDictionary<string, object?> payload)
-        => Relate(source.Id, target.Id, edgeKind, payload);
-    public void RelateOnce(IEntity source, IEntity target, string edgeKind)     => RelateOnce(source.Id, target.Id, edgeKind);
-    public void RelateOnce(IEntity source, IEntity target, string edgeKind, IReadOnlyDictionary<string, object?> payload)
-        => RelateOnce(source.Id, target.Id, edgeKind, payload);
-    public void Unrelate(IEntity source, IEntity target, string edgeKind)       => Unrelate(source.Id, target.Id, edgeKind);
-    public void UnrelateAllFrom(IEntity source, string edgeKind)                => UnrelateAllFrom(source.Id, edgeKind);
-    public void UnrelateAllTo(IEntity target, string edgeKind)                  => UnrelateAllTo(target.Id, edgeKind);
+    public void Relate(IEntity source, IEntity target, RecordId edge) => Relate(source.Id, target.Id, edge);
+    public void Relate(IEntity source, IEntity target, RecordId edge, IReadOnlyDictionary<string, object?> payload)
+        => Relate(source.Id, target.Id, edge, payload);
+    public void Unrelate(IEntity source, IEntity target, string edgeKind) => Unrelate(source.Id, target.Id, edgeKind);
 
-    // Typed-kind overloads — domain code calls Relate<Restricts>(c, u) and the kind class's
-    // static EdgeName feeds the string-keyed core. Compile-time guarantee that the edge
-    // name is one the schema knows about; future-friendly for edge-with-payload.
+    // Typed-kind overloads — domain code calls Relate<Restricts>(c, u) and TKind.EdgeName
+    // names the table; the edge id strategy defaults to <see cref="RecordId.Idempotent"/>
+    // (deterministic hash from the linkage triple) so re-running Relate with the same
+    // (src, tgt) lands on the same row. Pass an explicit edge to override:
+    //   Relate<Restricts>(s, t, RecordId.New(Restricts.EdgeName))                  — Random Ulid
+    //   Relate<Restricts>(s, t, new RecordId(Restricts.EdgeName, "main_link"))     — Slug
+    //   Relate<Restricts>(s, t, RecordId.Idempotent(Restricts.EdgeName))           — explicit Idempotent
     public void Relate<TKind>(IRecordId source, IRecordId target) where TKind : IRelationKind
-        => Relate(source, target, TKind.EdgeName);
+        => Relate(source, target, RecordId.Idempotent(TKind.EdgeName));
     public void Relate<TKind>(IEntity source, IEntity target) where TKind : IRelationKind
-        => Relate(source.Id, target.Id, TKind.EdgeName);
+        => Relate(source.Id, target.Id, RecordId.Idempotent(TKind.EdgeName));
+    public void Relate<TKind>(IRecordId source, IRecordId target, RecordId edge) where TKind : IRelationKind
+        => Relate(source, target, edge);
+    public void Relate<TKind>(IEntity source, IEntity target, RecordId edge) where TKind : IRelationKind
+        => Relate(source.Id, target.Id, edge);
     public void Relate<TKind>(IRecordId source, IRecordId target, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
-        => Relate(source, target, TKind.EdgeName, payload);
+        => Relate(source, target, RecordId.Idempotent(TKind.EdgeName), payload);
     public void Relate<TKind>(IEntity source, IEntity target, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
-        => Relate(source.Id, target.Id, TKind.EdgeName, payload);
-    public void RelateOnce<TKind>(IRecordId source, IRecordId target) where TKind : IRelationKind
-        => RelateOnce(source, target, TKind.EdgeName);
-    public void RelateOnce<TKind>(IEntity source, IEntity target) where TKind : IRelationKind
-        => RelateOnce(source.Id, target.Id, TKind.EdgeName);
-    public void RelateOnce<TKind>(IRecordId source, IRecordId target, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
-        => RelateOnce(source, target, TKind.EdgeName, payload);
-    public void RelateOnce<TKind>(IEntity source, IEntity target, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
-        => RelateOnce(source.Id, target.Id, TKind.EdgeName, payload);
-    public void Unrelate<TKind>(IRecordId source, IRecordId target) where TKind : IRelationKind
+        => Relate(source.Id, target.Id, RecordId.Idempotent(TKind.EdgeName), payload);
+    public void Relate<TKind>(IRecordId source, IRecordId target, RecordId edge, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
+        => Relate(source, target, edge, payload);
+    public void Relate<TKind>(IEntity source, IEntity target, RecordId edge, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
+        => Relate(source.Id, target.Id, edge, payload);
+    public void Unrelate<TKind>(IRecordId? source, IRecordId? target) where TKind : IRelationKind
         => Unrelate(source, target, TKind.EdgeName);
     public void Unrelate<TKind>(IEntity source, IEntity target) where TKind : IRelationKind
         => Unrelate(source.Id, target.Id, TKind.EdgeName);
-    public void UnrelateAllFrom<TKind>(IRecordId source) where TKind : IRelationKind
-        => UnrelateAllFrom(source, TKind.EdgeName);
-    public void UnrelateAllFrom<TKind>(IEntity source) where TKind : IRelationKind
-        => UnrelateAllFrom(source.Id, TKind.EdgeName);
-    public void UnrelateAllTo<TKind>(IRecordId target) where TKind : IRelationKind
-        => UnrelateAllTo(target, TKind.EdgeName);
-    public void UnrelateAllTo<TKind>(IEntity target) where TKind : IRelationKind
-        => UnrelateAllTo(target.Id, TKind.EdgeName);
 
     public IReadOnlyCollection<TElement> QueryOutgoing<TKind, TElement>(IEntity owner) where TKind : IRelationKind where TElement : class
         => QueryOutgoing<TElement>(owner, TKind.EdgeName);

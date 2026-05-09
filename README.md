@@ -208,7 +208,9 @@ Plus aggregate / relation marker attributes:
   the generator walks `TPayload`'s public scalar properties and emits a
   `DEFINE FIELD` on the relation table for each. Same scalar mapping as `[Property]`
   fields on entity tables; pass payload data through `session.Relate<TKind>(src,
-  tgt, payload)` or `session.RelateOnce<TKind>(src, tgt, payload)`.
+  tgt, payload)`. Every relation table also gets a
+  `DEFINE INDEX … COLUMNS in, out UNIQUE` so duplicate edges are rejected at the
+  schema layer.
 - `[Reject]`, `[Unset]`, `[Cascade]`, `[Ignore]` on `[Reference]` properties drive
   the commit-time delete planner. `[Reject]` is the default.
 

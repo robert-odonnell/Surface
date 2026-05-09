@@ -53,14 +53,38 @@ public sealed class SurrealCommandEmitterTests
     }
 
     [Fact]
-    public void Relate_EmitsArrowSyntax_WithoutContent()
+    public void Relate_WithSlugEdge_EmitsArrowSyntax_WithExplicitEdgeId()
     {
         var src = new RecordId("constraints", "c");
         var tgt = new RecordId("user_stories", "u");
 
-        var sql = SurrealCommandEmitter.Emit([Command.Relate(src, "restricts", tgt)]);
+        // Slug strategy: caller supplies the edge value directly. The emitter renders
+        // it verbatim as the edge row id. Useful for stable-named relations the caller
+        // wants to address by name.
+        var sql = SurrealCommandEmitter.Emit(
+            [Command.Relate(src, new RecordId("restricts", "main_link"), tgt)]);
 
-        Assert.Equal("RELATE constraints:c->restricts->user_stories:u;\n", sql);
+        Assert.Equal("RELATE constraints:c->restricts:main_link->user_stories:u;\n", sql);
+    }
+
+    [Fact]
+    public void Relate_WithIdempotentEdge_RendersDeterministicHash_AcrossInvocations()
+    {
+        // Idempotent strategy: edge value is deferred at the type level, the emitter
+        // computes HashText("{src}|{table}|{tgt}") at write time. Same triple always
+        // produces the same edge id, so re-running the same Relate lands on the same
+        // row instead of erroring against the schema's UNIQUE INDEX.
+        var src = new RecordId("findings", "f");
+        var tgt = new RecordId("issues", "i");
+
+        var first = SurrealCommandEmitter.Emit(
+            [Command.Relate(src, RecordId.Idempotent("stub_edge"), tgt)]);
+        var second = SurrealCommandEmitter.Emit(
+            [Command.Relate(src, RecordId.Idempotent("stub_edge"), tgt)]);
+
+        Assert.Equal(first, second);
+        Assert.StartsWith("RELATE findings:f->stub_edge:", first);
+        Assert.EndsWith("->issues:i;\n", first);
     }
 
     [Fact]
@@ -85,19 +109,36 @@ public sealed class SurrealCommandEmitterTests
     }
 
     [Fact]
-    public void UnrelateAllFrom_RendersAsBulkDelete_WithInWhereClause()
+    public void Unrelate_SourceOnly_RendersAsBulkDelete_WithInWhereClause()
     {
-        var sql = SurrealCommandEmitter.Emit([Command.UnrelateAllFrom(new RecordId("constraints", "c"), "restricts")]);
+        var sql = SurrealCommandEmitter.Emit(
+            [Command.Unrelate(new RecordId("constraints", "c"), "restricts", target: null)]);
 
         Assert.Equal("DELETE restricts WHERE in = constraints:c;\n", sql);
     }
 
     [Fact]
-    public void UnrelateAllTo_RendersAsBulkDelete_WithOutWhereClause()
+    public void Unrelate_TargetOnly_RendersAsBulkDelete_WithOutWhereClause()
     {
-        var sql = SurrealCommandEmitter.Emit([Command.UnrelateAllTo(new RecordId("user_stories", "u"), "restricts")]);
+        var sql = SurrealCommandEmitter.Emit(
+            [Command.Unrelate(source: null, "restricts", new RecordId("user_stories", "u"))]);
 
         Assert.Equal("DELETE restricts WHERE out = user_stories:u;\n", sql);
+    }
+
+    [Fact]
+    public void Unrelate_BothEndpoints_RendersAsDelete_WithBothWhereClauses()
+    {
+        var sql = SurrealCommandEmitter.Emit(
+            [Command.Unrelate(new RecordId("constraints", "c"), "restricts", new RecordId("user_stories", "u"))]);
+
+        Assert.Equal("DELETE restricts WHERE in = constraints:c AND out = user_stories:u;\n", sql);
+    }
+
+    [Fact]
+    public void Unrelate_BothNull_Throws()
+    {
+        Assert.Throws<ArgumentException>(() => Command.Unrelate(source: null, "edge", target: null));
     }
 
     [Fact]

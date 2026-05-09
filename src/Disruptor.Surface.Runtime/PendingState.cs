@@ -127,19 +127,19 @@ public sealed class RelationPendingState(string kind, RecordId source, RecordId 
     public RecordId Target { get; } = target;
     public bool ExistedAtStart { get; } = existedAtStart;
     public RelationFinalState State { get; set; } = RelationFinalState.Untouched;
-    public Dictionary<string, object?> PayloadSets { get; } = [];
-    public HashSet<string> PayloadUnsets { get; } = [];
 
     /// <summary>
-    /// Sticky flag — set by <see cref="CommandOp.RelateOnce"/>, read by
-    /// <see cref="CommitPlanner.EmitRelation"/> to choose between rendering as
-    /// <c>RELATE source-&gt;edge-&gt;target</c> (auto-id, non-idempotent) and
-    /// <c>RELATE source-&gt;edge:&lt;hash&gt;-&gt;target</c> (deterministic id, idempotent).
-    /// Once flipped to true, a subsequent plain <c>Relate</c> on the same triple does
-    /// NOT clear it — re-running a deterministic relate plus a payload bump still wants
-    /// the same edge row.
+    /// Edge id chosen by the most recent Relate command on this triple. Carries the
+    /// strategy: a resolved Slug/Random RecordId renders verbatim; an idempotent
+    /// sentinel resolves at emit via <see cref="RecordId.Resolve"/>. Defaults to
+    /// <see cref="RecordId.Idempotent"/> on <paramref name="kind"/> so a relation that
+    /// only sees payload edits (Untouched state, no explicit Relate) still emits with
+    /// a deterministic edge id.
     /// </summary>
-    public bool Idempotent { get; set; }
+    public RecordId Edge { get; set; } = RecordId.Idempotent(kind);
+
+    public Dictionary<string, object?> PayloadSets { get; } = [];
+    public HashSet<string> PayloadUnsets { get; } = [];
 }
 
 /// <summary>
@@ -155,8 +155,14 @@ public sealed class PendingState(
     public Dictionary<RecordId, RecordPendingState> Records { get; } = [];
     public Dictionary<(string Kind, RecordId Source, RecordId Target), RelationPendingState> Relations { get; } = [];
     public Dictionary<(RecordId Owner, string Field), ReferenceTransition> References { get; } = [];
-    public HashSet<(string Kind, RecordId Source)> BulkUnrelateFrom { get; } = [];
-    public HashSet<(string Kind, RecordId Target)> BulkUnrelateTo { get; } = [];
+
+    /// <summary>
+    /// Bulk-clear intents — one entry per <c>Unrelate(source-only-or-target-only, edge)</c>
+    /// call. Either <c>Source</c> or <c>Target</c> is null (never both). The planner
+    /// emits one <c>DELETE edge WHERE …</c> per entry, before any per-edge relation
+    /// additions, so a bulk-clear-then-relate on the same kind survives.
+    /// </summary>
+    public HashSet<(string Kind, RecordId? Source, RecordId? Target)> BulkUnrelates { get; } = [];
 
     public RecordPendingState GetOrCreateRecord(RecordId id)
     {
@@ -269,6 +275,7 @@ public sealed class PendingState(
             {
                 var rel = GetOrCreateRelation(c.Key!, c.Target, (RecordId)c.Value!);
                 rel.State = RelationFinalState.Related;
+                rel.Edge = c.Edge;
                 if (c.EdgeContent is { } content)
                 {
                     foreach (var (k, v) in content)
@@ -280,61 +287,36 @@ public sealed class PendingState(
 
                 break;
             }
-            case CommandOp.RelateOnce:
-            {
-                // Same accumulation as Relate, but the deterministic-id flag stays
-                // sticky so EmitRelation renders RELATE source->edge:<hash>->target
-                // (graph-traversable + idempotent) instead of the auto-id RELATE
-                // source->edge->target. Mixing Relate and RelateOnce on the same
-                // (kind, source, target) triple in one session is unusual; if it
-                // happens, RelateOnce wins because once-deterministic-always-
-                // deterministic is the safer default for re-runs.
-                var rel = GetOrCreateRelation(c.Key!, c.Target, (RecordId)c.Value!);
-                rel.State = RelationFinalState.Related;
-                rel.Idempotent = true;
-                if (c.EdgeContent is { } onceContent)
-                {
-                    foreach (var (k, v) in onceContent)
-                    {
-                        rel.PayloadUnsets.Remove(k);
-                        rel.PayloadSets[k] = v;
-                    }
-                }
-
-                break;
-            }
             case CommandOp.Unrelate:
             {
-                var rel = GetOrCreateRelation(c.Key!, c.Target, (RecordId)c.Value!);
-                rel.State = RelationFinalState.Unrelated;
-                rel.PayloadSets.Clear();
-                rel.PayloadUnsets.Clear();
-                break;
-            }
-            case CommandOp.UnrelateAllFrom:
-            {
-                // Bulk clear by source — drop any per-edge pending Relate entries that
-                // would otherwise be re-added after the DB-level DELETE WHERE.
-                var keysToRemove = Relations.Keys
-                    .Where(k => k.Kind == c.Key && k.Source == c.Target)
-                    .ToList();
-                foreach (var k in keysToRemove)
+                // Both endpoints non-null → per-edge intent on the Relations dict so
+                // the planner can collapse Relate+Unrelate within a packet via
+                // ExistedAtStart. One endpoint null → bulk DELETE WHERE; drop any
+                // matching per-edge pending Relate entries so they don't re-emit after
+                // the bulk clear.
+                var source = c.Target.Table is null ? (RecordId?)null : c.Target;
+                var target = (RecordId?)c.Value;
+
+                if (source is { } s && target is { } t)
                 {
-                    Relations.Remove(k);
+                    var rel = GetOrCreateRelation(c.Key!, s, t);
+                    rel.State = RelationFinalState.Unrelated;
+                    rel.PayloadSets.Clear();
+                    rel.PayloadUnsets.Clear();
                 }
-                BulkUnrelateFrom.Add((c.Key!, c.Target));
-                break;
-            }
-            case CommandOp.UnrelateAllTo:
-            {
-                var keysToRemove = Relations.Keys
-                    .Where(k => k.Kind == c.Key && k.Target == c.Target)
-                    .ToList();
-                foreach (var k in keysToRemove)
+                else
                 {
-                    Relations.Remove(k);
+                    var keysToRemove = Relations.Keys
+                        .Where(k => k.Kind == c.Key
+                            && (source is null || k.Source == source)
+                            && (target is null || k.Target == target))
+                        .ToList();
+                    foreach (var k in keysToRemove)
+                    {
+                        Relations.Remove(k);
+                    }
+                    BulkUnrelates.Add((c.Key!, source, target));
                 }
-                BulkUnrelateTo.Add((c.Key!, c.Target));
                 break;
             }
         }
@@ -345,8 +327,7 @@ public sealed class PendingState(
         Records.Clear();
         Relations.Clear();
         References.Clear();
-        BulkUnrelateFrom.Clear();
-        BulkUnrelateTo.Clear();
+        BulkUnrelates.Clear();
     }
 
     /// <summary>
@@ -387,7 +368,7 @@ public sealed class PendingState(
             var dst = new RelationPendingState(src.Kind, src.Source, src.Target, src.ExistedAtStart)
             {
                 State = src.State,
-                Idempotent = src.Idempotent,
+                Edge = src.Edge,
             };
             foreach (var (k, v) in src.PayloadSets) dst.PayloadSets[k] = v;
             foreach (var u in src.PayloadUnsets) dst.PayloadUnsets.Add(u);
@@ -400,8 +381,7 @@ public sealed class PendingState(
             copy.References[kv.Key] = new ReferenceTransition(src.Owner, src.Field, src.TargetAtStart, src.TargetAtEnd);
         }
 
-        foreach (var entry in BulkUnrelateFrom) copy.BulkUnrelateFrom.Add(entry);
-        foreach (var entry in BulkUnrelateTo) copy.BulkUnrelateTo.Add(entry);
+        foreach (var entry in BulkUnrelates) copy.BulkUnrelates.Add(entry);
 
         return copy;
     }

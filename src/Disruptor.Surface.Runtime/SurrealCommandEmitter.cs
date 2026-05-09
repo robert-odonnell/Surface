@@ -58,9 +58,19 @@ public static class SurrealCommandEmitter
                     break;
 
                 case CommandOp.Relate:
-                    sb.Append("RELATE ").Append(FormatId(c.Target))
-                      .Append("->").Append(c.Key!.Identifier()).Append("->")
-                      .Append(FormatId((RecordId)c.Value!));
+                {
+                    // Edge id strategy resolves at emit:
+                    //   - Resolved (Random Ulid pre-minted, or Slug)  → render the value verbatim
+                    //   - Idempotent (sentinel: empty value)          → hash the triple
+                    // Schema-level `DEFINE INDEX … COLUMNS in, out UNIQUE` is the
+                    // duplicate guard; the planner's ExistedAtStart check skips edges
+                    // that already exist so re-running on a loaded aggregate is a no-op.
+                    var src = c.Target;
+                    var tgt = (RecordId)c.Value!;
+                    var edge = c.Edge.Resolve(src, tgt);
+                    sb.Append("RELATE ").Append(FormatId(src))
+                      .Append("->").Append(FormatId(edge))
+                      .Append("->").Append(FormatId(tgt));
                     if (c.EdgeContent is { Count: > 0 } content)
                     {
                         sb.Append(" CONTENT ");
@@ -68,63 +78,35 @@ public static class SurrealCommandEmitter
                     }
                     sb.Append(";\n");
                     break;
+                }
 
-                case CommandOp.RelateOnce:
+                case CommandOp.Unrelate:
                 {
-                    // Deterministic edge id: same (source, kind, target) triple always
-                    // produces the same hash, so re-issuing the same relate lands on the
-                    // same edge row rather than stacking duplicates. The hash key uses
-                    // pipe separators (illegal in SurrealQL identifiers, so unambiguous)
-                    // and includes both table names so cross-table aliasing can't blur
-                    // the (designs:abc, owns, tasks:abc) and (designs:abc, owns, notes:abc)
-                    // triples into the same edge row.
-                    //
-                    // The render shape is RELATE-with-explicit-id rather than
-                    // UPSERT-with-CONTENT. UPSERT writes a row to the edge table but
-                    // SurrealDB rejects it on `TYPE RELATION ENFORCED` tables ("Found
-                    // record … which is not a relation, but expected a RELATION") because
-                    // the row never gets registered as a graph edge — the `->edge->`
-                    // traversal can't see it. RELATE with an explicit edge id produces a
-                    // proper graph edge AND honours the deterministic id, which is the
-                    // shape SurrealDB accepts. `in` / `out` come from the RELATE syntax
-                    // itself, not the CONTENT clause, so EdgeContent stays user-payload-
-                    // only.
-                    var src = c.Target;
-                    var tgt = (RecordId)c.Value!;
-                    var edgeTable = c.Key!;
-                    _ = edgeTable.Identifier(); // validate; rendered identifier flows through FormatId(edgeId) below
-                    var hash = RecordIdFormat.HashText($"{src.Table}:{src.Value}|{edgeTable}|{tgt.Table}:{tgt.Value}");
-                    var edgeId = new RecordId(edgeTable, hash);
-                    sb.Append("RELATE ").Append(FormatId(src))
-                      .Append("->").Append(FormatId(edgeId))
-                      .Append("->").Append(FormatId(tgt));
-                    if (c.EdgeContent is { Count: > 0 } onceContent)
+                    // Merged shape — at least one of source/target is non-null.
+                    //   both:        DELETE edge WHERE in = source AND out = target
+                    //   source-only: DELETE edge WHERE in = source
+                    //   target-only: DELETE edge WHERE out = target
+                    // Source absence is encoded as `default(RecordId)` (Table is null);
+                    // target absence is encoded as Value = null. The Command.Unrelate
+                    // factory enforces the at-least-one invariant.
+                    var hasSource = c.Target.Table is not null;
+                    var target = (RecordId?)c.Value;
+                    sb.Append("DELETE ").Append(c.Key!.Identifier()).Append(" WHERE ");
+                    if (hasSource)
                     {
-                        sb.Append(" CONTENT ");
-                        AppendContent(onceContent);
+                        sb.Append("in = ").Append(FormatId(c.Target));
+                    }
+                    if (hasSource && target is not null)
+                    {
+                        sb.Append(" AND ");
+                    }
+                    if (target is { } t)
+                    {
+                        sb.Append("out = ").Append(FormatId(t));
                     }
                     sb.Append(";\n");
                     break;
                 }
-
-                case CommandOp.Unrelate:
-                    sb.Append("DELETE ").Append(c.Key!.Identifier())
-                      .Append(" WHERE in = ").Append(FormatId(c.Target))
-                      .Append(" AND out = ").Append(FormatId((RecordId)c.Value!))
-                      .Append(";\n");
-                    break;
-
-                case CommandOp.UnrelateAllFrom:
-                    sb.Append("DELETE ").Append(c.Key!.Identifier())
-                      .Append(" WHERE in = ").Append(FormatId(c.Target))
-                      .Append(";\n");
-                    break;
-
-                case CommandOp.UnrelateAllTo:
-                    sb.Append("DELETE ").Append(c.Key!.Identifier())
-                      .Append(" WHERE out = ").Append(FormatId(c.Target))
-                      .Append(";\n");
-                    break;
             }
         }
 
@@ -169,37 +151,42 @@ public static class SurrealCommandEmitter
 
 public enum CommandOp
 {
-    Create,            // CREATE record:id
-    Upsert,            // UPSERT record:id CONTENT { … }
-    Set,               // UPDATE record:id SET key = value
-    Unset,             // UPDATE record:id UNSET key
-    Delete,            // DELETE record:id
-    Relate,            // RELATE source->edge->target
-    RelateOnce,        // RELATE source -> edge:<deterministic-hash(source, edge, target)> -> target [CONTENT { … }] — idempotent re-relate, valid on TYPE RELATION ENFORCED
-    Unrelate,          // DELETE edge WHERE in = source AND out = target
-    UnrelateAllFrom,   // DELETE edge WHERE in = source         — bulk; persisted edges too
-    UnrelateAllTo      // DELETE edge WHERE out = target        — bulk; persisted edges too
+    Create,    // CREATE record:id
+    Upsert,    // UPSERT record:id CONTENT { … }
+    Set,       // UPDATE record:id SET key = value
+    Unset,     // UPDATE record:id UNSET key
+    Delete,    // DELETE record:id
+    Relate,    // RELATE source->edge->target [CONTENT { … }]          — uniqueness enforced by the schema-level UNIQUE INDEX
+    Unrelate,  // DELETE edge WHERE [in = source] [AND] [out = target] — at least one endpoint non-null
 }
 
 /// <summary>
-/// Atomic SurrealDB intent in a uniform 4-tuple (Op, Id, Field?, Value?).
+/// Atomic SurrealDB intent.
 /// </summary>
 /// <param name="Op">The kind of operation.</param>
 /// <param name="Target">
 /// For Create/Upsert/Set/Delete: the record. For Relate/Unrelate: the <c>in</c> endpoint.
 /// </param>
 /// <param name="Key">
-/// For Set: the field name. For Relate/Unrelate: the edge-table name. Null otherwise.
+/// For Set: the field name. For Relate/Unrelate: the edge-table name (mirrors
+/// <c>Edge.Table</c> for relate; sole identifier for unrelate). Null otherwise.
 /// </param>
 /// <param name="Value">
 /// For Set: the scalar. For Upsert: the CONTENT dictionary. For Relate/Unrelate: the <c>out</c> endpoint <see cref="RecordId"/>.
+/// </param>
+/// <param name="Edge">
+/// For Relate only: the full edge id, carrying the strategy. The <see cref="RecordId.Value"/>
+/// is rendered verbatim when present (Slug or pre-minted Ulid); when
+/// <see cref="RecordId.IsIdempotent"/> the emitter resolves it to a deterministic hash
+/// of <c>{source}|{Table}|{target}</c>.
 /// </param>
 public readonly record struct Command(
     CommandOp Op,
     RecordId Target,
     string? Key = null,
     object? Value = null,
-    IReadOnlyDictionary<string, object?>? EdgeContent = null)
+    IReadOnlyDictionary<string, object?>? EdgeContent = null,
+    RecordId Edge = default)
 {
     public static Command Create(RecordId target) =>
         new(CommandOp.Create, target);
@@ -230,27 +217,40 @@ public readonly record struct Command(
     public static Command Delete(RecordId target) =>
         new(CommandOp.Delete, target);
 
-    public static Command Relate(RecordId source, string edgeTable, RecordId target, IReadOnlyDictionary<string, object?>? content = null) =>
-        new(CommandOp.Relate, source, edgeTable, target, EdgeContent: Freeze(content));
+    /// <summary>
+    /// Relate <paramref name="source"/> to <paramref name="target"/> via the
+    /// <paramref name="edge"/> table. The <c>edge</c> RecordId carries the id strategy:
+    /// <list type="bullet">
+    ///   <item><b>Random</b> — caller mints a Ulid via <see cref="RecordId.New"/>; each
+    ///         Relate with the same triple but a fresh Ulid is the same logical edge
+    ///         (PendingState dedups by triple).</item>
+    ///   <item><b>Slug</b> — caller passes <c>new RecordId(table, slug)</c>; the slug
+    ///         renders verbatim as the edge row id.</item>
+    ///   <item><b>Idempotent</b> — caller passes <see cref="RecordId.Idempotent"/>; the
+    ///         emit layer computes the hash from the linkage triple at write time.</item>
+    /// </list>
+    /// </summary>
+    public static Command Relate(RecordId source, RecordId edge, RecordId target, IReadOnlyDictionary<string, object?>? content = null) =>
+        new(CommandOp.Relate, source, Key: edge.Table, Value: target, EdgeContent: Freeze(content), Edge: edge);
 
     /// <summary>
-    /// Idempotent edge create. The edge id is derived deterministically from
-    /// <c>(source, edgeTable, target)</c> via <see cref="RecordIdFormat.HashText"/> at
-    /// emit time, so re-running the same triple lands on the same row regardless of
-    /// how many times <c>RelateOnce</c> is called. Renders as
-    /// <c>UPSERT edge_table:&lt;hash&gt; CONTENT { in, out, … }</c>.
+    /// Edge removal. At least one of <paramref name="source"/> / <paramref name="target"/>
+    /// must be non-null. Both non-null targets a single edge; one-side-null is the bulk
+    /// form (every matching edge of <paramref name="edgeTable"/>, persisted-or-not).
     /// </summary>
-    public static Command RelateOnce(RecordId source, string edgeTable, RecordId target, IReadOnlyDictionary<string, object?>? content = null) =>
-        new(CommandOp.RelateOnce, source, edgeTable, target, EdgeContent: Freeze(content));
-
-    public static Command Unrelate(RecordId source, string edgeTable, RecordId target) =>
-        new(CommandOp.Unrelate, source, edgeTable, target);
-
-    public static Command UnrelateAllFrom(RecordId source, string edgeTable) =>
-        new(CommandOp.UnrelateAllFrom, source, edgeTable);
-
-    public static Command UnrelateAllTo(RecordId target, string edgeTable) =>
-        new(CommandOp.UnrelateAllTo, target, edgeTable);
+    public static Command Unrelate(RecordId? source, string edgeTable, RecordId? target)
+    {
+        if (source is null && target is null)
+        {
+            throw new ArgumentException(
+                "Unrelate requires at least one of source or target to be non-null.");
+        }
+        // `default(RecordId)` (Table = null, Value = null) is the in-band "no source"
+        // sentinel — Command.Target is non-nullable so we can't store null directly.
+        // The emitter checks `Target.Table is not null` to decide whether to emit
+        // `WHERE in = …`.
+        return new(CommandOp.Unrelate, source ?? default, edgeTable, Value: target);
+    }
 
     private static Dictionary<string, object?>? Freeze(IEnumerable<KeyValuePair<string, object?>>? source) =>
         source is null ? null : new Dictionary<string, object?>(source, StringComparer.Ordinal);

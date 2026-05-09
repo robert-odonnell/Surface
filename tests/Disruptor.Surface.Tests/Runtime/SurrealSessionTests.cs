@@ -87,10 +87,10 @@ public sealed class SurrealSessionTests
         Assert.Throws<InvalidOperationException>(() => session.SetField(id, "field", "v"));
         Assert.Throws<InvalidOperationException>(() => session.UnsetField(id, "field"));
         Assert.Throws<InvalidOperationException>(() => session.Delete(id));
-        Assert.Throws<InvalidOperationException>(() => session.Relate(id, id, "edge"));
+        Assert.Throws<InvalidOperationException>(() => session.Relate(id, id, RecordId.Idempotent("edge")));
         Assert.Throws<InvalidOperationException>(() => session.Unrelate(id, id, "edge"));
-        Assert.Throws<InvalidOperationException>(() => session.UnrelateAllFrom(id, "edge"));
-        Assert.Throws<InvalidOperationException>(() => session.UnrelateAllTo(id, "edge"));
+        Assert.Throws<InvalidOperationException>(() => session.Unrelate(id, null, "edge"));
+        Assert.Throws<InvalidOperationException>(() => session.Unrelate(null, id, "edge"));
         Assert.Throws<InvalidOperationException>(() => session.RenderBatch());
     }
 
@@ -282,114 +282,52 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public void RelateOnce_RecordsAsRelateOnceCommand_AndStillTracksEdge()
+    public void TypedRelate_DefaultsToIdempotent_DeterministicAcrossSessions()
     {
-        // RelateOnce takes the same shape on the in-memory edge tracker (so reads of
-        // session.QueryOutgoing etc. resolve identically) but records a different
-        // CommandOp so the emitter renders UPSERT-with-deterministic-id at commit.
-        var session = new SurrealSession();
-        var src = new RecordId("findings", "f");
-        var tgt = new RecordId("issues", "i");
-
-        session.RelateOnce<StubKind>(src, tgt);
-
-        var cmd = session.Log.Entries.Single(e =>
-            e.Op == CommandOp.Relate || e.Op == CommandOp.RelateOnce);
-        Assert.Equal(CommandOp.RelateOnce, cmd.Op);
-        Assert.Equal("stub_edge", cmd.Key);
-    }
-
-    [Fact]
-    public void RelateOnce_ProducesDeterministicEdgeId_AcrossInvocations()
-    {
-        // The whole point: same (src, kind, tgt) triple → same edge row id, every run.
-        // Render twice in separate sessions; the rendered SQL must match exactly.
-        string Render(string srcVal)
+        // The typed-kind shorthand `Relate<TKind>(src, tgt)` defaults to the Idempotent
+        // edge strategy: same triple → same edge id, every run. Re-running the same
+        // Relate after commit/reload lands on the same row instead of erroring against
+        // the schema-level UNIQUE INDEX on (in, out).
+        string Render()
         {
             var session = new SurrealSession();
-            session.RelateOnce(new RecordId("findings", srcVal), new RecordId("issues", "i"), "stub_edge");
+            session.Relate<StubKind>(new RecordId("findings", "f"), new RecordId("issues", "i"));
             return SurrealCommandEmitter.Emit(session.Log.Entries);
         }
 
-        var first = Render("f");
-        var second = Render("f");
+        var first = Render();
+        var second = Render();
         Assert.Equal(first, second);
-        // RELATE-with-explicit-edge-id is the form SurrealDB accepts for `TYPE RELATION
-        // ENFORCED`; UPSERT-with-CONTENT (the previous shape) was rejected because the
-        // resulting row never registered as a graph edge.
         Assert.StartsWith("RELATE findings:f->stub_edge:", first);
         Assert.EndsWith("->issues:i;\n", first);
-
-        // Different src → different id (no aliasing).
-        var different = Render("g");
-        Assert.NotEqual(first, different);
+        Assert.DoesNotContain("UNIQUE", first);
     }
 
     [Fact]
-    public void RelateOnce_WithPayload_AppendsContentClause()
+    public void TypedRelate_WithExplicitSlugEdge_RendersSlugVerbatim()
     {
-        // Caller-supplied payload becomes the CONTENT clause. `in` / `out` come from
-        // the RELATE syntax itself, not the payload, so the user's payload is the only
-        // thing inside CONTENT { … }.
         var session = new SurrealSession();
-        var payload = new Dictionary<string, object?>
-        {
-            ["confidence"] = 0.92,
-            ["method"] = "static-analysis",
-        };
+        session.Relate<StubKind>(
+            new RecordId("findings", "f"),
+            new RecordId("issues", "i"),
+            edge: new RecordId("stub_edge", "main_link"));
 
-        session.RelateOnce<StubKind>(new RecordId("findings", "f"), new RecordId("issues", "i"), payload);
         var sql = SurrealCommandEmitter.Emit(session.Log.Entries);
-
-        Assert.StartsWith("RELATE findings:f->stub_edge:", sql);
-        Assert.Contains("->issues:i CONTENT {", sql);
-        Assert.Contains("confidence: 0.92", sql);
-        Assert.Contains("method: \"static-analysis\"", sql);
-        Assert.DoesNotContain("UPSERT", sql);
-        // No `in`/`out` in CONTENT — they're already encoded by the RELATE syntax.
-        Assert.DoesNotContain("in: findings:f", sql);
-        Assert.DoesNotContain("out: issues:i", sql);
+        Assert.Equal("RELATE findings:f->stub_edge:main_link->issues:i;\n", sql);
     }
 
     [Fact]
-    public void RelateOnce_NeverEmitsUpsertOnRelationTable_RegressionGuard()
+    public void TypedRelate_WithRandomUlidEdge_RendersClientMintedValue()
     {
-        // SurrealDB rejects `UPSERT edge_table:<hash> CONTENT { in, out, … }` on
-        // `TYPE RELATION ENFORCED` tables — the row writes but never registers as a
-        // graph edge, so `->edge->` traversal returns empty (preview.12 bug). This
-        // test pins the only SQL shape SurrealDB accepts: RELATE with an explicit
-        // edge id. Any drift back to UPSERT for RelateOnce would silently break every
-        // consumer using ENFORCED relation schemas.
         var session = new SurrealSession();
-        session.RelateOnce(new RecordId("code_symbols", "a"), new RecordId("code_symbols", "b"), "uses",
-            new Dictionary<string, object?> { ["kind"] = "call" });
+        var edge = RecordId.New("stub_edge");   // pre-minted Ulid
+        session.Relate<StubKind>(
+            new RecordId("findings", "f"),
+            new RecordId("issues", "i"),
+            edge);
 
         var sql = SurrealCommandEmitter.Emit(session.Log.Entries);
-
-        Assert.DoesNotContain("UPSERT", sql);
-        Assert.StartsWith("RELATE code_symbols:a->uses:", sql);
-        Assert.Contains("->code_symbols:b CONTENT { kind: \"call\" };", sql);
-
-        // Determinism: same input → same edge id → same SQL string. Re-running the
-        // commit on a tracked triple lands on the same edge row.
-        var second = new SurrealSession();
-        second.RelateOnce(new RecordId("code_symbols", "a"), new RecordId("code_symbols", "b"), "uses",
-            new Dictionary<string, object?> { ["kind"] = "call" });
-        Assert.Equal(sql, SurrealCommandEmitter.Emit(second.Log.Entries));
-    }
-
-    [Fact]
-    public void RelateOnce_WithoutPayload_OmitsContentClause()
-    {
-        // No payload → no CONTENT clause. The RELATE itself encodes in/out, so an empty
-        // CONTENT { } would be redundant noise on the wire.
-        var session = new SurrealSession();
-        session.RelateOnce(new RecordId("a", "1"), new RecordId("b", "2"), "stub_edge");
-        var sql = SurrealCommandEmitter.Emit(session.Log.Entries);
-
-        Assert.StartsWith("RELATE a:1->stub_edge:", sql);
-        Assert.EndsWith("->b:2;\n", sql);
-        Assert.DoesNotContain("CONTENT", sql);
+        Assert.Contains($"->stub_edge:{edge.Value}->", sql);
     }
 
     [Fact]
@@ -567,7 +505,7 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public void UnrelateAllFrom_TypedKind_EmitsSingle_BulkCommand()
+    public void Unrelate_SourceOnly_EmitsSingleBulkCommand()
     {
         var session = new SurrealSession();
         var src = new RecordId("constraints", "c");
@@ -576,14 +514,21 @@ public sealed class SurrealSessionTests
 
         session.Relate<StubKind>(src, t1);
         session.Relate<StubKind>(src, t2);
-        session.UnrelateAllFrom<StubKind>(src);
+        session.Unrelate<StubKind>(src, target: null);
 
-        // The bulk-clear is a single command — it renders as `DELETE edge WHERE in =
-        // source` at commit time so persisted edges (not just loaded ones) get cleared.
-        var bulks = session.Log.Entries.Count(e => e.Op == CommandOp.UnrelateAllFrom);
-        Assert.Equal(1, bulks);
-        // Per-edge Unrelate is not emitted — that path was for loaded-only enumeration.
-        Assert.Equal(0, session.Log.Entries.Count(e => e.Op == CommandOp.Unrelate));
+        // The bulk-clear is a single Unrelate command (target encoded as null). It
+        // renders as `DELETE edge WHERE in = source` at commit time so persisted
+        // edges (not just loaded ones) get cleared.
+        var bulkOnly = session.Log.Entries.Single(e =>
+            e.Op == CommandOp.Unrelate && e.Value is null);
+        Assert.Equal("stub_edge", bulkOnly.Key);
+    }
+
+    [Fact]
+    public void Unrelate_BothNull_Throws()
+    {
+        var session = new SurrealSession();
+        Assert.Throws<ArgumentException>(() => session.Unrelate((IRecordId?)null, (IRecordId?)null, "edge"));
     }
 
     [Fact]

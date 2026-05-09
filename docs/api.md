@@ -514,8 +514,8 @@ Runtime calls:
 ```csharp
 session.Relate<Restricts>(source, target);
 session.Unrelate<Restricts>(source, target);
-session.UnrelateAllFrom<Restricts>(source);
-session.UnrelateAllTo<Restricts>(target);
+session.Unrelate<Restricts>(source, target: null);  // bulk: every outgoing edge from source
+session.Unrelate<Restricts>(source: null, target);  // bulk: every incoming edge into target
 
 session.QueryOutgoing<Restricts, UserStory>(constraint);
 session.QueryIncoming<Restricts, Constraint>(story);
@@ -548,24 +548,38 @@ TYPE RELATION
 FROM code_symbols
 TO code_symbols
 ENFORCED;
+DEFINE INDEX IF NOT EXISTS unique_relationship ON TABLE uses COLUMNS in, out UNIQUE;
 DEFINE FIELD IF NOT EXISTS kind ON uses TYPE string DEFAULT "";
 DEFINE FIELD IF NOT EXISTS file_path ON uses TYPE string DEFAULT "";
 DEFINE FIELD IF NOT EXISTS line ON uses TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS run_id ON uses TYPE string DEFAULT "";
 ```
 
+Every relation table gets a `DEFINE INDEX … UNIQUE` on `(in, out)` — duplicate edges
+between the same pair are rejected at the schema layer. That's the sole uniqueness
+guard: a duplicate `RELATE` errors against the index, so idempotent re-imports require
+loading the aggregate first (the commit planner skips `RELATE` for edges already
+present at session start).
+
 The payload class is a plain POCO — no `[Property]` annotations needed; public scalar properties (`string`, `int`/`long`, `bool`, `float`/`double`/`decimal`, `DateTime`/`DateTimeOffset`, `Guid`, `Ulid`) are picked up automatically. Anything else is silently skipped. Static, indexer, write-only, and inherited-already-seen properties are not emitted as fields.
 
-At write time, pass payload data through the dictionary overload of `Relate` / `RelateOnce`:
+At write time, pass payload data through the dictionary overload of `Relate`. The edge id strategy is carried by an optional `RecordId edge` parameter; when omitted it defaults to `RecordId.Idempotent(TKind.EdgeName)` — a deterministic hash of the linkage triple, so re-runs land on the same row.
 
 ```csharp
-session.RelateOnce<Uses>(source, target, new Dictionary<string, object?>
+// Idempotent (default) — hash from (source, table, target)
+session.Relate<Uses>(source, target, new Dictionary<string, object?>
 {
     ["kind"]      = "call",
     ["file_path"] = "src/Foo.cs",
     ["line"]      = 42,
     ["run_id"]    = currentRunId,
 });
+
+// Random Ulid — caller mints the edge id up front
+session.Relate<Uses>(source, target, RecordId.New(Uses.EdgeName), payload);
+
+// Slug — caller picks a stable name for the edge row
+session.Relate<Uses>(source, target, new RecordId(Uses.EdgeName, "primary_call"), payload);
 ```
 
 Field names in the dictionary use the snake-cased SurrealDB form (matching what the schema declared), not the C# property name. The bare `ForwardRelation` (no `<TPayload>`) keeps the pre-feature schema unchanged — no extra fields emitted on the relation table.
@@ -729,13 +743,10 @@ Write methods:
 | `Track(entity)` | Bind and register a fresh entity, queueing a create. |
 | `SetField(owner, field, value, kind)` | Low-level field write used by generated setters. |
 | `UnsetField(owner, field, kind)` | Low-level field clear used by generated setters. |
-| `Relate<TKind>(source, target)` | Queue relation creation. |
-| `Relate<TKind>(source, target, payload)` | Queue relation creation with a typed payload — renders as `RELATE source->edge->target CONTENT { … }`. Use for edges that carry data (confidence, run id, resolution method). |
-| `RelateOnce<TKind>(source, target)` | Idempotent relation creation. The edge id is derived deterministically from `(source, kind, target)` via SHA-256, so re-issuing the same triple lands on the same edge row instead of stacking duplicates. Renders as `RELATE source -> edge_table:<hash> -> target` — the RELATE-with-explicit-id form so SurrealDB registers the row as a graph edge on `TYPE RELATION ENFORCED` tables. The right verb for re-indexing / re-import workloads. |
-| `RelateOnce<TKind>(source, target, payload)` | Idempotent relate with payload — same deterministic id; payload becomes the trailing `CONTENT { … }` clause. `in` / `out` are encoded by the RELATE syntax itself and aren't repeated in the payload. |
-| `Unrelate<TKind>(source, target)` | Queue relation deletion. |
-| `UnrelateAllFrom<TKind>(source)` | Queue bulk deletion of all outgoing edges of a kind. |
-| `UnrelateAllTo<TKind>(target)` | Queue bulk deletion of all incoming edges of a kind. |
+| `Relate<TKind>(source, target)` | Queue relation creation. The edge id defaults to the **Idempotent** strategy — `RecordId.Idempotent(TKind.EdgeName)` resolves to a deterministic hash of `{source}\|{table}\|{target}` at emit time, so re-running the same Relate lands on the same edge row instead of erroring against the schema's UNIQUE INDEX. |
+| `Relate<TKind>(source, target, RecordId edge)` | Queue relation creation with an explicit edge id strategy. Pass `RecordId.New(TKind.EdgeName)` for a **Random** Ulid (pre-minted client-side), `new RecordId(TKind.EdgeName, slug)` for a **Slug** (user-supplied, stable name), or `RecordId.Idempotent(TKind.EdgeName)` to be explicit about the default. |
+| `Relate<TKind>(source, target, payload)` | Queue relation creation with a typed payload — renders as `RELATE source->edge:<id>->target CONTENT { … }`. Edge id strategy defaults to Idempotent. Pass an explicit edge to override. |
+| `Unrelate<TKind>(source?, target?)` | Queue relation deletion. At least one endpoint must be non-null. Both non-null targets one specific edge; one-side-null is the bulk form (every matching edge of that kind, persisted-or-not — renders as `DELETE edge WHERE in = source` / `… WHERE out = target`). |
 | `Delete(entity)` | Queue entity deletion and invoke `OnDeleting`. |
 | `Delete(id)` | Queue id-only deletion without `OnDeleting`. |
 
