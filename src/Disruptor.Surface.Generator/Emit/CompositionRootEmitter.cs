@@ -76,14 +76,32 @@ internal static class CompositionRootEmitter
 
             sb.Append(memberIndent)
               .Append("/// <summary>Hydrates a snapshot of the ").Append(rootName)
-              .Append(" aggregate rooted at <paramref name=\"rootId\"/>. The returned session is in-memory only — call <see cref=\"global::Disruptor.Surface.Runtime.SurrealSession.CommitAsync(global::Disruptor.Surface.Runtime.ISurrealTransport, global::System.Threading.CancellationToken)\"/> to persist; concurrent commits surface as <c>SurrealConflictException</c> from the SDK.</summary>")
+              .Append(" aggregate rooted at <paramref name=\"rootId\"/>. Read-only — for write-mode, use the <c>Transaction</c> overload and pass the same txn into <c>SaveAsync</c>.</summary>")
               .AppendLine();
             sb.Append(memberIndent).Append("public async ").Append(TaskFqn).Append('<').Append(SessionFqn)
               .Append("> Load").Append(rootName).Append("Async(")
-              .Append(TransportFqn).Append(" transport, ")
+              .Append("global::Disruptor.Surreal.Surreal db, ")
               .Append(idType).Append(" rootId, ")
               .Append(CtFqn).AppendLine(" ct = default)");
             sb.Append(memberIndent).AppendLine("{");
+            sb.Append(memberIndent).Append("    await using var transport = new global::Disruptor.Surface.Runtime.SurrealSdkTransport(db);").AppendLine();
+            sb.Append(memberIndent).Append("    var ws = new ").Append(SessionFqn).AppendLine("(ReferenceRegistry);");
+            sb.Append(memberIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(ws, transport, rootId, ct);");
+            sb.Append(memberIndent).AppendLine("    return ws;");
+            sb.Append(memberIndent).AppendLine("}");
+            sb.AppendLine();
+
+            sb.Append(memberIndent)
+              .Append("/// <summary>Hydrates a snapshot of the ").Append(rootName)
+              .Append(" aggregate inside <paramref name=\"tx\"/>. Reads see in-txn writes from the same transaction; pass the same <paramref name=\"tx\"/> into <c>SaveAsync</c> for writes that participate in the same atomic unit.</summary>")
+              .AppendLine();
+            sb.Append(memberIndent).Append("public async ").Append(TaskFqn).Append('<').Append(SessionFqn)
+              .Append("> Load").Append(rootName).Append("Async(")
+              .Append("global::Disruptor.Surreal.Transaction tx, ")
+              .Append(idType).Append(" rootId, ")
+              .Append(CtFqn).AppendLine(" ct = default)");
+            sb.Append(memberIndent).AppendLine("{");
+            sb.Append(memberIndent).Append("    await using var transport = new global::Disruptor.Surface.Runtime.SurrealSdkTransport(tx);").AppendLine();
             sb.Append(memberIndent).Append("    var ws = new ").Append(SessionFqn).AppendLine("(ReferenceRegistry);");
             sb.Append(memberIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(ws, transport, rootId, ct);");
             sb.Append(memberIndent).AppendLine("    return ws;");

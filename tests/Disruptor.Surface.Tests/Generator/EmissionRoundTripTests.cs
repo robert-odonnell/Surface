@@ -554,8 +554,11 @@ public sealed class EmissionRoundTripTests
         var assembly = GeneratorHarness.CompileAndLoad(LoadFixture);
         var session = new SurrealSession();
 
-        // Close the session by committing.
-        await session.CommitAsync(Disruptor.Surface.Tests.Runtime.FakeSurreal.Null(), CancellationToken.None);
+        // Close the session via Save (the session closes after a successful dispatch,
+        // even if the app hasn't called tx.CommitAsync yet — once Save returns, the
+        // session is one-shot done).
+        await using var tx = await Disruptor.Surface.Tests.Runtime.FakeSurreal.Null().BeginTransactionAsync();
+        await session.SaveAsync(tx);
 
         var queryRoot = assembly.GetType("M.Workspace")!
             .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;

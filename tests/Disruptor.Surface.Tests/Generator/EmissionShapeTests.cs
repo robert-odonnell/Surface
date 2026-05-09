@@ -87,8 +87,9 @@ public sealed class EmissionShapeTests
         var src = compositionRootFile.ToString();
         Assert.Contains("public partial class Workspace", src);
         Assert.Contains("LoadDesignAsync", src);
-        // Instance method, not static; takes transport + typed id + cancellation token.
-        Assert.Contains("global::Disruptor.Surface.Runtime.ISurrealTransport transport", src);
+        // Two overloads: one for read-only via Surreal db, one for write-mode via Transaction tx.
+        Assert.Contains("global::Disruptor.Surreal.Surreal db", src);
+        Assert.Contains("global::Disruptor.Surreal.Transaction tx", src);
         Assert.Contains("global::M.DesignId rootId", src);
         // No ctor, no fields — minimal-intrusion contract.
         Assert.DoesNotContain("public Workspace(", src);

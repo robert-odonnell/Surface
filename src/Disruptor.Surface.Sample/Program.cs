@@ -33,24 +33,24 @@ Console.WriteLine("  schema ready.\n");
 var seededDesignIds = new List<DesignId>();
 for (var i = 0; i < 10; i++)
 {
-    seededDesignIds.Add(await SeedAndCommitDesign($"seed-{i}", transport));
+    seededDesignIds.Add(await SeedAndCommitDesign($"seed-{i}", db));
 }
 
 // ── 3. Seed a Review aggregate that assesses the third Design. Exercises cross-
 //    aggregate edges (Review.Assesses → Design, Issue.Concerns → Constraint), plus
 //    within-aggregate edges that aren't `restricts` (Finding.Informs → Issue,
 //    Finding.Cites → Observation, DesignChange.Resolves → Issue).
-var reviewId = await SeedAndCommitReview(seededDesignIds[2], transport);
+var reviewId = await SeedAndCommitReview(seededDesignIds[2], db);
 
 // ── 4. Reload + print. Verifies the round-trip including SurrealArray<Scenario>
 //    contents, cross-aggregate id collections, and within-aggregate edge reads.
-await ReloadAndPrintDesign(seededDesignIds[2], transport);
-await ReloadAndPrintReview(reviewId, transport);
+await ReloadAndPrintDesign(seededDesignIds[2], db);
+await ReloadAndPrintReview(reviewId, db);
 
 // ── 5. Query layer demo — exercises the unified read+load surface end-to-end:
 //    flat predicates, traversal projections, edge queries, filtered LoadAsync,
 //    LoadShapeViolationException on unloaded reads, and FetchAsync top-up.
-await DemoQueryLayer(seededDesignIds, transport);
+await DemoQueryLayer(seededDesignIds, db, transport);
 
 // ── 6. Relation traversal demo — the four flavors of [Forward]/[Inverse] relation
 //    includes: forward outgoing single-target, inverse incoming single-target, forward
@@ -59,7 +59,7 @@ await DemoRelationTraversal(transport);
 
 return 0;
 
-async Task<DesignId> SeedAndCommitDesign(string text, ISurrealTransport db)
+async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
 {
     Console.WriteLine($"--- Seeding design '{text}' ---");
 
@@ -155,7 +155,9 @@ async Task<DesignId> SeedAndCommitDesign(string text, ISurrealTransport db)
     }
 
     Console.WriteLine($"  pending: {session.Pending.Records.Count} records, {session.Log.Count} commands");
-    await session.CommitAsync(db);
+    await using var tx = await db.BeginTransactionAsync();
+    await session.SaveAsync(tx);
+    await tx.CommitAsync();
     Console.WriteLine($"  committed; design id = {design.Id}\n");
     return design.Id;
 
@@ -167,7 +169,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, ISurrealTransport db)
     };
 }
 
-async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, ISurrealTransport db)
+async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SdkSurreal db)
 {
     Console.WriteLine($"--- Seeding review of {targetDesignId} ---");
 
@@ -236,12 +238,14 @@ async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, ISurrealTransp
     session.Relate<Revises>(change.Id, targetDesignId);
 
     Console.WriteLine($"  pending: {session.Pending.Records.Count} records, {session.Log.Count} commands");
-    await session.CommitAsync(db);
+    await using var tx = await db.BeginTransactionAsync();
+    await session.SaveAsync(tx);
+    await tx.CommitAsync();
     Console.WriteLine($"  committed; review id = {review.Id}\n");
     return review.Id;
 }
 
-async Task ReloadAndPrintDesign(DesignId designId, ISurrealTransport db)
+async Task ReloadAndPrintDesign(DesignId designId, SdkSurreal db)
 {
     Console.WriteLine($"--- Reloading Design {designId} ---");
     var session = await workspace.LoadDesignAsync(db, designId);
@@ -285,7 +289,7 @@ async Task ReloadAndPrintDesign(DesignId designId, ISurrealTransport db)
     Console.WriteLine();
 }
 
-async Task ReloadAndPrintReview(ReviewId reloadId, ISurrealTransport db)
+async Task ReloadAndPrintReview(ReviewId reloadId, SdkSurreal db)
 {
     Console.WriteLine($"--- Reloading Review {reloadId} ---");
     var session = await workspace.LoadReviewAsync(db, reloadId);
@@ -322,7 +326,7 @@ async Task ReloadAndPrintReview(ReviewId reloadId, ISurrealTransport db)
     Console.WriteLine();
 }
 
-async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, ISurrealTransport db)
+async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal sdk, ISurrealTransport db)
 {
     Console.WriteLine("--- Query layer demo ---");
 

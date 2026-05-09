@@ -868,36 +868,30 @@ public sealed class SurrealSession : IHydrationSink
     /// throws freely and lands here.
     /// </para>
     /// </summary>
-    public Task CommitAsync(ISurrealTransport transport, CancellationToken ct = default)
+    /// <summary>
+    /// Dispatches every pending write into <paramref name="tx"/> (an app-owned server-side
+    /// transaction obtained from <c>db.BeginTransactionAsync</c>) as one RPC per command.
+    /// Does <b>not</b> commit the transaction — the app calls <c>tx.CommitAsync</c> (or
+    /// <c>tx.CancelAsync</c>) when its logical unit of work is done. This split lets the
+    /// app compose multiple sessions / aggregates / raw SDK calls inside one txn,
+    /// committing them atomically.
+    /// <para>
+    /// Errors during dispatch (constraint violations, SurrealConflictException, etc.)
+    /// surface here; the session closes on any failure. Subsequent operations on this
+    /// session throw, but the txn handle is still the app's to cancel or salvage.
+    /// </para>
+    /// </summary>
+    public async Task SaveAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
     {
-        if (transport is not SurrealSdkTransport sdk)
-        {
-            throw new InvalidOperationException(
-                $"CommitAsync(ISurrealTransport) requires a {nameof(SurrealSdkTransport)} " +
-                $"(the only transport since the SDK migration). Got {transport.GetType().Name}. " +
-                $"Tests should call the {nameof(CommitAsync)}({nameof(Disruptor)}.{nameof(Disruptor.Surreal)}.{nameof(Disruptor.Surreal.Surreal)}, …) overload directly.");
-        }
-        return CommitAsync(sdk.Db, ct);
-    }
-
-    /// <inheritdoc cref="CommitAsync(ISurrealTransport, CancellationToken)"/>
-    public async Task CommitAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
-    {
+        ArgumentNullException.ThrowIfNull(tx);
         ThrowIfClosed();
         try
         {
             var plan = CommitPlanner.Build(Pending, ReferenceRegistry);
             if (plan.Count > 0)
             {
-                // Open a server-side transaction; every RPC issued through `tx` carries the
-                // server-issued txn-id, so the chunked commit stays atomic. BEGIN/COMMIT
-                // come from the SDK txn handle, not from the rendered SurrealQL. Conflicts
-                // surface as SurrealConflictException at tx.CommitAsync — let it propagate.
-                await using var tx = await db.BeginTransactionAsync(ct).ConfigureAwait(false);
-
-                // Stream each rendered command as its own RPC. Per-statement dispatch is
-                // what addresses the "too many ops in one request" workaround: batches no
-                // longer have a wire-side size cliff because each command is its own packet.
+                // Per-statement dispatch via the app-owned txn handle. BEGIN/COMMIT belong
+                // to the app; we just stream commands into the open transaction.
                 var sb = new StringBuilder();
                 foreach (var cmd in plan)
                 {
@@ -906,14 +900,12 @@ public sealed class SurrealSession : IHydrationSink
                     await tx.QueryAsync(sb.ToString(), bindings: null, ct)
                         .ConfigureAwait(false);
                 }
-
-                await tx.CommitAsync(ct).ConfigureAwait(false);
             }
         }
         catch
         {
-            // Fail-closed at the transport boundary. Don't pretend we can recover —
-            // the domain catches the rethrown exception and decides what to do.
+            // Fail-closed at the dispatch boundary. The session can't recover; the txn
+            // is the app's to cancel.
             closed = true;
             throw;
         }

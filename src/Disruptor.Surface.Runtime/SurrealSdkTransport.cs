@@ -19,22 +19,53 @@ namespace Disruptor.Surface.Runtime;
 /// this whole class gets deleted.
 /// </para>
 /// </summary>
-public sealed class SurrealSdkTransport(SdkSurreal db, bool ownsClient = false) : ISurrealTransport
+public sealed class SurrealSdkTransport : ISurrealTransport
 {
-    /// <summary>The underlying SDK client. Exposed so write-side code can open transactions directly.</summary>
-    public SdkSurreal Db { get; } = db;
+    private readonly Func<string, CancellationToken, Task<QueryResponse>> _queryFn;
+    private readonly bool _ownsClient;
+
+    /// <summary>
+    /// The underlying SDK client when this transport wraps one directly. Null when the
+    /// transport wraps a <see cref="Disruptor.Surreal.Transaction"/> instead.
+    /// </summary>
+    public SdkSurreal? Db { get; }
+
+    /// <summary>
+    /// Wrap a <see cref="SdkSurreal"/> client; loads route through <c>db.QueryAsync</c>.
+    /// Use for read-only sessions or when the caller manages transactions externally.
+    /// </summary>
+    public SurrealSdkTransport(SdkSurreal db, bool ownsClient = false)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        Db = db;
+        _queryFn = (sql, ct) => db.QueryAsync(sql, bindings: null, ct);
+        _ownsClient = ownsClient;
+    }
+
+    /// <summary>
+    /// Wrap a <see cref="Disruptor.Surreal.Transaction"/>; loads route through
+    /// <c>tx.QueryAsync</c> so they see in-txn writes from the same transaction.
+    /// Used by write-mode loaders (<c>Workspace.Load{Root}Async(Transaction tx, …)</c>).
+    /// The transport never owns the transaction's lifetime — the caller commits/cancels.
+    /// </summary>
+    public SurrealSdkTransport(Disruptor.Surreal.Transaction tx)
+    {
+        ArgumentNullException.ThrowIfNull(tx);
+        _queryFn = (sql, ct) => tx.QueryAsync(sql, bindings: null, ct);
+        _ownsClient = false;
+    }
 
     /// <inheritdoc />
     public async Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
     {
-        var response = await Db.QueryAsync(sql, bindings: null, ct).ConfigureAwait(false);
+        var response = await _queryFn(sql, ct).ConfigureAwait(false);
         return ProjectToJson(response);
     }
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        if (ownsClient) await Db.DisposeAsync().ConfigureAwait(false);
+        if (_ownsClient && Db is not null) await Db.DisposeAsync().ConfigureAwait(false);
     }
 
     /// <summary>

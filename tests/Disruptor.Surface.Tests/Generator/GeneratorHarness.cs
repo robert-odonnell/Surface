@@ -84,6 +84,8 @@ internal static class GeneratorHarness
         refs.Add(MetadataReference.CreateFromFile(typeof(Disruptor.Surface.Runtime.SurrealSession).Assembly.Location));
         // Ulid (transitive dep of Disruptor.Surface.Runtime)
         refs.Add(MetadataReference.CreateFromFile(typeof(Ulid).Assembly.Location));
+        // Disruptor.Surreal (the SDK; emitted LoadAsync overloads reference it)
+        refs.Add(MetadataReference.CreateFromFile(typeof(Disruptor.Surreal.Surreal).Assembly.Location));
 
         return refs;
     }
