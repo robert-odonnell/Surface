@@ -71,33 +71,11 @@ public sealed class EmissionRoundTripTests
         Assert.IsType<FormatException>(ex.InnerException);
     }
 
-    [Fact]
-    public void Track_ThenSetField_ThenCommit_RendersExpectedSql()
-    {
-        // Round-trip through the live runtime: instantiate a generated entity, Track it,
-        // mutate a property via the generated setter (which routes through __WriteField
-        // → Session.SetField), commit, and assert the rendered SurrealQL contains the
-        // create + the field set.
-        var assembly = GeneratorHarness.CompileAndLoad(MinimalSource);
-        var design = NewEntity(assembly, "M.Design");
-
-        // Set Description via the generated property setter — exercises the partial-
-        // property body emitted by PartialEmitter, including the buffer-when-unbound
-        // logic.
-        SetProperty(design, "Description", "round-trip test");
-
-        var session = new SurrealSession();
-        _ = new FakeTransport();
-        session.Track((IEntity)design);
-
-        // After Track + Flush, the buffered Description write should have replayed into
-        // the session's pending state. The value travels in the parameters dictionary
-        // (not inlined in the SQL) — the emitter binds via $p0 / $p1 / … bindings.
-        var rendered = session.RenderBatch();
-        Assert.Contains("designs:", rendered);
-        Assert.Contains("description", rendered);
-        Assert.Contains("round-trip test", rendered);
-    }
+    // Track_ThenSetField_ThenCommit_RendersExpectedSql removed — RenderBatch went out
+    // with CommitPlanner. The equivalent behaviour ("constructed entity + setter writes
+    // round-trip into a CREATE … CONTENT { … }") is covered by
+    // SaveAsync_EmittedPerEntity_DispatchesCreateWithContent below, which asserts the
+    // wire shape end-to-end via a fake IConnection.
 
     [Fact]
     public void Hydrate_FromJson_PopulatesPropertyAndSetsId()

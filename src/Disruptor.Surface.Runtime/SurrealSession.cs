@@ -841,62 +841,7 @@ public sealed class SurrealSession : IHydrationSink
     public IReadOnlyCollection<IRecordId> QueryInverseRelatedIds<TKind>(IEntity owner) where TKind : IRelationKind
         => QueryInverseRelatedIds(owner, TKind.EdgeName);
 
-    /// <summary>
-    /// Tombstones an entity. Runs <see cref="IEntity.OnDeleting"/> first so user-side
-    /// cleanup (child deletes, reference clears) lands before the entity's own DELETE
-    /// command, then queues the DELETE and removes every local-state reference to the
-    /// id (entity dict, parent links pointing at it, references whose value is it,
-    /// edges touching it on either side).
-    /// </summary>
-    public void Delete(IEntity entity)
-    {
-        ThrowIfClosed();
-        if (!state.Entities.TryGetValue(entity.Id, out var tracked) || !ReferenceEquals(tracked, entity))
-        {
-            // Catches: unbound entities, entities from a different session, the same id
-            // tracked under a different instance, and double-deletes (CleanupLocalState
-            // already removed the entry from `entities`). Without this, OnDeleting fires
-            // on an entity whose `Session` may point elsewhere — split-brain at best.
-            throw new InvalidOperationException(
-                $"Cannot delete {entity.Id}: entity is not currently tracked in this session. " +
-                $"Use Delete(IRecordId) for id-only deletes.");
-        }
-        entity.OnDeleting();
-        Record(Command.Delete(entity.Id));
-        CleanupLocalState(entity.Id);
-    }
-
-    /// <summary>
-    /// Id-only delete — for cross-aggregate cleanup or when the caller doesn't have
-    /// the entity loaded. No <see cref="IEntity.OnDeleting"/> hook (no entity to dispatch
-    /// to); just queues DELETE and clears local-state mentions.
-    /// </summary>
-    public void Delete(IRecordId id)
-    {
-        ThrowIfClosed();
-        var canonical = RecordId.From(id);
-        Record(Command.Delete(canonical));
-        CleanupLocalState(canonical);
-    }
-
     // ──────────────────────────── boundary (async) ───────────────────────────
-
-    /// <summary>
-    /// Snapshot pending state as a SurrealQL script without clearing state — useful for
-    /// diagnostics and tests. Returns an empty script when nothing has been recorded.
-    /// </summary>
-    public string RenderBatch()
-    {
-        ThrowIfClosed();
-        var plan = CommitPlanner.Build(Pending, ReferenceRegistry);
-        return SurrealCommandEmitter.Emit(plan);
-    }
-    //public (string Sql, IReadOnlyDictionary<string, object?> Parameters) RenderBatch()
-    //{
-    //    ThrowIfClosed();
-    //    var plan = CommitPlanner.Build(Pending, ReferenceRegistry);
-    //    return SurrealCommandEmitter.Emit(plan);
-    //}
 
     /// <summary>
     /// Flushes pending writes through a streamed server-side transaction. Each rendered

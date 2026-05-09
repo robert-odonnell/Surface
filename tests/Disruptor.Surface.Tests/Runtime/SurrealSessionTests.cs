@@ -74,12 +74,10 @@ public sealed class SurrealSessionTests
         Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(id)));
         Assert.Throws<InvalidOperationException>(() => session.SetField(id, "field", "v"));
         Assert.Throws<InvalidOperationException>(() => session.UnsetField(id, "field"));
-        Assert.Throws<InvalidOperationException>(() => session.Delete(id));
         Assert.Throws<InvalidOperationException>(() => session.Relate(id, id, RecordId.Idempotent("edge")));
         Assert.Throws<InvalidOperationException>(() => session.Unrelate(id, id, "edge"));
         Assert.Throws<InvalidOperationException>(() => session.Unrelate(id, null, "edge"));
         Assert.Throws<InvalidOperationException>(() => session.Unrelate(null, id, "edge"));
-        Assert.Throws<InvalidOperationException>(() => session.RenderBatch());
     }
 
     [Fact]
@@ -408,90 +406,8 @@ public sealed class SurrealSessionTests
         Assert.Contains(c, incoming);
     }
 
-    [Fact]
-    public void Delete_Throws_WhenEntityIsNotTrackedInThisSession()
-    {
-        // Unbound: never seen by any session.
-        var sessionA = new SurrealSession();
-        var unbound = new StubEntity(new RecordId("designs", "u"));
-        Assert.Throws<InvalidOperationException>(() => sessionA.Delete(unbound));
-
-        // Foreign: tracked in B, passed into A.
-        var sessionB = new SurrealSession();
-        var foreign = new StubEntity(new RecordId("designs", "f"));
-        ((IHydrationSink)sessionB).Track(foreign);
-        Assert.Throws<InvalidOperationException>(() => sessionA.Delete(foreign));
-
-        // Different-instance-same-id: identity poison.
-        var id = new RecordId("designs", "d");
-        var tracked = new StubEntity(id);
-        var ghost   = new StubEntity(id);
-        ((IHydrationSink)sessionA).Track(tracked);
-        Assert.Throws<InvalidOperationException>(() => sessionA.Delete(ghost));
-
-        // Double-delete: first Delete removed it from `entities`; second must throw.
-        sessionA.Delete(tracked);
-        Assert.Throws<InvalidOperationException>(() => sessionA.Delete(tracked));
-
-        // None of the failing paths should have fired OnDeleting on the wrong entity.
-        Assert.DoesNotContain("OnDeleting", unbound.Calls);
-        Assert.DoesNotContain("OnDeleting", foreign.Calls);
-        Assert.DoesNotContain("OnDeleting", ghost.Calls);
-        // The legitimate first Delete on `tracked` did fire OnDeleting once.
-        Assert.Single(tracked.Calls, c => c == "OnDeleting");
-    }
-
-    [Fact]
-    public void Track_AfterDelete_OfLoadedId_GetsFreshLifecycle()
-    {
-        // Repro for the zombie-track bug: previously, Track(new T { Id = deletedLoadedId })
-        // hit the loadedAtStart short-circuit and returned without Bind/Create/Initialize/Flush,
-        // leaving an unbound zombie in `entities`. Fix removes that branch — the standard
-        // Bind→Create→Initialize→Flush path runs, and PendingState's Delete→Create segment
-        // logic emits both commands.
-        var session = new SurrealSession();
-        var id = new RecordId("designs", "x");
-
-        var loaded = new StubEntity(id);
-        ((IHydrationSink)session).Track(loaded);
-        session.Delete(loaded);
-
-        var fresh = new StubEntity(id);
-        var tracked = session.Track(fresh);
-
-        Assert.Same(fresh, tracked);
-        Assert.Same(session, fresh.BoundSession);
-        Assert.Equal(new[] { "Bind", "Initialize", "Flush", "MarkAllSlicesLoaded" }, fresh.Calls.ToArray());
-        Assert.Contains(session.Log.Entries, e => e.Op == CommandOp.Delete);
-        Assert.Contains(session.Log.Entries, e => e.Op == CommandOp.Create);
-    }
-
-    [Fact]
-    public void Track_AfterDelete_DoesNotBleed_OutboundReferences()
-    {
-        // CleanupLocalState clears outbound references on Delete so the recreated entity
-        // doesn't inherit the dead one's optional refs via GetReferenceOrDefault. Inbound
-        // refs (where this id was the target) are preserved for the planner.
-        var session = new SurrealSession();
-        var id = new RecordId("designs", "x");
-        var refTargetId = new RecordId("details", "t");
-
-        var loaded = new StubEntity(id);
-        var refTarget = new StubEntity(refTargetId);
-        ((IHydrationSink)session).Track(loaded);
-        ((IHydrationSink)session).Track(refTarget);
-        ((IHydrationSink)session).Reference(loaded.Id, "optionalRef", refTargetId);
-
-        Assert.Same(refTarget, session.GetReferenceOrDefault<StubEntity>(loaded, "optionalRef"));
-
-        session.Delete(loaded);
-
-        var fresh = new StubEntity(id);
-        session.Track(fresh);
-
-        // The recreated instance must not see the dead entity's optional ref.
-        Assert.Null(session.GetReferenceOrDefault<StubEntity>(fresh, "optionalRef"));
-    }
+    // Delete-related tests removed alongside the legacy sync Delete. DeleteAsync covers
+    // entity removal now (without cascade — re-anchor lands in preview.35).
 
     [Fact]
     public void Unrelate_SourceOnly_EmitsSingleBulkCommand()
