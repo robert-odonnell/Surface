@@ -146,6 +146,21 @@ public interface IEntity
     /// called there.
     /// </summary>
     void MarkAllSlicesLoaded(IHydrationSink sink);
+
+    /// <summary>
+    /// Per-entity Save dispatch — generator-emitted on every <c>[Table]</c> entity. Walks
+    /// forward dependencies (via <see cref="ISaveContext.SaveAsync"/>), then dispatches a
+    /// <c>CREATE/UPDATE record:id CONTENT { … }</c> through <see cref="ISaveContext.Transaction"/>,
+    /// then walks new children, then marks itself saved via <see cref="ISaveContext.MarkSaved"/>.
+    /// Default-interface no-op throws — every <c>[Table]</c> entity gets a real body emitted;
+    /// hand-written stubs that don't go through Save are unaffected.
+    /// </summary>
+    Task SaveAsync(ISaveContext ctx, CancellationToken ct)
+        => throw new NotImplementedException(
+            $"{GetType().FullName} does not implement IEntity.SaveAsync. "
+            + "If this is a [Table] entity, the generator should emit it. "
+            + "If it's a hand-written test stub or non-Table IEntity implementation, "
+            + "either implement SaveAsync explicitly or avoid going through SurrealSession.SaveAsync.");
 }
 
 /// <summary>
@@ -868,6 +883,108 @@ public sealed class SurrealSession : IHydrationSink
     /// throws freely and lands here.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// Per-entity Save: dispatches <paramref name="entity"/> (and its forward dependencies +
+    /// new children, transitively) into <paramref name="tx"/>. Whole-entity always — every
+    /// dispatched row is a <c>CREATE/UPDATE record:id CONTENT { … }</c>. Dependency-first
+    /// ordering: forward references (and parents) save before the entity that points at
+    /// them; new children save after the entity that owns them. Existing entities (already
+    /// in the identity map) only save when explicitly passed — their references are reused
+    /// by id, not re-dispatched.
+    /// <para>
+    /// The recursion is generator-driven: each entity's emitted <see cref="IEntity.SaveAsync"/>
+    /// describes its own structure and recurses through <see cref="ISaveContext.SaveAsync"/>
+    /// callbacks back into this orchestration. The session enforces cycle detection (each
+    /// entity is visited at most once per Save pass).
+    /// </para>
+    /// </summary>
+    public async Task SaveAsync(IEntity entity, Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        ArgumentNullException.ThrowIfNull(tx);
+        ThrowIfClosed();
+
+        var ctx = new SaveContext(this, tx);
+        try
+        {
+            await ctx.SaveAsync(entity, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Fail-closed: any dispatch failure marks the session done. The app catches
+            // and cancels the txn on its own.
+            closed = true;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Auto-binds <paramref name="entity"/> for Save: binds the session into the entity's
+    /// <c>_session</c> field, replays any pre-bind buffered writes, and marks every slice
+    /// loaded (the user is asserting they own the entire state of this fresh entity).
+    /// Skips <c>Initialize</c> — the OnCreate hook pathway belongs to the legacy
+    /// Track-then-Commit flow; under the explicit-Save model the user constructs whole
+    /// entities explicitly. Crucially does <b>not</b> add the owner to the identity map
+    /// — that's <see cref="ISaveContext.MarkSaved"/>'s job, post-dispatch, so the
+    /// generator-emitted body's CREATE-vs-UPDATE check sees the entity as new.
+    /// </summary>
+    private void EnsureBoundForSave(IEntity entity)
+    {
+        ThrowIfClosed();
+        if (entity.Session is null)
+        {
+            entity.Bind(this);
+            entity.Flush(this);
+            entity.MarkAllSlicesLoaded(this);
+        }
+    }
+
+    /// <summary>
+    /// Internal orchestration: tracks visited-this-pass (cycle break + saved-this-pass
+    /// signal for the entity body's IsTracked / CREATE-vs-UPDATE check).
+    /// </summary>
+    private sealed class SaveContext(SurrealSession session, Disruptor.Surreal.Transaction tx) : ISaveContext
+    {
+        private readonly HashSet<RecordId> _visited = [];
+        private readonly HashSet<RecordId> _savedThisPass = [];
+
+        public Disruptor.Surreal.Transaction Transaction { get; } = tx;
+
+        /// <summary>
+        /// True iff <paramref name="id"/> is known to exist in the DB — either loaded
+        /// from a prior <c>Hydrate</c> (so it's in the session's <c>loadedAtStart</c>
+        /// set) or already CREATEd in this Save pass. NOT a check on the in-memory
+        /// identity map: a freshly-constructed entity that's been Bound for Save sits
+        /// in <c>state.Entities</c> too, and we need to distinguish "in session" from
+        /// "in DB" so the entity body chooses CREATE vs UPDATE correctly.
+        /// </summary>
+        public bool IsTracked(IRecordId id)
+        {
+            var rid = RecordId.From(id);
+            return session.loadedAtStart.Contains(rid) || _savedThisPass.Contains(rid);
+        }
+
+        public async Task SaveAsync(IEntity entity, CancellationToken ct)
+        {
+            // Cycle break — an entity reachable through multiple paths in one Save pass
+            // dispatches exactly once. The generator's per-entity body checks IsTracked
+            // for forward refs, but a cycle through new entities would still recur here
+            // without the visited set.
+            if (!_visited.Add(entity.Id)) return;
+            session.EnsureBoundForSave(entity);
+            await entity.SaveAsync(this, ct).ConfigureAwait(false);
+        }
+
+        public void MarkSaved(IEntity entity)
+        {
+            // Identity map registration (idempotent — Bind / SetField cascade may have
+            // added it already) plus the saved-this-pass flag that drives subsequent
+            // IsTracked checks to "yes, in DB now".
+            session.state.Entities[entity.Id] = entity;
+            _savedThisPass.Add(entity.Id);
+        }
+    }
+
     /// <summary>
     /// Dispatches every pending write into <paramref name="tx"/> (an app-owned server-side
     /// transaction obtained from <c>db.BeginTransactionAsync</c>) as one RPC per command.

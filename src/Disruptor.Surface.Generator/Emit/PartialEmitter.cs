@@ -156,6 +156,13 @@ internal static class PartialEmitter
         builder.AppendLine();
         EmitMarkAllSlicesLoaded(builder, memberIndent, table);
 
+        // SaveAsync — generator-emitted per-entity Save dispatch. Walks forward dependencies
+        // (Reference / Parent), then dispatches CREATE-or-UPSERT-with-CONTENT for this row,
+        // then MarkSaved. Children + relations are not auto-walked in the MVP — the user
+        // calls Save explicitly per child / per relation.
+        builder.AppendLine();
+        EmitSaveAsync(builder, memberIndent, table);
+
         builder
             .Append(indent)
             .AppendLine("}");
@@ -945,6 +952,108 @@ internal static class PartialEmitter
                 .Append(sliceKey)
                 .AppendLine("\");");
         }
+
+        builder.Append(indent).AppendLine("}");
+    }
+
+    // ──────────────────────────── SaveAsync emission ────────────────────────
+
+    /// <summary>
+    /// Emits <c>IEntity.SaveAsync(ISaveContext, CancellationToken)</c> per <c>[Table]</c>.
+    /// MVP shape: walk forward dependencies (<c>[Reference]</c> / <c>[Parent]</c> targets
+    /// that aren't tracked yet → recurse via <c>ctx.SaveAsync</c>); build a content dict
+    /// from <c>[Property]</c> + <c>[Reference]</c> + <c>[Parent]</c> fields; dispatch
+    /// <c>CREATE record:id CONTENT { … }</c> or <c>UPSERT record:id CONTENT { … }</c>
+    /// based on whether the id is already in the identity map; <c>ctx.MarkSaved(this)</c>.
+    /// <para>
+    /// Skipped from auto-walk (deferred): <c>[Children]</c> recursion, relations,
+    /// <c>SurrealArray</c> properties.
+    /// </para>
+    /// </summary>
+    private static void EmitSaveAsync(StringBuilder builder, string indent, TableModel table)
+    {
+        builder
+            .Append(indent)
+            .Append("async global::System.Threading.Tasks.Task ")
+            .Append(EntityInterface)
+            .AppendLine(".SaveAsync(global::Disruptor.Surface.Runtime.ISaveContext ctx, global::System.Threading.CancellationToken ct)")
+            .Append(indent).AppendLine("{");
+
+        builder
+            .Append(indent).Append("    var __id = ((").Append(EntityInterface).AppendLine(")this).Id;")
+            .Append(indent).AppendLine("    var __isNew = !ctx.IsTracked(__id);")
+            .AppendLine();
+
+        // Forward dependency walk: [Reference] + [Parent], skip relation-role properties.
+        // [Reference]/[Parent] live in the session, not as backing fields, so we read
+        // through the property accessor — which only works once the session has bound
+        // the entity. SurrealSession.SaveAsync does that via EnsureBoundForSave before
+        // calling this method, so the property reads here are safe.
+        var hasForwardDeps = false;
+        foreach (var p in table.Properties)
+        {
+            var isFwdDep = (p.Kinds.HasFlag(PropertyKind.Reference) || p.Kinds.HasFlag(PropertyKind.Parent))
+                && p.RelationRole == RelationRole.None;
+            if (!isFwdDep) continue;
+            hasForwardDeps = true;
+            var local = $"__dep_{ToCamel(p.Name)}";
+            // Read via the OrDefault path so a missing optional ref is null rather than
+            // throwing. For mandatory refs the user is responsible for setting them; if
+            // they didn't, the FK in the dispatched CONTENT will be missing and the
+            // server-side schema will fail the CREATE — which is the right error.
+            var typeArg = StripNullable(p.Type.FullyQualifiedName);
+            builder
+                .Append(indent).Append("    var ").Append(local)
+                .Append(" = Session.GetReferenceOrDefault<").Append(typeArg).Append(">(this, \"")
+                .Append(SurrealNaming.ToFieldName(p.Name)).AppendLine("\");")
+                .Append(indent).Append("    if (").Append(local).Append(" is not null && !ctx.IsTracked(((")
+                .Append(EntityInterface).Append(')').Append(local).AppendLine(").Id))")
+                .Append(indent).Append("        await ctx.SaveAsync(").Append(local).AppendLine(", ct);");
+        }
+        if (hasForwardDeps) builder.AppendLine();
+
+        // Content dictionary: [Property] (scalar, non-SurrealArray) + [Reference] + [Parent] FKs.
+        builder.Append(indent).AppendLine("    var __content = new global::System.Collections.Generic.Dictionary<string, object?>();");
+        foreach (var p in table.Properties)
+        {
+            if (p.Kinds.HasFlag(PropertyKind.Id)) continue;
+            if (p.Kinds.HasFlag(PropertyKind.Children)) continue;
+            if (p.RelationRole != RelationRole.None) continue;
+            // SurrealArray<T> serialization is non-trivial; defer.
+            if (p.Kinds.HasFlag(PropertyKind.Property) && p.Type.MetadataName == SurrealArrayMetadata) continue;
+
+            var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
+
+            if (p.Kinds.HasFlag(PropertyKind.Property))
+            {
+                // Scalar [Property] uses the backing-field convention emitted by
+                // EmitDataProperty (private `_{camelName}` mirror of the partial property).
+                var backing = $"_{ToCamel(p.Name)}";
+                builder.Append(indent).Append("    __content[").Append(fieldLit).Append("] = ").Append(backing).AppendLine(";");
+            }
+            else if (p.Kinds.HasFlag(PropertyKind.Reference) || p.Kinds.HasFlag(PropertyKind.Parent))
+            {
+                // Reuse the ref local read above for forward-dep walking.
+                var local = $"__dep_{ToCamel(p.Name)}";
+                builder
+                    .Append(indent).Append("    if (").Append(local).AppendLine(" is not null)")
+                    .Append(indent).Append("        __content[").Append(fieldLit).Append("] = ((").Append(EntityInterface).Append(')').Append(local).AppendLine(").Id;");
+            }
+        }
+        builder.AppendLine();
+
+        // Dispatch via the existing SurrealCommandEmitter so RecordId / scalar literals
+        // render with the same rules as CommitPlanner-built commands. CREATE for new ids;
+        // UPSERT for whole-entity replacement of existing ids.
+        builder
+            .Append(indent).AppendLine("    var __cmd = __isNew")
+            .Append(indent).AppendLine("        ? global::Disruptor.Surface.Runtime.Command.Create(__id, __content)")
+            .Append(indent).AppendLine("        : global::Disruptor.Surface.Runtime.Command.Upsert(__id, __content);")
+            .Append(indent).AppendLine("    var __sb = new global::System.Text.StringBuilder();")
+            .Append(indent).AppendLine("    global::Disruptor.Surface.Runtime.SurrealCommandEmitter.EmitOne(__cmd, __sb);")
+            .Append(indent).AppendLine("    await ctx.Transaction.QueryAsync(__sb.ToString(), bindings: null, ct);")
+            .AppendLine()
+            .Append(indent).AppendLine("    ctx.MarkSaved(this);");
 
         builder.Append(indent).AppendLine("}");
     }

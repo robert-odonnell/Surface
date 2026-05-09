@@ -124,7 +124,37 @@ public sealed class EmissionRoundTripTests
         Assert.Equal(ulidStr, idValue);
     }
 
+    [Fact]
+    public async Task SaveAsync_EmittedPerEntity_DispatchesCreateWithContent()
+    {
+        // Smoke test for the per-entity SaveAsync generator emit. Compile the minimal
+        // fixture, construct a Design with a Description, call session.SaveAsync(design,
+        // tx) — assert that the fake IConnection observed a "begin" + a "query" RPC
+        // whose SurrealQL contains CREATE designs:<id> CONTENT { description: '...' }.
+        var assembly = GeneratorHarness.CompileAndLoad(MinimalSource);
+        var design = NewEntity(assembly, "M.Design");
+        SetProperty(design, "Description", "saved via per-entity Save");
 
+        var session = new SurrealSession();
+        var fake = new Disruptor.Surface.Tests.Runtime.FakeSurreal.RecordingConnection();
+        await using var db = new Disruptor.Surreal.Surreal(fake);
+        await using var tx = await db.BeginTransactionAsync();
+
+        await session.SaveAsync((IEntity)design, tx);
+
+        // Wire shape: fake.Sent[0] is begin, [1] is the CREATE statement.
+        Assert.True(fake.Sent.Count >= 2);
+        Assert.Equal("begin", fake.Sent[0].Method);
+        Assert.Equal("query", fake.Sent[1].Method);
+        Assert.NotNull(fake.Sent[1].TxnId);
+
+        // The query's SQL is in params[0] (the [sql, bindings] array shape from the SDK).
+        var paramsArr = (Disruptor.Surreal.Values.ArrayValue)fake.Sent[1].Params!;
+        var sql = ((Disruptor.Surreal.Values.StringValue)paramsArr.Array[0]).Value;
+        Assert.Contains("CREATE designs:", sql);
+        Assert.Contains("description:", sql);
+        Assert.Contains("saved via per-entity Save", sql);
+    }
 
 [Fact]
     public async Task TraversalQuery_EmitsNestedSelect_AndHydratesChildrenIntoSession()
