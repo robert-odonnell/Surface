@@ -397,6 +397,29 @@ public sealed class SurrealSession : IHydrationSink
         return results;
     }
 
+    /// <summary>
+    /// Returns target ids of edges of kind <typeparamref name="TKind"/> that originate
+    /// at <paramref name="owner"/> and were <b>not</b> present at load time. Used by
+    /// generator-emitted <see cref="IEntity.SaveAsync"/> to dispatch RELATE for new
+    /// outgoing relations after the entity itself is saved. Snapshot diff: current
+    /// in-memory edges minus the loaded-at-start set.
+    /// </summary>
+    public IReadOnlyCollection<RecordId> GetNewOutgoingEdges<TKind>(IEntity owner) where TKind : IRelationKind
+    {
+        ThrowIfClosed();
+        var kindName = TKind.EdgeName;
+        var ownerId = owner.Id;
+        var result = new List<RecordId>();
+        foreach (var key in state.Edges.Keys)
+        {
+            if (key.Edge != kindName) continue;
+            if (key.Source != ownerId) continue;
+            if (relationsAtStart.Contains((kindName, key.Source, key.Target))) continue;
+            result.Add(key.Target);
+        }
+        return result;
+    }
+
     /// <summary>Cross-aggregate inverse-side read: edges that land on <paramref name="owner"/>.</summary>
     public IReadOnlyCollection<IRecordId> QueryInverseRelatedIds(IEntity owner, string edgeKind)
     {
@@ -1106,53 +1129,6 @@ public sealed class SurrealSession : IHydrationSink
             closed = true;
             throw;
         }
-    }
-
-    /// <summary>
-    /// Dispatches every pending write into <paramref name="tx"/> (an app-owned server-side
-    /// transaction obtained from <c>db.BeginTransactionAsync</c>) as one RPC per command.
-    /// Does <b>not</b> commit the transaction — the app calls <c>tx.CommitAsync</c> (or
-    /// <c>tx.CancelAsync</c>) when its logical unit of work is done. This split lets the
-    /// app compose multiple sessions / aggregates / raw SDK calls inside one txn,
-    /// committing them atomically.
-    /// <para>
-    /// Errors during dispatch (constraint violations, SurrealConflictException, etc.)
-    /// surface here; the session closes on any failure. Subsequent operations on this
-    /// session throw, but the txn handle is still the app's to cancel or salvage.
-    /// </para>
-    /// </summary>
-    public async Task SaveAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
-    {
-        ArgumentNullException.ThrowIfNull(tx);
-        ThrowIfClosed();
-        try
-        {
-            var plan = CommitPlanner.Build(Pending, ReferenceRegistry);
-            if (plan.Count > 0)
-            {
-                // Per-statement dispatch via the app-owned txn handle. BEGIN/COMMIT belong
-                // to the app; we just stream commands into the open transaction.
-                var sb = new StringBuilder();
-                foreach (var cmd in plan)
-                {
-                    sb.Clear();
-                    SurrealCommandEmitter.EmitOne(cmd, sb);
-                    await tx.QueryAsync(sb.ToString(), bindings: null, ct)
-                        .ConfigureAwait(false);
-                }
-            }
-        }
-        catch
-        {
-            // Fail-closed at the dispatch boundary. The session can't recover; the txn
-            // is the app's to cancel.
-            closed = true;
-            throw;
-        }
-
-        Log.Clear();
-        Pending.Clear();
-        closed = true;
     }
 
     /// <summary>Drop pending writes without flushing. Closes the session — once abandoned, it's done.</summary>

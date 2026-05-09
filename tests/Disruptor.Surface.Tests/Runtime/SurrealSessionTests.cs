@@ -39,18 +39,6 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public async Task SaveAsync_ClosesTheSession()
-    {
-        var session = new SurrealSession();
-
-        await using var tx = await FakeSurreal.Null().BeginTransactionAsync();
-        await session.SaveAsync(tx);
-
-        Assert.True(session.IsClosed);
-        Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(new RecordId("t", "1"))));
-    }
-
-    [Fact]
     public void Abandon_ClosesTheSession_AndIsIdempotent()
     {
         var session = new SurrealSession();
@@ -61,14 +49,13 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public async Task ClosedSession_Reads_Throw()
+    public void ClosedSession_Reads_Throw()
     {
         var session = new SurrealSession();
         var entity = new StubEntity(new RecordId("t", "1"));
         ((IHydrationSink)session).Track(entity);
 
-        await using var tx = await FakeSurreal.Null().BeginTransactionAsync();
-        await session.SaveAsync(tx);
+        session.Abandon();
 
         Assert.Throws<InvalidOperationException>(() => session.Get<StubEntity>(entity.Id));
         Assert.Throws<InvalidOperationException>(() => session.GetReferenceOrDefault<StubEntity>(entity, "x"));
@@ -96,22 +83,19 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public async Task SaveAsync_OnDispatchFailure_ClosesSession_AndRethrows()
+    public async Task DeleteAsync_OnDispatchFailure_ClosesSession_AndRethrows()
     {
         // Fail-closed at the single exception boundary: any exception during dispatch
-        // marks the session closed and propagates. The txn handle is the app's to cancel;
-        // we don't pretend partial-commit recovery is something the session can do.
+        // marks the session closed and propagates. The txn handle is the app's to cancel.
         var session = new SurrealSession();
         var entity = session.Track(new StubEntity(new RecordId("designs", "x")));
-        session.SetField(entity.Id, "description", "edited"); // bare Create gets dead-weight-elided; force non-empty SQL
         var db = FakeSurreal.Throwing(new IOException("boom"));
 
         await using var tx = await db.BeginTransactionAsync();
-        var ex = await Assert.ThrowsAsync<IOException>(() => session.SaveAsync(tx));
+        var ex = await Assert.ThrowsAsync<IOException>(() => session.DeleteAsync(entity, tx));
         Assert.Equal("boom", ex.Message);
 
         Assert.True(session.IsClosed);
-        // Subsequent reads/writes throw because the session is closed.
         Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(new RecordId("designs", "y"))));
     }
 
@@ -119,11 +103,11 @@ public sealed class SurrealSessionTests
     public async Task SaveAsync_OnClosedSession_Throws()
     {
         var session = new SurrealSession();
+        var entity = new StubEntity(new RecordId("t", "1"));
+        session.Abandon();
         var db = FakeSurreal.Null();
-        await using var tx1 = await db.BeginTransactionAsync();
-        await session.SaveAsync(tx1);
-        await using var tx2 = await db.BeginTransactionAsync();
-        await Assert.ThrowsAsync<InvalidOperationException>(() => session.SaveAsync(tx2));
+        await using var tx = await db.BeginTransactionAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.SaveAsync(entity, tx));
     }
 
     [Fact]

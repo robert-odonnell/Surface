@@ -1068,11 +1068,9 @@ internal static class PartialEmitter
         // exist in the txn before their CREATE lands). For each [Children] collection,
         // iterate via the property accessor (returns IReadOnlyCollection<T>); recurse
         // into any not-yet-saved entries via ctx.SaveAsync.
-        var hasChildren = false;
         foreach (var p in table.Properties)
         {
             if (!p.Kinds.HasFlag(PropertyKind.Children)) continue;
-            hasChildren = true;
             var elemLocal = $"__child_{ToCamel(p.Name)}";
             builder
                 .AppendLine()
@@ -1082,7 +1080,41 @@ internal static class PartialEmitter
                 .Append(indent).Append("            await ctx.SaveAsync(").Append(elemLocal).AppendLine(", ct);")
                 .Append(indent).AppendLine("    }");
         }
-        _ = hasChildren; // structure-only, no follow-up emission needed
+
+        // Outgoing relations dispatch: for each [ForwardRelation]-bearing property, ask
+        // the session for new (post-load) outgoing edges of that kind and dispatch a
+        // RELATE per new edge. Inverse-relation properties don't dispatch — the FORWARD
+        // entity owns the RELATE. Edges with both endpoints saved get a deterministic
+        // edge id (RecordId.Idempotent) so re-runs collapse against the schema's
+        // UNIQUE INDEX.
+        foreach (var p in table.Properties)
+        {
+            if (p.RelationRole != RelationRole.ForwardRelation) continue;
+            if (string.IsNullOrEmpty(p.RelationKindFullName)) continue;
+            // RelationKindFullName is the *attribute* class FQN (e.g.,
+            // Disruptor.Surface.Sample.Relations.RestrictsAttribute). The marker class
+            // (Disruptor.Surface.Sample.Relations.Restricts : IRelationKind) is the
+            // attribute name with the "Attribute" suffix stripped.
+            var attrFqn = p.RelationKindFullName!;
+            var lastDot = attrFqn.LastIndexOf('.');
+            var attrNs = lastDot >= 0 ? attrFqn[..lastDot] : "";
+            var attrName = lastDot >= 0 ? attrFqn[(lastDot + 1)..] : attrFqn;
+            var markerName = SurrealNaming.StripAttributeSuffix(attrName);
+            var markerFqn = string.IsNullOrEmpty(attrNs) ? $"global::{markerName}" : $"global::{attrNs}.{markerName}";
+            var targetLocal = $"__rel_{ToCamel(p.Name)}";
+            var sbLocal = $"__sb_{ToCamel(p.Name)}";
+            builder
+                .AppendLine()
+                .Append(indent).Append("    foreach (var ").Append(targetLocal)
+                .Append(" in Session.GetNewOutgoingEdges<").Append(markerFqn).AppendLine(">(this))")
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        var ").Append(sbLocal).AppendLine(" = new global::System.Text.StringBuilder();")
+                .Append(indent).Append("        global::Disruptor.Surface.Runtime.SurrealCommandEmitter.EmitOne(")
+                    .Append("global::Disruptor.Surface.Runtime.Command.Relate(__id, global::Disruptor.Surface.Runtime.RecordId.Idempotent(")
+                    .Append(markerFqn).Append(".EdgeName), ").Append(targetLocal).Append("), ").Append(sbLocal).AppendLine(");")
+                .Append(indent).Append("        await ctx.Transaction.QueryAsync(").Append(sbLocal).AppendLine(".ToString(), bindings: null, ct);")
+                .Append(indent).AppendLine("    }");
+        }
 
         builder.Append(indent).AppendLine("}");
     }
