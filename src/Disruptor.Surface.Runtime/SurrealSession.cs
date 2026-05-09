@@ -1,4 +1,6 @@
+using System.Text;
 using System.Text.Json;
+using Disruptor.Surreal;
 
 namespace Disruptor.Surface.Runtime;
 
@@ -848,48 +850,64 @@ public sealed class SurrealSession : IHydrationSink
     //}
 
     /// <summary>
-    /// Flushes pending writes as a single SurrealQL script. The session is closed on
-    /// return regardless of outcome — the one-shot invariant is "load → mutate →
-    /// commit (or fail), then loop." If <paramref name="lease"/> is supplied, the
-    /// lease's CAS clause (BEGIN TRANSACTION / seq-check / UPSERT seq+1) is spliced
-    /// around the data writes so the commit either lands atomically with a sequence
-    /// advance or — if another writer beat us to it — aborts the whole transaction
-    /// with <see cref="WriterLeaseStolenException"/>. The session doesn't own the
-    /// lease; the caller manages its lifetime separately.
+    /// Flushes pending writes through a streamed server-side transaction. Each rendered
+    /// command is dispatched as its own RPC inside the txn (begin → N queries → commit),
+    /// so wire-side batch limits no longer cap commit size. The session closes on return
+    /// regardless of outcome — the one-shot invariant is "load → mutate → commit (or
+    /// fail), then loop."
     /// <para>
-    /// Single exception boundary for the whole session: any exception thrown during
-    /// commit (RenderBatch or the transport call) marks the session closed and
-    /// propagates to the caller. The domain decides whether to reload-and-retry or
-    /// give up; the session itself never recovers — there is no half-committed state
-    /// to reason about. Nothing else in the runtime catches exceptions; everything
-    /// else is allowed to throw freely and lands here.
+    /// Concurrency surfaces natively: if another writer's commit lands first and conflicts
+    /// with ours, SurrealDB raises a <see cref="SurrealConflictException"/> at COMMIT
+    /// (or earlier, on a conflicting write). The domain catches and decides whether to
+    /// reload-and-retry. No application-level lease, no CAS-on-sequence — the substrate
+    /// owns concurrency now.
+    /// </para>
+    /// <para>
+    /// Single exception boundary: any exception during commit marks the session closed
+    /// and rethrows. Nothing else in the runtime catches exceptions; everything else
+    /// throws freely and lands here.
     /// </para>
     /// </summary>
-    public async Task CommitAsync(ISurrealTransport transport, WriterLease? lease = null, CancellationToken ct = default)
+    public Task CommitAsync(ISurrealTransport transport, CancellationToken ct = default)
+    {
+        if (transport is not SurrealSdkTransport sdk)
+        {
+            throw new InvalidOperationException(
+                $"CommitAsync(ISurrealTransport) requires a {nameof(SurrealSdkTransport)} " +
+                $"(the only transport since the SDK migration). Got {transport.GetType().Name}. " +
+                $"Tests should call the {nameof(CommitAsync)}({nameof(Disruptor)}.{nameof(Disruptor.Surreal)}.{nameof(Disruptor.Surreal.Surreal)}, …) overload directly.");
+        }
+        return CommitAsync(sdk.Db, ct);
+    }
+
+    /// <inheritdoc cref="CommitAsync(ISurrealTransport, CancellationToken)"/>
+    public async Task CommitAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
     {
         ThrowIfClosed();
         try
         {
-            //var (sql, parameters) = RenderBatch();
-            var sql = RenderBatch();
-            var hasWork = !string.IsNullOrEmpty(sql) || lease is not null;
-            if (hasWork)
+            var plan = CommitPlanner.Build(Pending, ReferenceRegistry);
+            if (plan.Count > 0)
             {
-                var fullSql = lease is not null
-                    ? lease.RenderPreCommitFragment() + sql + WriterLease.PostCommitFragment
-                    : sql;
+                // Open a server-side transaction; every RPC issued through `tx` carries the
+                // server-issued txn-id, so the chunked commit stays atomic. BEGIN/COMMIT
+                // come from the SDK txn handle, not from the rendered SurrealQL. Conflicts
+                // surface as SurrealConflictException at tx.CommitAsync — let it propagate.
+                await using var tx = await db.BeginTransactionAsync(ct).ConfigureAwait(false);
 
-                try
+                // Stream each rendered command as its own RPC. Per-statement dispatch is
+                // what addresses the "too many ops in one request" workaround: batches no
+                // longer have a wire-side size cliff because each command is its own packet.
+                var sb = new StringBuilder();
+                foreach (var cmd in plan)
                 {
-                    //await transport.ExecuteAsync(fullSql, parameters, ct);
-                    await transport.ExecuteAsync(fullSql, ct);
-                }
-                catch (Exception ex) when (lease is not null && WriterLease.IsStolen(ex))
-                {
-                    throw new WriterLeaseStolenException(lease.ExpectedSequence);
+                    sb.Clear();
+                    SurrealCommandEmitter.EmitOne(cmd, sb);
+                    await tx.QueryAsync(sb.ToString(), bindings: null, ct)
+                        .ConfigureAwait(false);
                 }
 
-                lease?.OnCommitSucceeded();
+                await tx.CommitAsync(ct).ConfigureAwait(false);
             }
         }
         catch

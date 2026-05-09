@@ -28,7 +28,6 @@ internal static class LoadEntryEmitter
     private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.Query";
     private const string TransportFqn = "global::Disruptor.Surface.Runtime.ISurrealTransport";
     private const string SessionFqn = "global::Disruptor.Surface.Runtime.SurrealSession";
-    private const string LeaseFqn = "global::Disruptor.Surface.Runtime.WriterLease";
     private const string CtFqn = "global::System.Threading.CancellationToken";
     private const string TaskFqn = "global::System.Threading.Tasks.Task";
 
@@ -80,12 +79,11 @@ internal static class LoadEntryEmitter
         sb.Append(indent).AppendLine("{");
 
         sb.Append(memberIndent)
-          .AppendLine($"/// <summary>Loads the <c>{aggRoot.Name}</c> aggregate identified by the query's <c>WithId</c> pin. Returns a populated <see cref=\"global::Disruptor.Surface.Runtime.SurrealSession\"/> the caller mutates and commits via <c>session.CommitAsync(transport, lease)</c>. The supplied <paramref name=\"lease\"/> is the same writer-lease handle the caller will pass into commit; LoadAsync stores no reference, so the caller stays responsible for its lifetime.</summary>");
+          .AppendLine($"/// <summary>Loads the <c>{aggRoot.Name}</c> aggregate identified by the query's <c>WithId</c> pin. Returns a populated <see cref=\"global::Disruptor.Surface.Runtime.SurrealSession\"/> the caller mutates and commits via <c>session.CommitAsync(transport)</c>. Concurrent commits surface natively as <c>SurrealConflictException</c> from the SDK.</summary>");
         sb.Append(memberIndent)
           .Append("public static async ").Append(TaskFqn).Append('<').Append(SessionFqn)
           .Append("> LoadAsync(this ").Append(QueryFqn).Append('<').Append(entityFqn).Append("> query, ")
           .Append(TransportFqn).Append(" transport, ")
-          .Append(LeaseFqn).Append(" lease, ")
           .Append(CtFqn).AppendLine(" ct = default)");
         sb.Append(memberIndent).AppendLine("{");
 
@@ -121,10 +119,6 @@ internal static class LoadEntryEmitter
         sb.Append(bodyIndent).AppendLine("}");
         sb.AppendLine();
 
-        // Lease is taken in the signature to enforce the "this is write-mode" contract.
-        // v1 doesn't store it; the caller passes the same handle into CommitAsync. Touch
-        // the lease object so the C# compiler doesn't warn about an unused parameter.
-        sb.Append(bodyIndent).AppendLine("_ = lease;");
         sb.Append(bodyIndent).AppendLine("return session;");
         sb.Append(memberIndent).AppendLine("}");
 

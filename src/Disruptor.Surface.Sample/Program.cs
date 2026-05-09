@@ -3,25 +3,23 @@ using Disruptor.Surface.Runtime.Query;
 using Disruptor.Surface.Sample;
 using Disruptor.Surface.Sample.Models;
 using Disruptor.Surface.Sample.Relations;
-using Disruptor.Surface.Transport.Http;
+using Disruptor.Surreal.Connection;
+using SdkSurreal = Disruptor.Surreal.Surreal;
 
 // Mirror of: surreal start --bind 127.0.0.1:8000 --default-namespace project-brain
 //                          --default-database workspace --username root --password secret
-var config = new SurrealConfig(
-    Url: new Uri("http://127.0.0.1:8000"),
-    Namespace: "project-brain",
-    Database: "workspace",
-    User: "root",
-    Password: "secret",
-    Timeout: TimeSpan.FromSeconds(30));
+await using var db = await SdkSurreal.ConnectAsync(SurrealOptions.Parse(
+    "Url=ws://127.0.0.1:8000;Namespace=project-brain;Database=workspace;User=root;Password=secret"));
 
-using var http = new HttpClient();
-await using var transport = new SurrealHttpClient(config, http);
+// SurrealSdkTransport bridges Disruptor.Surreal to the legacy ISurrealTransport surface
+// the runtime's hydration still consumes. Goes away when hydration migrates to Value
+// (alongside Step 4 of the unpainting plan).
+await using var transport = new SurrealSdkTransport(db);
 
 var workspace = new Workspace();
 
 Console.WriteLine("=== Disruptor.Surface.Sample harness ===");
-Console.WriteLine($"Connected: {config.Url}  ns={config.Namespace}  db={config.Database}\n");
+Console.WriteLine($"Connected: ws://127.0.0.1:8000  ns=project-brain  db=workspace\n");
 
 // ── 1. Apply schema. One db call per chunk so a failure pinpoints which one
 //    broke. Iterate `Workspace.Schema` directly when you want to filter / log /
@@ -30,12 +28,8 @@ Console.WriteLine($"Applying schema ({Workspace.Schema.Count} chunks)...");
 await Workspace.ApplySchemaAsync(transport);
 Console.WriteLine("  schema ready.\n");
 
-// Dev-time hygiene: clear any stale writer_lease record so reruns don't trip on a
-// half-released lease from a crashed previous attempt. Production code wouldn't do this.
-await transport.ExecuteAsync("DELETE writer_lease;");
-
-// ── 2. Seed three Design aggregates. Each pass acquires + releases its own writer
-//    lease so the per-aggregate granularity is exercised.
+// ── 2. Seed three Design aggregates. Each commit opens its own server-side
+//    transaction; concurrent writers conflict natively at COMMIT.
 var seededDesignIds = new List<DesignId>();
 for (var i = 0; i < 10; i++)
 {
@@ -63,16 +57,11 @@ await DemoQueryLayer(seededDesignIds, transport);
 //    outgoing multi-target leaf, and cross-aggregate id-only.
 await DemoRelationTraversal(transport);
 
-// ── 7. Lease theft demo — acquire a lease, simulate theft via direct DELETE, then
-//    attempt commit and observe the typed exception.
-await DemoLeaseTheft(seededDesignIds[2], transport);
-
 return 0;
 
-async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
+async Task<DesignId> SeedAndCommitDesign(string text, ISurrealTransport db)
 {
     Console.WriteLine($"--- Seeding design '{text}' ---");
-    await using var lease = await workspace.AcquireWriterAsync(db);
 
     var session = new SurrealSession(Workspace.ReferenceRegistry);
     var design = session.Track(new Design
@@ -166,7 +155,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
     }
 
     Console.WriteLine($"  pending: {session.Pending.Records.Count} records, {session.Log.Count} commands");
-    await session.CommitAsync(db, lease);
+    await session.CommitAsync(db);
     Console.WriteLine($"  committed; design id = {design.Id}\n");
     return design.Id;
 
@@ -178,7 +167,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SurrealHttpClient db)
     };
 }
 
-async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SurrealHttpClient db)
+async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, ISurrealTransport db)
 {
     Console.WriteLine($"--- Seeding review of {targetDesignId} ---");
 
@@ -190,7 +179,6 @@ async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SurrealHttpCli
         ?? throw new InvalidOperationException($"design {targetDesignId} did not hydrate");
     var someConstraintId = design.Constraints.First().Id;
 
-    await using var lease = await workspace.AcquireWriterAsync(db);
     var session = new SurrealSession(Workspace.ReferenceRegistry);
 
     var review = session.Track(new Review
@@ -248,12 +236,12 @@ async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SurrealHttpCli
     session.Relate<Revises>(change.Id, targetDesignId);
 
     Console.WriteLine($"  pending: {session.Pending.Records.Count} records, {session.Log.Count} commands");
-    await session.CommitAsync(db, lease);
+    await session.CommitAsync(db);
     Console.WriteLine($"  committed; review id = {review.Id}\n");
     return review.Id;
 }
 
-async Task ReloadAndPrintDesign(DesignId designId, SurrealHttpClient db)
+async Task ReloadAndPrintDesign(DesignId designId, ISurrealTransport db)
 {
     Console.WriteLine($"--- Reloading Design {designId} ---");
     var session = await workspace.LoadDesignAsync(db, designId);
@@ -297,7 +285,7 @@ async Task ReloadAndPrintDesign(DesignId designId, SurrealHttpClient db)
     Console.WriteLine();
 }
 
-async Task ReloadAndPrintReview(ReviewId reloadId, SurrealHttpClient db)
+async Task ReloadAndPrintReview(ReviewId reloadId, ISurrealTransport db)
 {
     Console.WriteLine($"--- Reloading Review {reloadId} ---");
     var session = await workspace.LoadReviewAsync(db, reloadId);
@@ -334,7 +322,7 @@ async Task ReloadAndPrintReview(ReviewId reloadId, SurrealHttpClient db)
     Console.WriteLine();
 }
 
-async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SurrealHttpClient db)
+async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, ISurrealTransport db)
 {
     Console.WriteLine("--- Query layer demo ---");
 
@@ -381,12 +369,11 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SurrealHttpClient d
     // (d) Compiler-driven LoadAsync (filtered slice): only Constraints get loaded.
     //     Same query AST as (b) — only the terminal verb differs. The session it returns
     //     is mutable / committable; we don't commit here.
-    await using var lease = await workspace.AcquireWriterAsync(db);
     var slicedSession = await Workspace.Query.Designs
         .WithId(targetId)
         .IncludeDetails()
         .IncludeConstraints(c => c.IncludeDetails())
-        .LoadAsync(db, lease);
+        .LoadAsync(db);
     var slicedDesign = slicedSession.Get<Design>(targetId)!;
     Console.WriteLine($"  filtered LoadAsync: {slicedDesign.Constraints.Count} constraints loaded into a write-mode session");
 
@@ -418,7 +405,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SurrealHttpClient d
     Console.WriteLine();
 }
 
-static async Task DemoRelationTraversal(SurrealHttpClient db)
+static async Task DemoRelationTraversal(ISurrealTransport db)
 {
     Console.WriteLine("--- Relation traversal demo ---");
 
@@ -515,43 +502,6 @@ static async Task DemoRelationTraversal(SurrealHttpClient db)
         {
             Console.WriteLine($"        concerns: {id}");
         }
-    }
-
-    Console.WriteLine();
-}
-
-async Task DemoLeaseTheft(DesignId designId, SurrealHttpClient db)
-{
-    Console.WriteLine("--- Lease theft recovery demo ---");
-    await using var lease = await workspace.AcquireWriterAsync(db);
-    var session = await workspace.LoadDesignAsync(db, designId);
-    var design = session.Get<Design>(designId)!;
-    // Mutate, but don't commit yet.
-    var beforeReload = design.Description;
-    Console.WriteLine($"  loaded; current description: '{beforeReload}'");
-
-    // Simulate another writer winning the race — direct UPSERT advances the seq past
-    // the value our lease captured, so our CAS check at commit time will fail. Real
-    // life: another process completed an Acquire+CommitAsync cycle in this gap.
-    await db.ExecuteAsync($"UPSERT writer_lease:main CONTENT {{ seq: {lease.ExpectedSequence + 99} }};");
-    Console.WriteLine($"  simulated theft: another writer advanced seq past {lease.ExpectedSequence}");
-
-    // The (now-stale) writer attempts to commit. The CAS check spliced into the
-    // commit script detects the seq mismatch and aborts the whole transaction.
-    var rwSession = new SurrealSession(Workspace.ReferenceRegistry);
-    rwSession.Track(new Design { Id = designId, Description = beforeReload + " [edit]" });
-    try
-    {
-        await rwSession.CommitAsync(db, lease);
-        Console.WriteLine("  ⚠  commit succeeded — lease theft NOT detected (unexpected)");
-    }
-    catch (WriterLeaseStolenException ex)
-    {
-        Console.WriteLine($"  caught WriterLeaseStolenException: {ex.Message}");
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"  caught {ex.GetType().Name}: {ex.Message}");
     }
 
     Console.WriteLine();

@@ -40,6 +40,11 @@ public sealed class HydrationJsonTests
     [Fact]
     public void HydrateReference_OnIdOnly_RegistersLink_ButDoesNotConstructEntity()
     {
+        // Static-counter state leaks across tests (the inline-record sibling increments
+        // it); reset before measuring the id-only path's no-op behaviour. Surfaced under
+        // xunit.v3's stricter ordering — v2's defaults happened to mask it.
+        StubReferenceTarget.HydrationCount = 0;
+
         var session = new SurrealSession();
         using var doc = JsonDocument.Parse("""{ "details": "details:01" }""");
         var ownerId = new RecordId("designs", "x");

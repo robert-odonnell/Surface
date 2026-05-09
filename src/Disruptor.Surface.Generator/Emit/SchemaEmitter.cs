@@ -16,7 +16,7 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </code>
 /// All chunks are idempotent (<c>DEFINE … IF NOT EXISTS</c>); reapplications are safe.
 /// <para>
-/// Chunk layout (in order): runtime <c>writer_lease</c> table → entity-tables block →
+/// Chunk layout (in order): entity-tables block →
 /// per-<c>[Table]</c> field block → per-relation-kind table definition. Splitting the
 /// script lets callers run pieces in separate transactions, filter / log / introspect
 /// individual chunks, or apply only the bits they need for a migration.
@@ -94,7 +94,6 @@ internal static class SchemaEmitter
         sb.Append(indent).AppendLine("{");
         sb.Append(memberIndent).AppendLine("internal static readonly string[] _chunks = new[]");
         sb.Append(memberIndent).AppendLine("{");
-        sb.Append(memberIndent).AppendLine("    global::Disruptor.Surface.Runtime.WriterLease.SchemaScript,");
         foreach (var chunk in chunks)
         {
             // Raw string literal — content and closing """ both flush-left so the

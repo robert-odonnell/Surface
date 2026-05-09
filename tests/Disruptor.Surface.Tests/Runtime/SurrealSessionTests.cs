@@ -42,9 +42,8 @@ public sealed class SurrealSessionTests
     public async Task CommitAsync_ClosesTheSession()
     {
         var session = new SurrealSession();
-        var transport = new NullTransport();
 
-        await session.CommitAsync(transport);
+        await session.CommitAsync(FakeSurreal.Null());
 
         Assert.True(session.IsClosed);
         Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(new RecordId("t", "1"))));
@@ -67,7 +66,7 @@ public sealed class SurrealSessionTests
         var entity = new StubEntity(new RecordId("t", "1"));
         ((IHydrationSink)session).Track(entity);
 
-        await session.CommitAsync(new NullTransport());
+        await session.CommitAsync(FakeSurreal.Null());
 
         Assert.Throws<InvalidOperationException>(() => session.Get<StubEntity>(entity.Id));
         Assert.Throws<InvalidOperationException>(() => session.GetReferenceOrDefault<StubEntity>(entity, "x"));
@@ -103,9 +102,9 @@ public sealed class SurrealSessionTests
         var session = new SurrealSession();
         var entity = session.Track(new StubEntity(new RecordId("designs", "x")));
         session.SetField(entity.Id, "description", "edited"); // bare Create gets dead-weight-elided; force non-empty SQL
-        var transport = new ThrowingTransport(new IOException("boom"));
+        var db = FakeSurreal.Throwing(new IOException("boom"));
 
-        var ex = await Assert.ThrowsAsync<IOException>(() => session.CommitAsync(transport));
+        var ex = await Assert.ThrowsAsync<IOException>(() => session.CommitAsync(db));
         Assert.Equal("boom", ex.Message);
 
         Assert.True(session.IsClosed);
@@ -117,8 +116,8 @@ public sealed class SurrealSessionTests
     public async Task CommitAsync_OnClosedSession_Throws()
     {
         var session = new SurrealSession();
-        await session.CommitAsync(new NullTransport());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => session.CommitAsync(new NullTransport()));
+        await session.CommitAsync(FakeSurreal.Null());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.CommitAsync(FakeSurreal.Null()));
     }
 
     [Fact]
@@ -167,7 +166,7 @@ public sealed class SurrealSessionTests
         session.Track(entity);
         session.Track(entity);
 
-        Assert.Single(entity.Calls.Where(c => c == "Bind"));
+        Assert.Single(entity.Calls, c => c == "Bind");
         Assert.Single(session.Log.Entries);
     }
 
@@ -588,19 +587,4 @@ public sealed class SurrealSessionTests
         public static string EdgeName => "stub_edge";
     }
 
-    /// <summary>No-op transport — accepts any call, returns an empty document. Used for closure tests where the SQL doesn't matter.</summary>
-    private sealed class NullTransport : ISurrealTransport
-    {
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
-            => Task.FromResult(JsonDocument.Parse("[]"));
-    }
-
-    /// <summary>Always-throws transport — drives the fail-closed-on-exception test.</summary>
-    private sealed class ThrowingTransport(Exception ex) : ISurrealTransport
-    {
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-        public Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
-            => Task.FromException<JsonDocument>(ex);
-    }
 }

@@ -7,13 +7,27 @@
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <LangVersion>latest</LangVersion>
+    <!-- xUnit1051 nags about passing TestContext.Current.CancellationToken to every
+         CT-accepting method. Useful for long-running tests; pedantic for our fast
+         unit tests. -->
+    <NoWarn>$(NoWarn);xUnit1051</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
-    <PackageReference Include="xunit" Version="2.9.0" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0" />
+    <!-- Generator depends on Humanizer (PrivateAssets=all so it doesn't flow), but
+         the test process loads the generator in-process; without an explicit
+         reference, Microsoft.Testing.Platform's resolver can't find it. -->
+    <PackageReference Include="Humanizer.Core" Version="2.14.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- xunit.v3 parallelizes test collections by default; the GeneratorHarness
+         (Roslyn compilation + ALC.Default loads) isn't safe to run concurrently. -->
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

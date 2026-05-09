@@ -87,18 +87,9 @@ public sealed class HydrationQueryTests
         Assert.Equal("second", second!.Description);
     }
 
-    [Fact]
-    public async Task ExecuteAsync_NullLease_Throws()
-    {
-        // The write-mode overload requires a non-null lease — the lease itself is
-        // never stored, but its presence at the call site advertises write intent
-        // and ensures the caller has the same handle to pass to CommitAsync later.
-        var transport = new RecordingTransport();
-        var ids = new[] { new RecordId("symbols", "01HX7AF5") };
-        var hq = new HydrationQuery<TestSymbol>("symbols", ids, NullReferenceRegistry.Instance);
-
-        await Assert.ThrowsAsync<ArgumentNullException>(() => hq.ExecuteAsync(transport, lease: null!));
-    }
+    // Removed: ExecuteAsync_NullLease_Throws — the write-mode overload taking a lease
+    // no longer exists. Concurrent commits surface natively as SurrealConflictException
+    // from the SDK; there's no lease handle to validate.
 
     private const string EmptyResultEnvelope = "[{\"result\":[],\"status\":\"OK\"}]";
 

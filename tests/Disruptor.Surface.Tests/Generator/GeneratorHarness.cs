@@ -92,6 +92,24 @@ internal static class GeneratorHarness
     public static string AllGeneratedSource(GeneratorDriverRunResult result)
     {
         var sb = new System.Text.StringBuilder();
+        if (result.GeneratedTrees.Length == 0)
+        {
+            // Surface generator-side diagnostics so an empty result doesn't fail with
+            // a useless "" assertion. Exceptions caught by the Roslyn driver land here
+            // (they're not propagated as the natural runtime exception).
+            sb.AppendLine("// === GENERATOR EMITTED NO TREES ===");
+            foreach (var run in result.Results)
+            {
+                if (run.Exception is { } ex)
+                {
+                    sb.Append("// EXCEPTION: ").AppendLine(ex.ToString());
+                }
+                foreach (var d in run.Diagnostics)
+                {
+                    sb.Append("// DIAG: ").AppendLine(d.ToString());
+                }
+            }
+        }
         foreach (var src in result.GeneratedTrees)
         {
             sb.AppendLine($"// === {Path.GetFileName(src.FilePath)} ===");

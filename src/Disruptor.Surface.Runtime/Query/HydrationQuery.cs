@@ -74,25 +74,13 @@ public sealed class HydrationQuery<T>
     }
 
     /// <summary>
-    /// Read-mode terminal. Materialises the requested rows + slices into a fresh
-    /// <see cref="SurrealSession"/>; the session is unscoped (no lease). Useful for
-    /// "load and read" flows that won't commit.
+    /// Materialises the requested rows + slices into a fresh
+    /// <see cref="SurrealSession"/>. Caller commits via
+    /// <see cref="SurrealSession.CommitAsync(ISurrealTransport, CancellationToken)"/>;
+    /// concurrent commits surface as <c>SurrealConflictException</c> from the SDK.
     /// </summary>
     public Task<SurrealSession> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
         => ExecuteCoreAsync(new SurrealSession(referenceRegistry), transport, ct);
-
-    /// <summary>
-    /// Write-mode terminal. Same hydration shape as the read-mode overload; the
-    /// <paramref name="lease"/> arg is required to advertise write intent at the call
-    /// site — the same handle the caller will pass into
-    /// <see cref="SurrealSession.CommitAsync"/>. The hydration query stores no
-    /// reference to the lease; lifetime stays with the caller.
-    /// </summary>
-    public Task<SurrealSession> ExecuteAsync(ISurrealTransport transport, WriterLease lease, CancellationToken ct = default)
-    {
-        ArgumentNullException.ThrowIfNull(lease);
-        return ExecuteCoreAsync(new SurrealSession(referenceRegistry), transport, ct);
-    }
 
     private async Task<SurrealSession> ExecuteCoreAsync(SurrealSession session, ISurrealTransport transport, CancellationToken ct)
     {

@@ -316,9 +316,8 @@ public sealed class EmissionRoundTripTests
                 }
             ],"status":"OK"}]
             """);
-        var lease = await WriterLease.AcquireAsync(transport);
 
-        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, CancellationToken.None])!;
+        var task = (Task)loadAsync.Invoke(null, [query, transport, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -358,9 +357,8 @@ public sealed class EmissionRoundTripTests
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
 
         var transport = new RecordingLoadTransport(BuildEmptyLoadResponse(designUlid));
-        var lease = await WriterLease.AcquireAsync(transport);
 
-        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, CancellationToken.None])!;
+        var task = (Task)loadAsync.Invoke(null, [query, transport, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -507,9 +505,8 @@ public sealed class EmissionRoundTripTests
                 }
             ],"status":"OK"}]
             """);
-        var lease = await WriterLease.AcquireAsync(loadTransport);
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
-        var loadTask = (Task)loadAsync.Invoke(null, [loadQuery, loadTransport, lease, CancellationToken.None])!;
+        var loadTask = (Task)loadAsync.Invoke(null, [loadQuery, loadTransport, CancellationToken.None])!;
         await loadTask;
         var session = (SurrealSession)loadTask.GetType().GetProperty("Result")!.GetValue(loadTask)!;
 
@@ -558,7 +555,7 @@ public sealed class EmissionRoundTripTests
         var session = new SurrealSession();
 
         // Close the session by committing.
-        await session.CommitAsync(new RecordingLoadTransport("[{\"result\":null,\"status\":\"OK\"}]"), null, CancellationToken.None);
+        await session.CommitAsync(Disruptor.Surface.Tests.Runtime.FakeSurreal.Null(), CancellationToken.None);
 
         var queryRoot = assembly.GetType("M.Workspace")!
             .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
@@ -608,9 +605,8 @@ public sealed class EmissionRoundTripTests
                 }
             ],"status":"OK"}]
             """);
-        var lease = await WriterLease.AcquireAsync(loadTransport);
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
-        var task = (Task)loadAsync.Invoke(null, [query, loadTransport, lease, CancellationToken.None])!;
+        var task = (Task)loadAsync.Invoke(null, [query, loadTransport, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -636,9 +632,8 @@ public sealed class EmissionRoundTripTests
         var loadAsync = loadClass.GetMethod("LoadAsync")!;
 
         var transport = new RecordingLoadTransport(BuildEmptyLoadResponse(designUlid));
-        var lease = await WriterLease.AcquireAsync(transport);
 
-        var task = (Task)loadAsync.Invoke(null, [query, transport, lease, CancellationToken.None])!;
+        var task = (Task)loadAsync.Invoke(null, [query, transport, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -685,9 +680,8 @@ public sealed class EmissionRoundTripTests
             ],"status":"OK"}]
             """;
         var transport = new RecordingLoadTransport(scriptedResponse);
-        var lease = await WriterLease.AcquireAsync(transport);
 
-        var task = (Task)loadAsync.Invoke(null, [withIncludes, transport, lease, CancellationToken.None])!;
+        var task = (Task)loadAsync.Invoke(null, [withIncludes, transport, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
 
@@ -727,11 +721,10 @@ public sealed class EmissionRoundTripTests
 
         var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
         var transport = new RecordingLoadTransport("[]");
-        var lease = await WriterLease.AcquireAsync(transport);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            var task = (Task)loadAsync.Invoke(null, [query, transport, lease, CancellationToken.None])!;
+            var task = (Task)loadAsync.Invoke(null, [query, transport, CancellationToken.None])!;
             await task;
         });
         Assert.Contains("WithId", ex.Message);

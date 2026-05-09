@@ -4,146 +4,163 @@ namespace Disruptor.Surface.Runtime;
 
 public static class SurrealCommandEmitter
 {
+    /// <summary>
+    /// Render every command into a single SurrealQL script, with each statement
+    /// terminated by <c>;\n</c>. Used by <c>SurrealSession.RenderBatch</c> for
+    /// diagnostics and tests; production commit goes per-command via
+    /// <see cref="EmitOne"/> so each statement is its own RPC inside an open
+    /// transaction.
+    /// </summary>
     public static string Emit(IReadOnlyList<Command> commands)
     {
         var sb = new StringBuilder();
-        //var parameters = new Dictionary<string, object?>(StringComparer.Ordinal);
-        //var counter = 0;
-
         foreach (var c in commands)
         {
-            switch (c.Op)
-            {
-                case CommandOp.Create:
-                    sb.Append("CREATE ").Append(FormatId(c.Target));
-                    if (c.Value is IReadOnlyDictionary<string, object?> { Count: > 0 } createContent)
-                    {
-                        sb.Append(" CONTENT ");
-                        AppendContent(createContent);
-                    }
-                    sb.Append(";\n");
-                    break;
-
-                case CommandOp.Upsert:
-                    sb.Append("UPSERT ").Append(FormatId(c.Target));
-                    if (c.Value is IReadOnlyDictionary<string, object?> { Count: > 0 } upsertContent)
-                    {
-                        sb.Append(" CONTENT ");
-                        AppendContent(upsertContent);
-                    }
-                    sb.Append(";\n");
-                    break;
-
-                case CommandOp.Set:
-                    sb.Append("UPDATE ").Append(FormatId(c.Target))
-                      .Append(" SET ").Append(c.Key!.Identifier()).Append(" = ");
-                    if (c.Value is RecordId setRid)
-                    {
-                        sb.Append(FormatId(setRid));
-                    }
-                    else
-                    {
-                        sb.Append(c.Value.RenderSurrealLiteral());
-                    }
-                    sb.Append(";\n");
-                    break;
-
-                case CommandOp.Unset:
-                    sb.Append("UPDATE ").Append(FormatId(c.Target))
-                      .Append(" UNSET ").Append(c.Key!.Identifier()).Append(";\n");
-                    break;
-
-                case CommandOp.Delete:
-                    sb.Append("DELETE ").Append(FormatId(c.Target)).Append(";\n");
-                    break;
-
-                case CommandOp.Relate:
-                {
-                    // Edge id strategy resolves at emit:
-                    //   - Resolved (Random Ulid pre-minted, or Slug)  → render the value verbatim
-                    //   - Idempotent (sentinel: empty value)          → hash the triple
-                    // Schema-level `DEFINE INDEX … COLUMNS in, out UNIQUE` is the
-                    // duplicate guard; the planner's ExistedAtStart check skips edges
-                    // that already exist so re-running on a loaded aggregate is a no-op.
-                    var src = c.Target;
-                    var tgt = (RecordId)c.Value!;
-                    var edge = c.Edge.Resolve(src, tgt);
-                    sb.Append("RELATE ").Append(FormatId(src))
-                      .Append("->").Append(FormatId(edge))
-                      .Append("->").Append(FormatId(tgt));
-                    if (c.EdgeContent is { Count: > 0 } content)
-                    {
-                        sb.Append(" CONTENT ");
-                        AppendContent(content);
-                    }
-                    sb.Append(";\n");
-                    break;
-                }
-
-                case CommandOp.Unrelate:
-                {
-                    // Merged shape — at least one of source/target is non-null.
-                    //   both:        DELETE edge WHERE in = source AND out = target
-                    //   source-only: DELETE edge WHERE in = source
-                    //   target-only: DELETE edge WHERE out = target
-                    // Source absence is encoded as `default(RecordId)` (Table is null);
-                    // target absence is encoded as Value = null. The Command.Unrelate
-                    // factory enforces the at-least-one invariant.
-                    var hasSource = c.Target.Table is not null;
-                    var target = (RecordId?)c.Value;
-                    sb.Append("DELETE ").Append(c.Key!.Identifier()).Append(" WHERE ");
-                    if (hasSource)
-                    {
-                        sb.Append("in = ").Append(FormatId(c.Target));
-                    }
-                    if (hasSource && target is not null)
-                    {
-                        sb.Append(" AND ");
-                    }
-                    if (target is { } t)
-                    {
-                        sb.Append("out = ").Append(FormatId(t));
-                    }
-                    sb.Append(";\n");
-                    break;
-                }
-            }
+            EmitOne(c, sb);
         }
-
         return sb.ToString();
-        //return (sb.ToString(), parameters);
+    }
 
-        //string AddParam(object? value)
-        //{
-        //    var name = $"p{counter++}";
-        //    parameters[name] = value;
-        //    return $"${name}";
-        //}
+    /// <summary>
+    /// Render a single command as a SurrealQL statement (terminated by <c>;\n</c>).
+    /// Convenience wrapper over <see cref="EmitOne(Command, StringBuilder)"/>.
+    /// </summary>
+    public static string EmitOne(Command command)
+    {
+        var sb = new StringBuilder();
+        EmitOne(command, sb);
+        return sb.ToString();
+    }
 
-        void AppendContent(IReadOnlyDictionary<string, object?> content)
+    /// <summary>
+    /// Append one command's SurrealQL form to <paramref name="sb"/> (terminated by
+    /// <c>;\n</c>). The streamed-commit path calls this per command and dispatches
+    /// each rendered statement as its own RPC inside the open transaction; the
+    /// single-string <see cref="Emit(IReadOnlyList{Command})"/> form just loops it.
+    /// </summary>
+    public static void EmitOne(Command c, StringBuilder sb)
+    {
+        switch (c.Op)
         {
-            sb.Append("{ ");
-            var first = true;
-            foreach (var (k, v) in content)
-            {
-                if (!first)
+            case CommandOp.Create:
+                sb.Append("CREATE ").Append(FormatId(c.Target));
+                if (c.Value is IReadOnlyDictionary<string, object?> { Count: > 0 } createContent)
                 {
-                    sb.Append(", ");
+                    sb.Append(" CONTENT ");
+                    AppendContent(sb, createContent);
                 }
+                sb.Append(";\n");
+                break;
 
-                first = false;
-                sb.Append(k.Identifier()).Append(": ");
-                if (v is RecordId rid)
+            case CommandOp.Upsert:
+                sb.Append("UPSERT ").Append(FormatId(c.Target));
+                if (c.Value is IReadOnlyDictionary<string, object?> { Count: > 0 } upsertContent)
                 {
-                    sb.Append(FormatId(rid));
+                    sb.Append(" CONTENT ");
+                    AppendContent(sb, upsertContent);
+                }
+                sb.Append(";\n");
+                break;
+
+            case CommandOp.Set:
+                sb.Append("UPDATE ").Append(FormatId(c.Target))
+                  .Append(" SET ").Append(c.Key!.Identifier()).Append(" = ");
+                if (c.Value is RecordId setRid)
+                {
+                    sb.Append(FormatId(setRid));
                 }
                 else
                 {
-                    sb.Append(v.RenderSurrealLiteral());
+                    sb.Append(c.Value.RenderSurrealLiteral());
                 }
+                sb.Append(";\n");
+                break;
+
+            case CommandOp.Unset:
+                sb.Append("UPDATE ").Append(FormatId(c.Target))
+                  .Append(" UNSET ").Append(c.Key!.Identifier()).Append(";\n");
+                break;
+
+            case CommandOp.Delete:
+                sb.Append("DELETE ").Append(FormatId(c.Target)).Append(";\n");
+                break;
+
+            case CommandOp.Relate:
+            {
+                // Edge id strategy resolves at emit:
+                //   - Resolved (Random Ulid pre-minted, or Slug)  → render the value verbatim
+                //   - Idempotent (sentinel: empty value)          → hash the triple
+                // Schema-level `DEFINE INDEX … COLUMNS in, out UNIQUE` is the
+                // duplicate guard; the planner's ExistedAtStart check skips edges
+                // that already exist so re-running on a loaded aggregate is a no-op.
+                var src = c.Target;
+                var tgt = (RecordId)c.Value!;
+                var edge = c.Edge.Resolve(src, tgt);
+                sb.Append("RELATE ").Append(FormatId(src))
+                  .Append("->").Append(FormatId(edge))
+                  .Append("->").Append(FormatId(tgt));
+                if (c.EdgeContent is { Count: > 0 } content)
+                {
+                    sb.Append(" CONTENT ");
+                    AppendContent(sb, content);
+                }
+                sb.Append(";\n");
+                break;
             }
-            sb.Append(" }");
+
+            case CommandOp.Unrelate:
+            {
+                // Merged shape — at least one of source/target is non-null.
+                //   both:        DELETE edge WHERE in = source AND out = target
+                //   source-only: DELETE edge WHERE in = source
+                //   target-only: DELETE edge WHERE out = target
+                // Source absence is encoded as `default(RecordId)` (Table is null);
+                // target absence is encoded as Value = null. The Command.Unrelate
+                // factory enforces the at-least-one invariant.
+                var hasSource = c.Target.Table is not null;
+                var target = (RecordId?)c.Value;
+                sb.Append("DELETE ").Append(c.Key!.Identifier()).Append(" WHERE ");
+                if (hasSource)
+                {
+                    sb.Append("in = ").Append(FormatId(c.Target));
+                }
+                if (hasSource && target is not null)
+                {
+                    sb.Append(" AND ");
+                }
+                if (target is { } t)
+                {
+                    sb.Append("out = ").Append(FormatId(t));
+                }
+                sb.Append(";\n");
+                break;
+            }
         }
+    }
+
+    private static void AppendContent(StringBuilder sb, IReadOnlyDictionary<string, object?> content)
+    {
+        sb.Append("{ ");
+        var first = true;
+        foreach (var (k, v) in content)
+        {
+            if (!first)
+            {
+                sb.Append(", ");
+            }
+
+            first = false;
+            sb.Append(k.Identifier()).Append(": ");
+            if (v is RecordId rid)
+            {
+                sb.Append(FormatId(rid));
+            }
+            else
+            {
+                sb.Append(v.RenderSurrealLiteral());
+            }
+        }
+        sb.Append(" }");
     }
 
     private static string FormatId(RecordId id) => id.RecordId();
