@@ -3,9 +3,9 @@
 Disruptor.Surface has two halves:
 
 - A Roslyn source generator that reads attributed C# model types and emits model-specific code.
-- A small runtime that provides sessions, transport, ids, schema execution, writer leases, hydration helpers, and commit planning.
+- A small runtime that provides sessions, hydration helpers, ids, schema execution, and per-entity Save dispatch over the `Disruptor.Surreal` SDK.
 
-The design goal is model-specific code at compile time and explicit runtime boundaries at execution time. The generator knows your aggregate graph and can produce strongly typed code. The runtime stays generic and does not use process-global model state.
+The design goal is model-specific code at compile time and explicit runtime boundaries at execution time. The generator knows your aggregate graph and can produce strongly typed code. The runtime stays generic, has no transport layer of its own, and does not use process-global model state.
 
 ## High-Level Flow
 
@@ -16,7 +16,7 @@ C# model declarations
 Roslyn generator
         |
         +--> typed ids
-        +--> entity partial implementations
+        +--> entity partial implementations  (Hydrate, SaveAsync, Bind, …)
         +--> relation kind markers
         +--> aggregate loaders
         +--> schema chunks
@@ -25,10 +25,13 @@ Roslyn generator
         v
 Consumer application
         |
-        +--> ApplySchemaAsync
-        +--> Load{Root}Async
-        +--> mutate generated entities
-        +--> SurrealSession.CommitAsync
+        +--> Surreal.ConnectAsync(...)
+        +--> Workspace.ApplySchemaAsync(db)
+        +--> Workspace.Load{Root}Async(db | tx, id)
+        +--> mutate generated entities (sync, in-memory)
+        +--> tx = await db.BeginTransactionAsync()
+        +--> session.SaveAsync(entity, tx)
+        +--> tx.CommitAsync()
         |
         v
 SurrealDB
@@ -51,20 +54,20 @@ Main emitter responsibilities:
 | Emitter | Output |
 | --- | --- |
 | `IdEmitter` | `{Table}Id` typed record structs implementing `IRecordId`. |
-| `PartialEmitter` | Entity partial implementations, generated property bodies, session binding, hydration hooks (`Hydrate` + `HydratePartial`), `MarkAllSlicesLoaded`, delete hooks, and slice-guard read paths. |
+| `PartialEmitter` | Entity partial implementations, generated property bodies, session binding, hydration hooks (`Hydrate(Value, IHydrationSink)` + `HydratePartial`), `SaveAsync(ISaveContext, ct)` dispatch, delete hooks, and slice-guard read paths. |
 | `RelationKindEmitter` | `IRelationKind` marker class per forward relation attribute. |
 | `UnionInterfaceEmitter` | Shared interfaces for relation target/source unions when one relation can point at multiple table types. |
-| `AggregateLoaderEmitter` | Internal loader per aggregate root (legacy full-aggregate path). |
-| `CompositionRootEmitter` | `Load{Root}Async` methods on the user's composition root. |
-| `SchemaEmitter` | Ordered idempotent SurrealDB DDL chunks and `ApplySchemaAsync`. |
-| `ReferenceRegistryEmitter` | Model-scoped reference metadata for delete planning. |
+| `AggregateLoaderEmitter` | Internal loader per aggregate root, with two `PopulateAsync` overloads (Surreal db / Transaction tx). |
+| `CompositionRootEmitter` | `Load{Root}Async` methods on the user's composition root — two overloads per aggregate root (db / tx). |
+| `SchemaEmitter` | Ordered idempotent SurrealDB DDL chunks plus `ApplySchemaAsync(db)` / `ApplySchemaAsync(tx)`. |
+| `ReferenceRegistryEmitter` | Model-scoped reference metadata. |
 | `QueryRootEmitter` | `Workspace.Query` accessor + per-table `Query<T>` roots. |
 | `EdgeQueryRootEmitter` | `Workspace.Query.Edges.{Kind}` accessors with id-side type parameters. |
 | `EdgePredicateFactoryEmitter` | Per forward kind with a typed payload — `{Kind}EdgeQ` static class with `PropertyExpr<T>` per payload field. |
 | `PredicateFactoryEmitter` | Per-table `{Name}Q` static class — typed `PropertyExpr<T>` per scalar column. |
-| `IdsAsyncEmitter` | Per-table `{Name}QueryIds` static class with the `IdsAsync` extension on `Query<{Table}>` — typed id-only selection terminal. |
+| `IdsAsyncEmitter` | Per-table `{Name}QueryIds` static class with the `IdsAsync` extension on `Query<{Table}>` — typed id-only selection terminal. Two overloads (db / tx). |
 | `TraversalBuilderEmitter` | Per-table `{Name}TraversalBuilder` plus the `{Name}QueryIncludes` extensions on `Query<T>`. |
-| `LoadEntryEmitter` | `LoadAsync` extension on `Query<TRoot>` for aggregate roots — delegates to the legacy loader for empty-`Includes`, runs the compiler-driven path otherwise. |
+| `LoadEntryEmitter` | `LoadAsync` extension on `Query<TRoot>` for aggregate roots — two overloads (db / tx); delegates to the legacy loader for empty-`Includes`, runs the compiler-driven path otherwise. |
 | `HydrateRootEmitter` | `Workspace.Hydrate` accessor + per-table `{Table}(ids)` factories returning `HydrationQuery<T>` (typed and raw `IRecordId` overloads). |
 
 ## Model Mapping
@@ -80,8 +83,7 @@ Each `[Table]` maps to a SurrealDB `SCHEMAFULL` table. The generated schema incl
 - `option<record<target>>` for nullable references.
 - Parent fields with `REFERENCE ON DELETE REJECT`.
 - Computed reverse fields for `[Children]`.
-- Relation tables for forward relation kinds.
-- Runtime `writer_lease` table DDL.
+- Relation tables for forward relation kinds, with `DEFINE INDEX … COLUMNS in, out UNIQUE`.
 
 `[Reference, Inline]` is the owned-sidecar carve-out. The aggregate loader expands that reference with `field.*` and hydrates the linked row in the same session. Plain `[Reference]` stores and hydrates the id only.
 
@@ -93,25 +95,37 @@ Aggregate membership affects:
 
 - Which generated `Load{Root}Async` methods exist.
 - Which tables a nested loader query includes.
-- Whether a relation property returns entities or ids.
-- Which writes should normally share a writer lease name.
+- Whether a relation property returns entities or ids (within-aggregate vs cross-aggregate).
+- The natural recursion shape of `IEntity.SaveAsync` — children dispatched by Save are the aggregate's `[Children]` graph.
+
+Aggregates are *not* concurrency boundaries. Concurrent writers across all aggregates collide at COMMIT as native `SurrealConflictException` from the SDK; there is no per-aggregate or workspace-wide lease.
 
 Cross-aggregate links should be modeled as relation kinds, not `[Reference]` fields. A `[Reference]` from one aggregate to another produces `CG021`.
 
 ## Loading
 
-For every aggregate root, the generator emits an internal loader such as `DesignAggregateLoader`.
+For every aggregate root, the generator emits an internal loader such as `DesignAggregateLoader` with two `PopulateAsync` overloads — one taking `Surreal db` (read-only), one taking `Transaction tx` (write-mode load that runs the query inside the txn so it sees in-txn writes).
 
 The generated composition-root method is thin:
 
 ```csharp
 public async Task<SurrealSession> LoadDesignAsync(
-    ISurrealTransport transport,
+    Disruptor.Surreal.Surreal db,
     DesignId rootId,
     CancellationToken ct = default)
 {
     var ws = new SurrealSession(ReferenceRegistry);
-    await DesignAggregateLoader.PopulateAsync(ws, transport, rootId, ct);
+    await DesignAggregateLoader.PopulateAsync(ws, db, rootId, ct);
+    return ws;
+}
+
+public async Task<SurrealSession> LoadDesignAsync(
+    Disruptor.Surreal.Transaction tx,
+    DesignId rootId,
+    CancellationToken ct = default)
+{
+    var ws = new SurrealSession(ReferenceRegistry);
+    await DesignAggregateLoader.PopulateAsync(ws, tx, rootId, ct);
     return ws;
 }
 ```
@@ -123,17 +137,17 @@ The loader performs one nested SurrealQL query rooted at the aggregate id:
 - Child tables are loaded with subselects scoped back to the root through parent paths.
 - Edge tables touching the aggregate are loaded into edge arrays.
 
-Hydration is routed through `IHydrationSink`, an explicit interface on `SurrealSession`. This keeps loader-only operations out of the normal session surface while letting generated code populate entities, parent links, references, and edges without recording writes.
+Hydration is routed through `IHydrationSink`, an explicit interface on `SurrealSession`, and consumes the SDK's `Disruptor.Surreal.Values.Value` directly — no JSON intermediary. `HydrationValue` provides the Value-native helpers (`ReadRecordId`, `ReadString`, `ReadOrDefault<T>`, `HydrateReference<T>`) that emitted `IEntity.Hydrate` bodies call into.
 
 ## Query+Load Surface
 
-Five terminal verbs share one query AST. Each picks a different materialisation contract; the AST (predicates, ordering, paging, includes, pinned id) doesn't change between them.
+Five terminal verbs share one query AST. Each picks a different materialisation contract; the AST (predicates, ordering, paging, includes, pinned id) doesn't change between them. Every terminal accepts either `Surreal db` (read-only) or `Transaction tx` (in-txn read with full visibility into pending writes from the same transaction).
 
-- `ExecuteAsync(transport)` — read mode. Compiles the predicate + traversal AST to SurrealQL, executes it, hydrates root entities (and any traversed children) into an internal `SurrealSession`. Returns the root list; the session is opaque.
-- `IdsAsync(transport)` — id-only selection. Compiles to `SELECT id FROM table …` and projects each returned `RecordId` into the typed `{Table}Id`. Includes are rejected — id-only selection is flat by definition. Generator-emitted per `[Table]` via `IdsAsyncEmitter`; runtime body lives on `Query<T>.CompileIdsOnly()` plus the per-table extension.
-- `Select(projection).ExecuteAsync(transport)` — projection mode. Compiles to `SELECT field1, field2 FROM table …` (only the columns the projection's lambda touches) and runs the lambda once per row to materialise immutable user-defined `TRow` instances. The library does NOT generate projection types; the user owns `TRow` and the materialise lambda. Discovery runs the lambda once at construction time with a probe row that captures the SELECT field list.
-- `LoadAsync(transport, lease)` — write mode, only on aggregate roots. Same compile-and-hydrate path against a session built with `Workspace.ReferenceRegistry`. Returns the session for mutation + commit. With no `Include*` calls, delegates to the legacy `{Root}AggregateLoader` so the full-aggregate path keeps its single-query shape.
-- `Workspace.Hydrate.{Table}(ids).WithInclude(...).ExecuteAsync(transport, [lease])` — hydration terminal. Pairs with `IdsAsync`: takes a list of ids and materialises each into a tracked session along with included slices. Reuses `Query<T>`'s compiler+sink pipeline by composing an `InPredicate` over the id column — single round-trip, identical wire SQL to `Query<T>.Where(IdIn).WithInclude(...).ExecuteAsync`. Two ExecuteAsync overloads: read-mode (no lease) and write-mode (lease required at the call site).
+- `ExecuteAsync(db | tx)` — read mode. Compiles the predicate + traversal AST to SurrealQL, executes it, hydrates root entities (and any traversed children) into an internal `SurrealSession`. Returns the root list; the session is opaque.
+- `IdsAsync(db | tx)` — id-only selection. Compiles to `SELECT id FROM table …` and projects each returned `RecordId` into the typed `{Table}Id`. Includes are rejected — id-only selection is flat by definition.
+- `Select(projection).ExecuteAsync(db | tx)` — projection mode. Compiles to `SELECT field1, field2 FROM table …` (only the columns the projection's lambda touches) and runs the lambda once per row to materialise immutable user-defined `TRow` instances. The library does NOT generate projection types; the user owns `TRow` and the materialise lambda. Discovery runs the lambda once at construction time with a probe row that captures the SELECT field list.
+- `LoadAsync(db | tx)` — write-mode session, only on aggregate roots. Same compile-and-hydrate path against a session built with `Workspace.ReferenceRegistry`. Returns the session for mutation + dispatch via `SaveAsync`. With no `Include*` calls, delegates to the legacy `{Root}AggregateLoader` so the full-aggregate path keeps its single-query shape.
+- `Workspace.Hydrate.{Table}(ids).WithInclude(...).ExecuteAsync(db | tx)` — hydration terminal. Pairs with `IdsAsync`: takes a list of ids and materialises each into a tracked session along with included slices. Reuses `Query<T>`'s compiler+sink pipeline by composing an `InPredicate` over the id column — single round-trip, identical wire SQL to `Query<T>.Where(IdIn).WithInclude(...).ExecuteAsync`.
 
 Compilation:
 
@@ -148,16 +162,18 @@ QueryCompiler.Compile
              WHERE description = "x" AND id = constraints:01HX…
         |
         v
-SurrealHttpClient (posts JSON-RPC, params[1] = {})
+Disruptor.Surreal.Surreal.QueryAsync (or Transaction.QueryAsync)
+        |
+        +--> CBOR over WebSocket → QueryResponse → Value tree
 ```
 
-Generator-emitted hydrator delegates on each `IncludeChildrenNode` capture the right concrete `new TChild()` + `Hydrate` at codegen time, so the runtime walks the JSON without reflection. `Fetch` reuses the same compile-and-hydrate path but dispatches to `IEntity.HydratePartial` when an entity is already tracked — pending writes survive a top-up via the `IHydrationSink.HasPendingWrite` guard.
+Generator-emitted hydrator delegates on each `IncludeChildrenNode` capture the right concrete `new TChild()` + `Hydrate(Value, IHydrationSink)` at codegen time, so the runtime walks the `Value` tree without reflection. `Fetch` reuses the same compile-and-hydrate path but dispatches to `IEntity.HydratePartial` when an entity is already tracked — pending writes survive a top-up via the `IHydrationSink.HasPendingWrite` guard.
 
 Strict-with-escape: filtered loads only mark the user-`Include`d slices loaded; reads outside the slice throw `LoadShapeViolationException` with a hint at `session.FetchAsync(...)`. The legacy aggregate-loader path marks every slice on every loaded entity, so existing code stays unaffected.
 
 ## Session Lifecycle
 
-`SurrealSession` is an identity map plus a pending write batch. It has no ambient static current session. Generated entities hold a reference to the session they are bound to.
+`SurrealSession` is a snapshot-isolated entity store. It has no ambient static current session. Generated entities hold a reference to the session they are bound to.
 
 Lifecycle for fresh entities:
 
@@ -165,178 +181,126 @@ Lifecycle for fresh entities:
 session.Track(entity)
         |
         +--> bind entity to session
-        +--> record Create
-        +--> Initialize mandatory references
-        +--> flush object-initializer writes
+        +--> Initialize mandatory references (OnCreate{Name} hooks)
+        +--> flush object-initializer writes that buffered while unbound
 ```
 
 Lifecycle for loaded entities:
 
 ```text
-Load{Root}Async
+Load{Root}Async(db | tx, id)
         |
         +--> create entity instance
-        +--> hydrate fields from JSON
+        +--> hydrate fields from Value tree (via IEntity.Hydrate)
         +--> bind through IHydrationSink
-        +--> mark as loaded-at-start
+        +--> mark as loaded-at-start in the identity map
 ```
 
-Reads are synchronous lookups against in-memory dictionaries. Writes update those dictionaries and record commands. No database call happens until `CommitAsync`.
+Reads are synchronous lookups against in-memory dictionaries. Sync writes (property setters, `Track`, sync `Relate<TKind>` / `Unrelate<TKind>`) update those dictionaries and append to a small `CommandLog` for diagnostics. **No database call happens until you call an async dispatch method:**
 
-Sessions are one-shot:
+- `session.SaveAsync(entity, tx, ct)` — per-entity Save. Auto-binds the entity, walks its forward dependencies (Reference / Parent) recursively, dispatches a whole-entity `CREATE/UPDATE record:id CONTENT { ... }`, walks new children recursively, and dispatches new outgoing relations via the snapshot diff (`GetNewOutgoingEdges<TKind>`).
+- `session.DeleteAsync(entity, tx, ct)` — runs `OnDeleting`, dispatches a single `DELETE`, removes from the in-memory snapshot.
+- `session.RelateAsync<TKind>(src, tgt, tx, ct)` — async direct edge creation.
+- `session.UnrelateAsync<TKind>(src?, tgt?, tx, ct)` — async direct edge deletion.
 
-- `CommitAsync` executes pending writes and closes the session.
-- `AbandonAsync` drops pending writes and closes the session.
-- Any exception during commit closes the session and is rethrown.
-- After closure, public reads and writes throw.
+A session is reusable: the snapshot stays valid after a SaveAsync and you can keep reading or dispatch more writes (against the same or a different transaction). The transaction lifecycle is the app's responsibility — open with `db.BeginTransactionAsync()`, commit with `tx.CommitAsync()`, or cancel with `tx.CancelAsync()` (auto-cancels on `await using` dispose).
 
-## Commit Pipeline
+## Save Dispatch
 
-The runtime records both chronological commands and compact state:
+Per-entity `SaveAsync` is generator-emitted, not reflective. `PartialEmitter` walks each `[Table]`'s model and emits a typed body roughly shaped as:
 
 ```text
-Generated property/method write
+session.SaveAsync(entity, tx)                (the public API)
         |
         v
-SurrealSession.Record(Command)
+((IEntity)entity).SaveAsync(ctx, ct)         (emitted per entity)
         |
-        +--> CommandLog
-        +--> PendingState
-                |
-                v
-CommitPlanner.Build(...)
-                |
-                v
-SurrealCommandEmitter.Emit(...)
-                |
-                v
-ISurrealTransport.ExecuteAsync(string sql)
-        (or ISurrealExecutor.ExecuteAsync(SurrealCommand) — both
-        production transports implement both interfaces)
+        +--> for each forward dep (Reference / Inline / Parent):
+        |       if (!ctx.IsTracked(dep.Id)) await ctx.SaveAsync(dep, ct);
+        |
+        +--> dispatch the entity itself via tx.QueryAsync:
+        |       CREATE record:id CONTENT { ...full state... }   (when new)
+        |       UPDATE record:id CONTENT { ...full state... }   (when loaded-at-start)
+        |
+        +--> ctx.MarkSaved(entity)
+        |
+        +--> for each tracked child (new only):
+        |       await ctx.SaveAsync(child, ct);
+        |
+        +--> for each [TKind] outgoing edge added since load:
+                await tx.QueryAsync("RELATE src->edge:id->tgt …");
 ```
 
-`PendingState` folds repeated changes into final intent. `CommitPlanner` then:
+`ISaveContext` is the per-Save orchestration interface (Transaction handle, `IsTracked` query, recursion callback, `MarkSaved`). `SurrealSession` implements it privately. The dispatch is whole-entity: every save sends a complete `CONTENT { ... }` payload, no per-field SET/UNSET. Concurrent writers may both touch the same row; SurrealDB's MVCC catches the collision at COMMIT and surfaces `Disruptor.Surreal.SurrealConflictException`.
 
-1. Resolves reference delete behavior with the model-specific `IReferenceRegistry`.
-2. Applies `[Cascade]` and `[Unset]` to a fixpoint.
-3. Throws `CommitPlanRejectException` for remaining `[Reject]` blockers.
-4. Orders commands into stable phases.
+The library does not change-track. The user picks which roots to call `SaveAsync` on, and the recursion walks from there. New entities are dispatched exactly once per Save pass; existing ones (loaded from the DB) only dispatch when explicitly passed.
 
-The planned phases are:
+## Concurrency Model
 
-1. Deletes before recreate.
-2. Creates and upserts.
-3. Field updates and unsets.
-4. Relation removals.
-5. Relation additions.
-6. Final deletes.
+There is no application-level lock, lease, or sequence counter. Concurrency is delegated to SurrealDB v3's transaction MVCC:
 
-Fresh records (Create intent + no prior existence) fold their pending sets into a single `CREATE record:id CONTENT { … }` statement. SurrealDB's `TYPE RELATION ENFORCED` validates relation endpoints against the in-progress transactional state at the moment of `RELATE`; the single-statement form lands the endpoint fully populated before any relation-creating statement runs, where a bare `CREATE id;` followed by per-field `UPDATE id SET …` (or `UPSERT`) can leave the record in a state the enforcer rejects.
+- App opens a `Transaction` via `db.BeginTransactionAsync()`.
+- App reads, mutates, dispatches whatever it likes inside the txn.
+- App calls `tx.CommitAsync()`. If another writer's commit landed first inside the same MVCC window, the COMMIT throws `Disruptor.Surreal.SurrealConflictException`.
+- The caller catches, reloads the affected aggregate, reapplies its intent, and retries.
 
-Edge uniqueness is enforced at the schema layer: every relation table is emitted with a `DEFINE INDEX … COLUMNS in, out UNIQUE`. The runtime always emits an explicit edge id; the strategy is carried by the `RecordId edge` argument to `Relate`:
+This is optimistic concurrency at the substrate level. Two writers can both load and both mutate locally — only the first to commit wins; the second sees the conflict at commit time. Suits the library's snapshot character: load → mutate → save → commit happens fast enough that races are rare and retries are cheap.
 
-- **Random** — `RecordId.New(table)` mints a Ulid client-side; renders as `RELATE src->edge_table:<ulid>->tgt`. Each fresh Ulid is distinct, so re-running on the same triple after commit collides with the UNIQUE INDEX.
-- **Slug** — `new RecordId(table, slug)` carries a user-chosen stable name; renders as `RELATE src->edge_table:<slug>->tgt`. Re-running with the same slug is idempotent.
-- **Idempotent** — `RecordId.Idempotent(table)` defers the value to emit time, where it resolves to `HashText("{src}|{table}|{tgt}")`. Same triple always lands on the same row; no reload required.
+`LoadAsync(tx, …)` runs the load query inside the txn so cross-session in-txn writes are visible. Multiple sessions, multiple aggregates, and raw `Disruptor.Surreal` SDK calls can all participate in the same `Transaction` for cross-aggregate atomicity — the boundary is whatever the app decides.
 
-The typed-kind shorthand `session.Relate<TKind>(src, tgt)` defaults to the Idempotent strategy. The commit planner's `ExistedAtStart` check still skips `RELATE` for edges loaded as part of the aggregate, avoiding the round-trip even when the strategy would have been a no-op.
+## Wire Boundary
 
-`SurrealCommandEmitter` renders the final command list to a single SurrealQL script plus parameters.
-
-## Writer Coordination
-
-`WriterLease` is optional but intended for cross-process write coordination. **Single-writer paradigm** — one `writer_lease:main` record per workspace gates every commit, regardless of which aggregate the commit touches. There is no per-aggregate slug; concurrent writers across all aggregates race for the same lease.
-
-The protocol is **optimistic concurrency on a monotonic sequence**: the lease row holds a single `seq: int`. The workspace's generated `[CompositionRoot]` exposes `AcquireWriterAsync(transport)` as the canonical acquisition surface.
-
-The typical write flow is:
+The library does not own a transport. `Disruptor.Surreal` is the SDK — CBOR over WebSocket — and is the only wire layer:
 
 ```csharp
-await using var lease = await workspace.AcquireWriterAsync(transport);
-var session = await workspace.LoadDesignAsync(transport, id);
+using Disruptor.Surreal;
+using Disruptor.Surreal.Connection;
 
-// mutate
-
-await session.CommitAsync(transport, lease);
+await using var db = await Surreal.ConnectAsync(SurrealOptions.Parse(
+    "Url=ws://localhost:8000;Namespace=app;Database=main;User=root;Password=root"));
 ```
 
-`AcquireAsync` reads the current `seq` (defaulting to 0 if no row exists) and captures it on the lease. `CommitAsync` splices a transactional CAS clause around the data writes — `BEGIN TRANSACTION; IF current_seq != captured THEN THROW … END; UPSERT seq + 1;` — so the commit lands atomically with a sequence advance, or aborts entirely on mismatch and the caller sees `WriterLeaseStolenException`. The session closes either way.
+Generated load methods, query terminals, schema application, and per-entity Save dispatch all call `Surreal.QueryAsync(sql, bindings, ct)` (or `Transaction.QueryAsync(...)`) directly. Every value (record ids, strings, numbers) is rendered as a SurrealQL literal by `SurrealFormatter` at the call site (`QueryCompiler`, the per-entity Save bodies emitted by `PartialEmitter`) before reaching the SDK. The bindings dictionary slot stays empty because every literal is already inlined — and SurrealDB's wire-binding of record-shaped objects has historically lost `Thing` types, which inlining sidesteps entirely.
 
-There is no TTL, no holder id, no theft-recovery timer, no aggregate slug. Crashed writers are forgotten on the spot — they leave their captured seq in memory only, which is invisible to everyone else; the next acquirer just reads the current seq fresh and proceeds. `DisposeAsync` is a no-op.
-
-This is optimistic concurrency, not pessimistic locking. Two writers can both acquire and both mutate locally; only the first to commit wins, the second gets `WriterLeaseStolenException` at commit time and must reload-and-retry. Suits the library's one-shot session character: load → mutate → commit happens fast enough that races are rare and retries are cheap.
-
-## Transport Boundary
-
-Two parallel interfaces — the legacy stringly one and the next-generation parameter-aware one. Generated code talks through the legacy interface today; both production transports implement both.
-
-```csharp
-public interface ISurrealTransport : IAsyncDisposable
-{
-    Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default);
-}
-
-public sealed record SurrealCommand(
-    string Sql,
-    IReadOnlyDictionary<string, object?>? Parameters = null);
-
-public interface ISurrealExecutor : IAsyncDisposable
-{
-    Task<JsonDocument> ExecuteAsync(SurrealCommand command, CancellationToken ct = default);
-}
-```
-
-`ISurrealTransport` was the v1 boundary: a SurrealQL string in, a `JsonDocument` out, no separate parameter dictionary. Every value (record ids, strings, numbers) is rendered as a SurrealQL literal by `SurrealFormatter` at the call site (`QueryCompiler`, `SurrealCommandEmitter`) before reaching the transport. SurrealDB's JSON-RPC binder treats record-shaped objects as generic `Object`s rather than `Thing`s, so a query like `WHERE id = $p0` bound through JSON vars never matches; SurrealQL literal syntax (`table:value`) is parsed at the query level and preserves type. Inlining at the codegen layer also lifts the per-batch statement ceiling that `LET $p0 = …;` prefixes hit on large commits.
-
-`ISurrealExecutor` is the future-direction boundary that takes `SurrealCommand` instead. Same return shape, richer input shape — opens the door for parameter-aware execution paths (embedded engines that bind natively, future HTTP/JSON-RPC paths that don't lose `Thing` types) without touching today's inlined-literal callers. The runtime keeps using `ISurrealTransport.ExecuteAsync(string sql)` for now; per-callsite migration lands as use cases need parameter-aware execution. Callers holding an `ISurrealTransport` can up-cast via `transport.AsExecutor()` — returns the same instance when the transport already implements both, otherwise wraps it in `SurrealTransportExecutorAdapter`.
-
-`SurrealHttpClient` (in `Disruptor.Surface.Transport.Http`) is the over-the-network implementation. It:
-
-- Signs in to SurrealDB via `/signin` and caches the bearer token.
-- Posts JSON-RPC 2.0 envelopes (`{"method": "query", "params": [<sql>, {}]}`) to `/rpc` — `params[1]` is always the empty bindings object.
-- Applies namespace and database headers.
-- Extracts `result` from the RPC response envelope; surfaces typed errors via `SurrealException` / `WriterLeaseStolenException`.
-- Re-auths once on a 401 (the request never reached the server's SQL execution stage). Does not retry arbitrary failures — automatically retrying mutating commits is unsafe under unknown-outcome failure modes.
-- Provides `SqlAsync` and `SurrealResultSet` for direct SQL use.
-
-`SurrealEmbeddedTransport` (in `Disruptor.Surface.Transport.Embedded`) is the in-process implementation backed by SurrealDB embedded with a RocksDB file store. Side-steps the HTTP body-size ceiling that bites large commits (code-index full rebuilds, bulk imports). Single-process only; uses a `SemaphoreSlim` to gate `BEGIN TRANSACTION` scripts so concurrent writers serialise (single-writer paradigm, same as the cross-process `WriterLease`).
-
-Applications can replace either with a custom transport for tests, logging, alternate SurrealDB connectivity, or layered policy. Implementing both `ISurrealTransport` and `ISurrealExecutor` directly avoids the wrapping adapter for callers that hold one or the other.
+The SDK's `QueryResponse` and `Disruptor.Surreal.Values.Value` are the Value-tree return shape; `HydrationValue` walks them in emitted hydration bodies.
 
 ## Reference Delete Behavior
 
-Reference behavior is split between schema and commit planning.
+Reference delete behavior is currently split between schema (active) and runtime planning (parked).
 
-Generated schema emits SurrealDB `REFERENCE ON DELETE` clauses. The runtime also plans deletes before sending SQL so application commits fail early and consistently:
+Generated schema emits SurrealDB `REFERENCE ON DELETE` clauses based on the user's attributes:
 
-- `[Reject]`: block delete when a surviving record still references the target.
-- `[Unset]`: clear nullable references to a deleted target.
-- `[Cascade]`: delete records that reference the deleted target.
+- `[Reject]`: SurrealDB rejects the delete when a surviving record still references the target. Default behavior.
+- `[Unset]`: SurrealDB clears nullable references to the deleted target.
+- `[Cascade]`: SurrealDB deletes records that reference the deleted target.
 - `[Ignore]`: leave references unchanged.
 
-Cascade-only cycles are rejected at compile time.
+Cascade-only cycles are rejected at compile time (`CG014`).
+
+The in-library cascade planner — which previously walked the loaded snapshot to plan multi-step deletes against `PendingState.References` — was removed in preview.34 alongside `PendingState` and `CommitPlanner`. `DeleteAsync` currently dispatches a single `DELETE` for the targeted entity and relies on the schema's `REFERENCE ON DELETE` to drive dependent cleanup. Re-anchoring the planner against the loaded snapshot's reference state is on the roadmap.
 
 ## Concurrency And Consistency Boundaries
 
-The library provides snapshot-style application sessions, not long-lived live objects. A loaded session does not automatically observe database changes after load. A committed session cannot be reused. Conflicting writers should coordinate through `WriterLease` or an application-level strategy.
+The library provides snapshot-style application sessions, not long-lived live objects. A loaded session does not automatically observe database changes after load — re-load (or `FetchAsync` for a slice) when you need fresh data.
 
-The generated loader hydrates one aggregate snapshot. Cross-aggregate relation properties expose ids, so the caller explicitly decides when to load another aggregate.
+The generated loader hydrates one aggregate snapshot per `Load{Root}Async` call. Cross-aggregate relation properties expose ids, so the caller explicitly decides when to load another aggregate.
+
+For atomicity across aggregates, share an app-owned `Transaction` between sessions: open it, pass it into multiple `LoadAsync(tx, …)` calls, dispatch with `SaveAsync(entity, tx)` against each session, then commit once. Conflicts at COMMIT surface as `SurrealConflictException` regardless of how many sessions or aggregates participated.
 
 ## Extension Points
 
 Useful extension points for consumers:
 
-- Add constructors, services, caches, and application methods to the `[CompositionRoot]` partial.
-- Add domain methods to entity partials and call protected `Session`.
-- Implement `OnCreate{Name}` hooks for mandatory references.
+- Add constructors, services, caches, telemetry, and application methods to the `[CompositionRoot]` partial.
+- Add domain methods to entity partials and call protected `Session` (sync, in-memory) or take a `Transaction` parameter for async dispatch.
+- Implement `OnCreate{Name}` hooks for mandatory-reference seeding.
 - Implement `OnDeleting` hooks for custom dependent cleanup.
-- Implement `ISurrealTransport` for custom database access.
-- Use `Workspace.Schema` directly for migration tooling.
-- Use `RenderBatch()` for debugging generated commit SQL.
+- Use `Workspace.Schema` directly for migration tooling — iterate the chunk list, splice your own DDL where appropriate, run inside your own transaction.
+- Use `session.Log` (a `CommandLog`) to inspect captured intent for diagnostics or telemetry.
 
 Useful extension points for maintainers:
 
 - Add scalar mappings in `SchemaEmitter`.
-- Add accepted id value forms by extending `RecordIdFormat.Validate` (today: 26-char Ulid stringifications and ≤32-char lower_snake_case slugs only).
-- Extend relation marker classes when edge payload support is added.
+- Add accepted id value forms by extending `RecordIdFormat.Validate` (today: 26-char Ulid stringifications, ≤32-char lower_snake_case slugs, and 24-char content-hash forms).
+- Extend relation marker classes when edge payload support evolves.
 - Extend diagnostics before adding new emitted shapes.
