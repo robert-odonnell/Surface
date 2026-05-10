@@ -73,6 +73,13 @@ public sealed class ProjectionQuery<T, TRow>
     /// rows as immutable instances of <typeparamref name="TRow"/>; no entity hydration,
     /// no session.
     /// </summary>
+    public Task<IReadOnlyList<TRow>> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
+        => ExecuteAsync(new SurrealSdkTransport(db), ct);
+
+    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
+    public Task<IReadOnlyList<TRow>> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+        => ExecuteAsync(new SurrealSdkTransport(tx), ct);
+
     public async Task<IReadOnlyList<TRow>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
     {
         var sql = Compile();

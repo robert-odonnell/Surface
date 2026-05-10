@@ -76,9 +76,16 @@ public sealed class HydrationQuery<T>
     /// <summary>
     /// Materialises the requested rows + slices into a fresh
     /// <see cref="SurrealSession"/>. Caller commits via
-    /// <see cref="SurrealSession.CommitAsync(ISurrealTransport, CancellationToken)"/>;
+    /// <see cref="SurrealSession.SaveAsync(IEntity, Disruptor.Surreal.Transaction, CancellationToken)"/>;
     /// concurrent commits surface as <c>SurrealConflictException</c> from the SDK.
     /// </summary>
+    public Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
+        => ExecuteCoreAsync(new SurrealSession(referenceRegistry), new SurrealSdkTransport(db), ct);
+
+    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
+    public Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+        => ExecuteCoreAsync(new SurrealSession(referenceRegistry), new SurrealSdkTransport(tx), ct);
+
     public Task<SurrealSession> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
         => ExecuteCoreAsync(new SurrealSession(referenceRegistry), transport, ct);
 

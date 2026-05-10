@@ -430,7 +430,7 @@ public sealed class EmissionShapeTests
         // Two-path body: Includes non-empty → ExecuteIntoSessionAsync; empty → legacy
         // aggregate loader. The NIE throw is gone in PR6.
         Assert.Contains("if (query.Includes.Count > 0)", src);
-        Assert.Contains("await query.ExecuteIntoSessionAsync(session, transport, ct);", src);
+        Assert.Contains("await query.ExecuteIntoSessionAsync(session, __transport, ct);", src);
         Assert.Contains("global::Disruptor.Surface.Runtime.DesignAggregateLoader.PopulateAsync", src);
         Assert.DoesNotContain("NotImplementedException", src);
     }

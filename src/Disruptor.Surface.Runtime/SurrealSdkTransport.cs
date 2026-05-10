@@ -21,8 +21,8 @@ namespace Disruptor.Surface.Runtime;
 /// </summary>
 public sealed class SurrealSdkTransport : ISurrealTransport
 {
-    private readonly Func<string, CancellationToken, Task<QueryResponse>> _queryFn;
-    private readonly bool _ownsClient;
+    private readonly Func<string, CancellationToken, Task<QueryResponse>> queryFn;
+    private readonly bool ownsClient;
 
     /// <summary>
     /// The underlying SDK client when this transport wraps one directly. Null when the
@@ -38,8 +38,8 @@ public sealed class SurrealSdkTransport : ISurrealTransport
     {
         ArgumentNullException.ThrowIfNull(db);
         Db = db;
-        _queryFn = (sql, ct) => db.QueryAsync(sql, bindings: null, ct);
-        _ownsClient = ownsClient;
+        queryFn = (sql, ct) => db.QueryAsync(sql, bindings: null, ct);
+        this.ownsClient = ownsClient;
     }
 
     /// <summary>
@@ -48,24 +48,24 @@ public sealed class SurrealSdkTransport : ISurrealTransport
     /// Used by write-mode loaders (<c>Workspace.Load{Root}Async(Transaction tx, …)</c>).
     /// The transport never owns the transaction's lifetime — the caller commits/cancels.
     /// </summary>
-    public SurrealSdkTransport(Disruptor.Surreal.Transaction tx)
+    public SurrealSdkTransport(Transaction tx)
     {
         ArgumentNullException.ThrowIfNull(tx);
-        _queryFn = (sql, ct) => tx.QueryAsync(sql, bindings: null, ct);
-        _ownsClient = false;
+        queryFn = (sql, ct) => tx.QueryAsync(sql, bindings: null, ct);
+        ownsClient = false;
     }
 
     /// <inheritdoc />
     public async Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default)
     {
-        var response = await _queryFn(sql, ct).ConfigureAwait(false);
+        var response = await queryFn(sql, ct).ConfigureAwait(false);
         return ProjectToJson(response);
     }
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        if (_ownsClient && Db is not null) await Db.DisposeAsync().ConfigureAwait(false);
+        if (ownsClient && Db is not null) await Db.DisposeAsync().ConfigureAwait(false);
     }
 
     /// <summary>

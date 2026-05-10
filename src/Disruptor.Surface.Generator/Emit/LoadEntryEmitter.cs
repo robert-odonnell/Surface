@@ -26,7 +26,9 @@ namespace Disruptor.Surface.Generator.Emit;
 internal static class LoadEntryEmitter
 {
     private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.Query";
-    private const string TransportFqn = "global::Disruptor.Surface.Runtime.ISurrealTransport";
+    private const string SurrealFqn = "global::Disruptor.Surreal.Surreal";
+    private const string TransactionFqn = "global::Disruptor.Surreal.Transaction";
+    private const string TransportFqn = "global::Disruptor.Surface.Runtime.SurrealSdkTransport";
     private const string SessionFqn = "global::Disruptor.Surface.Runtime.SurrealSession";
     private const string CtFqn = "global::System.Threading.CancellationToken";
     private const string TaskFqn = "global::System.Threading.Tasks.Task";
@@ -78,49 +80,62 @@ internal static class LoadEntryEmitter
         sb.Append(indent).Append("public static class ").Append(aggRoot.Name).AppendLine("QueryLoad");
         sb.Append(indent).AppendLine("{");
 
-        sb.Append(memberIndent)
-          .AppendLine($"/// <summary>Loads the <c>{aggRoot.Name}</c> aggregate identified by the query's <c>WithId</c> pin. Returns a populated <see cref=\"global::Disruptor.Surface.Runtime.SurrealSession\"/> the caller mutates and commits via <c>session.CommitAsync(transport)</c>. Concurrent commits surface natively as <c>SurrealConflictException</c> from the SDK.</summary>");
-        sb.Append(memberIndent)
-          .Append("public static async ").Append(TaskFqn).Append('<').Append(SessionFqn)
-          .Append("> LoadAsync(this ").Append(QueryFqn).Append('<').Append(entityFqn).Append("> query, ")
-          .Append(TransportFqn).Append(" transport, ")
-          .Append(CtFqn).AppendLine(" ct = default)");
-        sb.Append(memberIndent).AppendLine("{");
-
-        // PinnedId is required regardless of which path we take — load mode is single-
-        // aggregate-rooted, and both the legacy aggregate loader and the compiler-driven
-        // path key the SurrealQL on the root id (`FROM {table}:{id}` and `WHERE id = $p0`
-        // respectively). Multi-aggregate atomic load is out of scope.
-        sb.Append(bodyIndent).AppendLine("if (query.PinnedId is null)");
-        sb.Append(bodyIndent).AppendLine("{");
-        sb.Append(bodyIndent).AppendLine("    throw new global::System.InvalidOperationException(");
-        sb.Append(bodyIndent).Append("        \"LoadAsync requires a pinned root id. Call .WithId(").Append(aggRoot.Name).AppendLine("Id) before .LoadAsync(...).\");");
-        sb.Append(bodyIndent).AppendLine("}");
+        // Three overloads: Surreal db (read-mode load), Transaction tx (write-mode
+        // load that sees in-txn writes), and ISurrealTransport (advanced — for tests
+        // and integrations that own their own transport). The Surreal and Transaction
+        // overloads wrap in SurrealSdkTransport; ISurrealTransport dispatches directly.
+        EmitBody(SurrealFqn, "db", ownsTransport: true, $"new {TransportFqn}(db)");
         sb.AppendLine();
-
-        sb.Append(bodyIndent).Append("var session = new ").Append(SessionFqn).Append('(').Append(refRegistryFqn).AppendLine(");");
+        EmitBody(TransactionFqn, "tx", ownsTransport: true, $"new {TransportFqn}(tx)");
         sb.AppendLine();
+        EmitBody("global::Disruptor.Surface.Runtime.ISurrealTransport", "transport", ownsTransport: false, "transport");
 
-        // Two-path body: with Includes, the new compiler-driven path emits its own
-        // nested SELECT and hydrates the user-chosen slice via IHydrationSink. Without
-        // Includes, delegate to the legacy aggregate loader for the full-aggregate
-        // load. Both produce the same SurrealSession shape; only the slice differs.
-        sb.Append(bodyIndent).AppendLine("if (query.Includes.Count > 0)");
-        sb.Append(bodyIndent).AppendLine("{");
-        sb.Append(bodyIndent).AppendLine("    await query.ExecuteIntoSessionAsync(session, transport, ct);");
-        sb.Append(bodyIndent).AppendLine("}");
-        sb.Append(bodyIndent).AppendLine("else");
-        sb.Append(bodyIndent).AppendLine("{");
-        // Reconstruct the typed id from the canonical RecordId. RecordIdFormat.Validate
-        // already accepted the value when the user constructed their {Root}Id; passing
-        // the same string back through the typed ctor is a round-trip with no surprises.
-        sb.Append(bodyIndent).Append("    var rootId = new ").Append(idFqn).AppendLine("(query.PinnedId.Value.Value);");
-        sb.Append(bodyIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(session, transport, rootId, ct);");
-        sb.Append(bodyIndent).AppendLine("}");
-        sb.AppendLine();
+        void EmitBody(string paramTypeFqn, string paramName, bool ownsTransport, string transportExpr)
+        {
+            sb.Append(memberIndent)
+              .AppendLine($"/// <summary>Loads the <c>{aggRoot.Name}</c> aggregate identified by the query's <c>WithId</c> pin. Returns a populated <see cref=\"global::Disruptor.Surface.Runtime.SurrealSession\"/>; concurrent commits surface as <c>SurrealConflictException</c> from the SDK.</summary>");
+            sb.Append(memberIndent)
+              .Append("public static async ").Append(TaskFqn).Append('<').Append(SessionFqn)
+              .Append("> LoadAsync(this ").Append(QueryFqn).Append('<').Append(entityFqn).Append("> query, ")
+              .Append(paramTypeFqn).Append(' ').Append(paramName).Append(", ")
+              .Append(CtFqn).AppendLine(" ct = default)");
+            sb.Append(memberIndent).AppendLine("{");
 
-        sb.Append(bodyIndent).AppendLine("return session;");
-        sb.Append(memberIndent).AppendLine("}");
+            sb.Append(bodyIndent).AppendLine("if (query.PinnedId is null)");
+            sb.Append(bodyIndent).AppendLine("{");
+            sb.Append(bodyIndent).AppendLine("    throw new global::System.InvalidOperationException(");
+            sb.Append(bodyIndent).Append("        \"LoadAsync requires a pinned root id. Call .WithId(").Append(aggRoot.Name).AppendLine("Id) before .LoadAsync(...).\");");
+            sb.Append(bodyIndent).AppendLine("}");
+            sb.AppendLine();
+
+            // For Surreal/Transaction overloads we constructed the SurrealSdkTransport
+            // wrapper, so dispose it. For ISurrealTransport, the caller owns the
+            // lifetime — no `await using`.
+            if (ownsTransport)
+            {
+                sb.Append(bodyIndent).Append("await using var __transport = ").Append(transportExpr).AppendLine(";");
+            }
+            else
+            {
+                sb.Append(bodyIndent).Append("var __transport = ").Append(transportExpr).AppendLine(";");
+            }
+            sb.Append(bodyIndent).Append("var session = new ").Append(SessionFqn).Append('(').Append(refRegistryFqn).AppendLine(");");
+            sb.AppendLine();
+
+            sb.Append(bodyIndent).AppendLine("if (query.Includes.Count > 0)");
+            sb.Append(bodyIndent).AppendLine("{");
+            sb.Append(bodyIndent).AppendLine("    await query.ExecuteIntoSessionAsync(session, __transport, ct);");
+            sb.Append(bodyIndent).AppendLine("}");
+            sb.Append(bodyIndent).AppendLine("else");
+            sb.Append(bodyIndent).AppendLine("{");
+            sb.Append(bodyIndent).Append("    var rootId = new ").Append(idFqn).AppendLine("(query.PinnedId.Value.Value);");
+            sb.Append(bodyIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(session, __transport, rootId, ct);");
+            sb.Append(bodyIndent).AppendLine("}");
+            sb.AppendLine();
+
+            sb.Append(bodyIndent).AppendLine("return session;");
+            sb.Append(memberIndent).AppendLine("}");
+        }
 
         sb.Append(indent).AppendLine("}");
 

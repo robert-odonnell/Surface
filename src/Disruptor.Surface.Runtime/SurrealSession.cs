@@ -516,6 +516,15 @@ public sealed class SurrealSession : IHydrationSink
     /// want to top up — Fetch never invents new aggregate roots.
     /// </para>
     /// </summary>
+    public Task FetchAsync<T>(Query.Query<T> query, Disruptor.Surreal.Surreal db, CancellationToken ct = default)
+        where T : class, IEntity, new()
+        => FetchAsync(query, new SurrealSdkTransport(db), ct);
+
+    /// <inheritdoc cref="FetchAsync{T}(Query.Query{T}, Disruptor.Surreal.Surreal, CancellationToken)"/>
+    public Task FetchAsync<T>(Query.Query<T> query, Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+        where T : class, IEntity, new()
+        => FetchAsync(query, new SurrealSdkTransport(tx), ct);
+
     public async Task FetchAsync<T>(Query.Query<T> query, ISurrealTransport transport, CancellationToken ct = default)
         where T : class, IEntity, new()
     {
@@ -876,7 +885,7 @@ public sealed class SurrealSession : IHydrationSink
     /// entity is visited at most once per Save pass).
     /// </para>
     /// </summary>
-    public async Task SaveAsync(IEntity entity, Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+    public async Task SaveAsync(IEntity entity, Transaction tx, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(entity);
         ArgumentNullException.ThrowIfNull(tx);
@@ -921,12 +930,12 @@ public sealed class SurrealSession : IHydrationSink
     /// Internal orchestration: tracks visited-this-pass (cycle break + saved-this-pass
     /// signal for the entity body's IsTracked / CREATE-vs-UPDATE check).
     /// </summary>
-    private sealed class SaveContext(SurrealSession session, Disruptor.Surreal.Transaction tx) : ISaveContext
+    private sealed class SaveContext(SurrealSession session, Transaction tx) : ISaveContext
     {
         private readonly HashSet<RecordId> _visited = [];
         private readonly HashSet<RecordId> _savedThisPass = [];
 
-        public Disruptor.Surreal.Transaction Transaction { get; } = tx;
+        public Transaction Transaction { get; } = tx;
 
         /// <summary>
         /// True iff <paramref name="id"/> is known to exist in the DB — either loaded
@@ -973,7 +982,7 @@ public sealed class SurrealSession : IHydrationSink
     public async Task RelateAsync<TKind>(
         IRecordId source,
         IRecordId target,
-        Disruptor.Surreal.Transaction tx,
+        Transaction tx,
         CancellationToken ct = default) where TKind : IRelationKind
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -1007,7 +1016,7 @@ public sealed class SurrealSession : IHydrationSink
     public async Task UnrelateAsync<TKind>(
         IRecordId? source,
         IRecordId? target,
-        Disruptor.Surreal.Transaction tx,
+        Transaction tx,
         CancellationToken ct = default) where TKind : IRelationKind
     {
         if (source is null && target is null)
@@ -1055,7 +1064,7 @@ public sealed class SurrealSession : IHydrationSink
     /// retires.
     /// </para>
     /// </summary>
-    public async Task DeleteAsync(IEntity entity, Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+    public async Task DeleteAsync(IEntity entity, Transaction tx, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(entity);
         ArgumentNullException.ThrowIfNull(tx);

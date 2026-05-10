@@ -145,7 +145,7 @@ public sealed class EmissionRoundTripTests
             .First(m => m.Name == "Track" && m.IsGenericMethod);
         trackMethod.MakeGenericMethod(assembly.GetType("M.Constraint")!).Invoke(session, [constraint]);
 
-        var fake = new Disruptor.Surface.Tests.Runtime.FakeSurreal.RecordingConnection();
+        var fake = new Runtime.FakeSurreal.RecordingConnection();
         await using var db = new Disruptor.Surreal.Surreal(fake);
         await using var tx = await db.BeginTransactionAsync();
 
@@ -156,8 +156,8 @@ public sealed class EmissionRoundTripTests
         Assert.Equal("begin", fake.Sent[0].Method);
         var queries = fake.Sent.Where(s => s.Method == "query").ToList();
         Assert.Equal(2, queries.Count);
-        var firstSql = ((Disruptor.Surreal.Values.StringValue)((Disruptor.Surreal.Values.ArrayValue)queries[0].Params!).Array[0]).Value;
-        var secondSql = ((Disruptor.Surreal.Values.StringValue)((Disruptor.Surreal.Values.ArrayValue)queries[1].Params!).Array[0]).Value;
+        var firstSql = ((Surreal.Values.StringValue)((Surreal.Values.ArrayValue)queries[0].Params!).Array[0]).Value;
+        var secondSql = ((Surreal.Values.StringValue)((Surreal.Values.ArrayValue)queries[1].Params!).Array[0]).Value;
         Assert.Contains("CREATE designs:", firstSql);
         Assert.Contains("CREATE constraints:", secondSql);
         Assert.Contains("design:", secondSql); // child's [Parent] FK back to design
@@ -175,7 +175,7 @@ public sealed class EmissionRoundTripTests
         SetProperty(design, "Description", "saved via per-entity Save");
 
         var session = new SurrealSession();
-        var fake = new Disruptor.Surface.Tests.Runtime.FakeSurreal.RecordingConnection();
+        var fake = new Runtime.FakeSurreal.RecordingConnection();
         await using var db = new Disruptor.Surreal.Surreal(fake);
         await using var tx = await db.BeginTransactionAsync();
 
@@ -188,8 +188,8 @@ public sealed class EmissionRoundTripTests
         Assert.NotNull(fake.Sent[1].TxnId);
 
         // The query's SQL is in params[0] (the [sql, bindings] array shape from the SDK).
-        var paramsArr = (Disruptor.Surreal.Values.ArrayValue)fake.Sent[1].Params!;
-        var sql = ((Disruptor.Surreal.Values.StringValue)paramsArr.Array[0]).Value;
+        var paramsArr = (Surreal.Values.ArrayValue)fake.Sent[1].Params!;
+        var sql = ((Surreal.Values.StringValue)paramsArr.Array[0]).Value;
         Assert.Contains("CREATE designs:", sql);
         Assert.Contains("description:", sql);
         Assert.Contains("saved via per-entity Save", sql);
@@ -273,7 +273,7 @@ public sealed class EmissionRoundTripTests
             """;
         var transport = new ScriptedTransport(scriptedResponse);
 
-        var executeMethod = queryWithIncludes.GetType().GetMethod("ExecuteAsync")!;
+        var executeMethod = queryWithIncludes.GetType().GetMethod("ExecuteAsync", [typeof(ISurrealTransport), typeof(CancellationToken)])!;
         var task = (Task)executeMethod.Invoke(queryWithIncludes, [transport, CancellationToken.None])!;
         await task;
         var resultProp = task.GetType().GetProperty("Result")!;
@@ -375,7 +375,7 @@ public sealed class EmissionRoundTripTests
         var configureType = includeConstraints.GetParameters()[1].ParameterType;
         query = includeConstraints.Invoke(null, [query, MakeConfigure(configureType, _ => { })])!;
 
-        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
+        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethods().Single(m => m.Name == "LoadAsync" && m.GetParameters().Length == 3 && m.GetParameters()[1].ParameterType == typeof(ISurrealTransport));
         var transport = new RecordingLoadTransport($$"""
             [{"result":[
                 {
@@ -423,7 +423,7 @@ public sealed class EmissionRoundTripTests
         // path keeps working — every navigable read returns rather than throwing.
         var assembly = GeneratorHarness.CompileAndLoad(LoadFixture);
         var query = BuildPinnedDesignQuery(assembly, out var designUlid);
-        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
+        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethods().Single(m => m.Name == "LoadAsync" && m.GetParameters().Length == 3 && m.GetParameters()[1].ParameterType == typeof(ISurrealTransport));
 
         var transport = new RecordingLoadTransport(BuildEmptyLoadResponse(designUlid));
 
@@ -517,7 +517,8 @@ public sealed class EmissionRoundTripTests
             """);
 
         var fetchMethod = typeof(SurrealSession).GetMethods()
-            .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
+            .First(m => m.Name == "FetchAsync" && m.IsGenericMethod
+                && m.GetParameters()[1].ParameterType == typeof(ISurrealTransport))
             .MakeGenericMethod(assembly.GetType("M.Design")!);
         var task = (Task)fetchMethod.Invoke(session, [topUpQuery, fetchTransport, CancellationToken.None])!;
         await task;
@@ -574,7 +575,7 @@ public sealed class EmissionRoundTripTests
                 }
             ],"status":"OK"}]
             """);
-        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
+        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethods().Single(m => m.Name == "LoadAsync" && m.GetParameters().Length == 3 && m.GetParameters()[1].ParameterType == typeof(ISurrealTransport));
         var loadTask = (Task)loadAsync.Invoke(null, [loadQuery, loadTransport, CancellationToken.None])!;
         await loadTask;
         var session = (SurrealSession)loadTask.GetType().GetProperty("Result")!.GetValue(loadTask)!;
@@ -605,7 +606,8 @@ public sealed class EmissionRoundTripTests
         fetchQuery = includeNotes.Invoke(null, [fetchQuery, MakeConfigure(configureType, _ => { })])!;
 
         var fetchMethod = typeof(SurrealSession).GetMethods()
-            .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
+            .First(m => m.Name == "FetchAsync" && m.IsGenericMethod
+                && m.GetParameters()[1].ParameterType == typeof(ISurrealTransport))
             .MakeGenericMethod(assembly.GetType("M.Design")!);
         var fetchTask = (Task)fetchMethod.Invoke(session, [fetchQuery, fetchTransport, CancellationToken.None])!;
         await fetchTask;
@@ -632,7 +634,8 @@ public sealed class EmissionRoundTripTests
         var query = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
 
         var fetchMethod = typeof(SurrealSession).GetMethods()
-            .First(m => m.Name == "FetchAsync" && m.IsGenericMethod)
+            .First(m => m.Name == "FetchAsync" && m.IsGenericMethod
+                && m.GetParameters()[1].ParameterType == typeof(ISurrealTransport))
             .MakeGenericMethod(assembly.GetType("M.Design")!);
 
         // Async-method exceptions get captured into the returned Task, not thrown by
@@ -675,7 +678,7 @@ public sealed class EmissionRoundTripTests
                 }
             ],"status":"OK"}]
             """);
-        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
+        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethods().Single(m => m.Name == "LoadAsync" && m.GetParameters().Length == 3 && m.GetParameters()[1].ParameterType == typeof(ISurrealTransport));
         var task = (Task)loadAsync.Invoke(null, [query, loadTransport, CancellationToken.None])!;
         await task;
         var session = (SurrealSession)task.GetType().GetProperty("Result")!.GetValue(task)!;
@@ -699,7 +702,7 @@ public sealed class EmissionRoundTripTests
         var query = BuildPinnedDesignQuery(assembly, out var designUlid);
 
         var loadClass = assembly.GetType("M.DesignQueryLoad")!;
-        var loadAsync = loadClass.GetMethod("LoadAsync")!;
+        var loadAsync = loadClass.GetMethods().Single(m => m.Name == "LoadAsync" && m.GetParameters().Length == 3 && m.GetParameters()[1].ParameterType == typeof(ISurrealTransport));
 
         var transport = new RecordingLoadTransport(BuildEmptyLoadResponse(designUlid));
 
@@ -731,7 +734,7 @@ public sealed class EmissionRoundTripTests
 
         var withIncludes = AppendIncludeConstraints(assembly, query);
 
-        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
+        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethods().Single(m => m.Name == "LoadAsync" && m.GetParameters().Length == 3 && m.GetParameters()[1].ParameterType == typeof(ISurrealTransport));
 
         var constraintUlid = Ulid.NewUlid().ToString();
         var scriptedResponse = $$"""
@@ -789,7 +792,7 @@ public sealed class EmissionRoundTripTests
             .GetProperty("Query", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
         var query = queryRoot.GetType().GetProperty("Designs")!.GetValue(queryRoot)!;
 
-        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethod("LoadAsync")!;
+        var loadAsync = assembly.GetType("M.DesignQueryLoad")!.GetMethods().Single(m => m.Name == "LoadAsync" && m.GetParameters().Length == 3 && m.GetParameters()[1].ParameterType == typeof(ISurrealTransport));
         var transport = new RecordingLoadTransport("[]");
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
@@ -972,7 +975,7 @@ public sealed class EmissionRoundTripTests
             """;
         var transport = new ScriptedTransport(scriptedResponse);
 
-        var executeMethod = query.GetType().GetMethod("ExecuteAsync")!;
+        var executeMethod = query.GetType().GetMethod("ExecuteAsync", [typeof(ISurrealTransport), typeof(CancellationToken)])!;
         var task = (Task)executeMethod.Invoke(query, [transport, CancellationToken.None])!;
         await task;
         var resultList = (System.Collections.IList)task.GetType().GetProperty("Result")!.GetValue(task)!;

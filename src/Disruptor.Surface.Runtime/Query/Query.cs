@@ -155,6 +155,13 @@ public sealed class Query<T>
     /// rows from <see cref="WithInclude"/> are tracked alongside in an internal session
     /// reachable via the entities' navigation properties.
     /// </summary>
+    public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
+        => ExecuteIntoSessionAsync(new SurrealSession(), new SurrealSdkTransport(db), ct);
+
+    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
+    public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+        => ExecuteIntoSessionAsync(new SurrealSession(), new SurrealSdkTransport(tx), ct);
+
     public Task<IReadOnlyList<T>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
         => ExecuteIntoSessionAsync(new SurrealSession(), transport, ct);
 

@@ -11,11 +11,6 @@ using SdkSurreal = Disruptor.Surreal.Surreal;
 await using var db = await SdkSurreal.ConnectAsync(SurrealOptions.Parse(
     "Url=ws://127.0.0.1:8000;Namespace=project-brain;Database=workspace;User=root;Password=secret"));
 
-// SurrealSdkTransport bridges Disruptor.Surreal to the legacy ISurrealTransport surface
-// the runtime's hydration still consumes. Goes away when hydration migrates to Value
-// (alongside Step 4 of the unpainting plan).
-await using var transport = new SurrealSdkTransport(db);
-
 var workspace = new Workspace();
 
 Console.WriteLine("=== Disruptor.Surface.Sample harness ===");
@@ -25,7 +20,7 @@ Console.WriteLine($"Connected: ws://127.0.0.1:8000  ns=project-brain  db=workspa
 //    broke. Iterate `Workspace.Schema` directly when you want to filter / log /
 //    transact per chunk.
 Console.WriteLine($"Applying schema ({Workspace.Schema.Count} chunks)...");
-await Workspace.ApplySchemaAsync(transport);
+await Workspace.ApplySchemaAsync(db);
 Console.WriteLine("  schema ready.\n");
 
 // ── 2. Seed three Design aggregates. Each commit opens its own server-side
@@ -50,12 +45,12 @@ await ReloadAndPrintReview(reviewId, db);
 // ── 5. Query layer demo — exercises the unified read+load surface end-to-end:
 //    flat predicates, traversal projections, edge queries, filtered LoadAsync,
 //    LoadShapeViolationException on unloaded reads, and FetchAsync top-up.
-await DemoQueryLayer(seededDesignIds, db, transport);
+await DemoQueryLayer(seededDesignIds, db);
 
 // ── 6. Relation traversal demo — the four flavors of [Forward]/[Inverse] relation
 //    includes: forward outgoing single-target, inverse incoming single-target, forward
 //    outgoing multi-target leaf, and cross-aggregate id-only.
-await DemoRelationTraversal(transport);
+await DemoRelationTraversal(db);
 
 return 0;
 
@@ -331,7 +326,7 @@ async Task ReloadAndPrintReview(ReviewId reloadId, SdkSurreal db)
     Console.WriteLine();
 }
 
-async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal sdk, ISurrealTransport db)
+async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal db)
 {
     Console.WriteLine("--- Query layer demo ---");
 
@@ -414,7 +409,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal sdk, ISu
     Console.WriteLine();
 }
 
-static async Task DemoRelationTraversal(ISurrealTransport db)
+static async Task DemoRelationTraversal(SdkSurreal db)
 {
     Console.WriteLine("--- Relation traversal demo ---");
 
