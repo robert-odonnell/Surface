@@ -1,4 +1,4 @@
-using System.Text.Json;
+using Disruptor.Surreal.Values;
 
 namespace Disruptor.Surface.Runtime.Query;
 
@@ -83,5 +83,5 @@ internal sealed class SurfaceProjection<TRow> : ISurfaceProjection<TRow>
         this.materialise = materialise;
     }
 
-    public TRow Materialise(JsonElement row) => materialise(new JsonProjectionRow(row));
+    public TRow Materialise(ObjectValue row) => materialise(new ValueProjectionRow(row));
 }

@@ -84,9 +84,8 @@ internal static class CompositionRootEmitter
               .Append(idType).Append(" rootId, ")
               .Append(CtFqn).AppendLine(" ct = default)");
             sb.Append(memberIndent).AppendLine("{");
-            sb.Append(memberIndent).Append("    await using var transport = new global::Disruptor.Surface.Runtime.SurrealSdkTransport(db);").AppendLine();
             sb.Append(memberIndent).Append("    var ws = new ").Append(SessionFqn).AppendLine("(ReferenceRegistry);");
-            sb.Append(memberIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(ws, transport, rootId, ct);");
+            sb.Append(memberIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(ws, db, rootId, ct);");
             sb.Append(memberIndent).AppendLine("    return ws;");
             sb.Append(memberIndent).AppendLine("}");
             sb.AppendLine();
@@ -101,9 +100,8 @@ internal static class CompositionRootEmitter
               .Append(idType).Append(" rootId, ")
               .Append(CtFqn).AppendLine(" ct = default)");
             sb.Append(memberIndent).AppendLine("{");
-            sb.Append(memberIndent).Append("    await using var transport = new global::Disruptor.Surface.Runtime.SurrealSdkTransport(tx);").AppendLine();
             sb.Append(memberIndent).Append("    var ws = new ").Append(SessionFqn).AppendLine("(ReferenceRegistry);");
-            sb.Append(memberIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(ws, transport, rootId, ct);");
+            sb.Append(memberIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(ws, tx, rootId, ct);");
             sb.Append(memberIndent).AppendLine("    return ws;");
             sb.Append(memberIndent).AppendLine("}");
         }

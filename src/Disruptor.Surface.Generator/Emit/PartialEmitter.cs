@@ -1156,22 +1156,29 @@ internal static class PartialEmitter
             .Append(indent)
             .Append("void ")
             .Append(EntityInterface)
-            .Append('.').Append(methodName).AppendLine($"(global::System.Text.Json.JsonElement json, {HydrationSinkType} sink)")
+            .Append('.').Append(methodName).AppendLine($"(global::Disruptor.Surreal.Values.Value row, {HydrationSinkType} sink)")
             .Append(indent)
             .AppendLine("{");
 
-        // The id anchor is always emitted by EmitIdAnchor, so Hydrate always writes _id
-        // when the row carries an `id` field. {Name}Id wraps a validated string; we pass
-        // the parsed RecordId.Value through directly — DB rows are trusted (we've written
-        // them or they came back from Surreal), so the validator passes.
+        // Hydrate is always invoked with an ObjectValue (a row payload). Coerce once at
+        // the top so HydrationValue helpers (which take ObjectValue) and per-field
+        // accesses can operate on the unwrapped object directly. Anything else is
+        // silently a no-op.
+        builder
+            .Append(indent)
+            .AppendLine("    if (row is not global::Disruptor.Surreal.Values.ObjectValue __obj) return;");
+
+        // The id anchor: {Name}Id wraps a validated string; pass the canonical RecordId
+        // value through directly. DB rows are trusted (we wrote them or Surreal returned
+        // them), so RecordIdFormat.Validate passes.
         var idType = $"global::{(string.IsNullOrEmpty(table.Namespace) ? table.Name : $"{table.Namespace}.{table.Name}")}Id";
         builder
             .Append(indent)
-            .AppendLine("    if (json.TryGetProperty(\"id\", out var __idElem))")
+            .AppendLine("    if (__obj.Object.TryGetValue(\"id\", out var __idVal))")
             .Append(indent)
             .Append("        _id = new ")
             .Append(idType)
-            .AppendLine("(global::Disruptor.Surface.Runtime.HydrationJson.ReadRecordId(__idElem).Value);");
+            .AppendLine("(global::Disruptor.Surface.Runtime.HydrationValue.ReadRecordId(__idVal).Value);");
 
         builder
             .Append(indent)
@@ -1258,7 +1265,7 @@ internal static class PartialEmitter
                 .Append(inner)
                 .Append("    ")
                 .Append(backing)
-                .Append(" = global::Disruptor.Surface.Runtime.HydrationJson.ReadString(json, ")
+                .Append(" = global::Disruptor.Surface.Runtime.HydrationValue.ReadString(__obj, ")
                 .Append(fieldLit)
                 .AppendLine(");");
         }
@@ -1273,9 +1280,9 @@ internal static class PartialEmitter
                 .Append(inner)
                 .Append("    ")
                 .Append(backing)
-                .Append(" = global::Disruptor.Surface.Runtime.HydrationJson.ReadOrDefault<")
+                .Append(" = global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<")
                 .Append(deserialiseAs)
-                .Append(">(json, ")
+                .Append(">(__obj, ")
                 .Append(fieldLit)
                 .AppendLine(");");
         }
@@ -1319,40 +1326,21 @@ internal static class PartialEmitter
 
         var inner = OpenGate(builder, indent, gated, fieldLit);
 
+        // SurrealArray<T> hydration: read the field as a List<T> via HydrationValue's
+        // generic ReadOrDefault (handles ArrayValue → List<T> and per-element record
+        // construction), then wrap in a new SurrealArray<T> bound to __WriteField for
+        // mutation propagation.
         builder.Append(inner)
-            .Append("    if (json.TryGetProperty(")
+            .Append("    var ")
+            .Append(localItems)
+            .Append(" = global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<global::System.Collections.Generic.List<")
+            .Append(elementType)
+            .Append(">>(__obj, ")
             .Append(fieldLit)
-            .Append(", out var ")
-            .Append(localElem)
-            .Append(") && ")
-            .Append(localElem)
-            .AppendLine(".ValueKind == global::System.Text.Json.JsonValueKind.Array)")
+            .AppendLine(");")
             .Append(inner)
-            .AppendLine("    {")
-            .Append(inner)
-            .Append("        var ")
-            .Append(localItems)
-            .Append(" = new global::System.Collections.Generic.List<")
-            .Append(elementType)
-            .Append(">(")
-            .Append(localElem)
-            .AppendLine(".GetArrayLength());")
-            .Append(inner)
-            .Append("        foreach (var __row in ")
-            .Append(localElem)
-            .AppendLine(".EnumerateArray())")
-            .Append(inner)
-            .AppendLine("        {")
-            .Append(inner)
-            .Append("            var __decoded = global::System.Text.Json.JsonSerializer.Deserialize<")
-            .Append(elementType)
-            .AppendLine(">(__row, global::Disruptor.Surface.Runtime.SurrealJson.SerializerOptions);")
-            .Append(inner)
-            .Append("            if (__decoded is not null) ")
-            .Append(localItems)
-            .AppendLine(".Add(__decoded);")
-            .Append(inner)
-            .AppendLine("        }")
+            .Append("    if (").Append(localItems).AppendLine(" is not null)")
+            .Append(inner).AppendLine("    {")
             .Append(inner)
             .Append("        ")
             .Append(backing)
@@ -1363,8 +1351,9 @@ internal static class PartialEmitter
             .Append(", __items => __WriteField(")
             .Append(fieldLit)
             .AppendLine(", __items));")
-            .Append(inner)
-            .AppendLine("    }");
+            .Append(inner).AppendLine("    }");
+
+        _ = localElem; // unused now; reserved name kept for diff-friendliness
 
         CloseGate(builder, indent, gated);
     }
@@ -1376,14 +1365,14 @@ internal static class PartialEmitter
 
         var inner = OpenGate(builder, indent, gated, fieldLit);
 
-        // HydrationJson.HydrateReference<T> handles both the id-only and inline-record
+        // HydrationValue.HydrateReference<T> handles both the id-only and inline-record
         // shapes — for the inline form (`field.*` projection) it constructs and hydrates
         // the referenced entity from the same payload so reads can resolve it.
         builder
             .Append(inner)
-            .Append("    global::Disruptor.Surface.Runtime.HydrationJson.HydrateReference<")
+            .Append("    global::Disruptor.Surface.Runtime.HydrationValue.HydrateReference<")
             .Append(typeArg)
-            .Append(">(json, ")
+            .Append(">(__obj, ")
             .Append(fieldLit)
             .AppendLine($", (({EntityInterface})this).Id, sink);");
 
@@ -1398,7 +1387,7 @@ internal static class PartialEmitter
 
         builder
             .Append(inner)
-            .Append("    if (global::Disruptor.Surface.Runtime.HydrationJson.TryReadRecordId(json, ")
+            .Append("    if (global::Disruptor.Surface.Runtime.HydrationValue.TryReadRecordId(__obj, ")
             .Append(fieldLit)
             .Append(", out var __parent_")
             .Append(ToCamel(p.Name))

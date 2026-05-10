@@ -1,4 +1,4 @@
-using System.Text.Json;
+using Disruptor.Surreal.Values;
 
 namespace Disruptor.Surface.Runtime.Query;
 
@@ -20,5 +20,5 @@ public interface ISurfaceProjection<TRow>
     IReadOnlyList<string> SelectFields { get; }
 
     /// <summary>Materialise a single row into <typeparamref name="TRow"/>.</summary>
-    TRow Materialise(JsonElement row);
+    TRow Materialise(ObjectValue row);
 }

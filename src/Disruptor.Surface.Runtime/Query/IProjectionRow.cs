@@ -1,4 +1,4 @@
-using System.Text.Json;
+using Disruptor.Surreal.Values;
 
 namespace Disruptor.Surface.Runtime.Query;
 
@@ -55,39 +55,22 @@ internal sealed class DiscoveryProjectionRow : IProjectionRow
 }
 
 /// <summary>
-/// Production row backed by a <see cref="JsonElement"/> (one row from a SurrealDB
+/// Production row backed by an <see cref="ObjectValue"/> (one row from a SurrealDB
 /// query response). <see cref="Read{T}"/> looks up the snake-cased field on the
-/// element and deserialises it via <see cref="JsonSerializer"/> with
-/// <see cref="SurrealJson.SerializerOptions"/> — same path the entity hydration uses,
-/// so naming + nullability + numeric-coercion behaviour stays consistent across the
-/// projection and entity surfaces.
+/// object and converts via <see cref="HydrationValue.ReadOrDefault{T}"/> — same path
+/// entity hydration uses, so naming + nullability + numeric coercion stays consistent.
 /// </summary>
-internal sealed class JsonProjectionRow : IProjectionRow
+internal sealed class ValueProjectionRow : IProjectionRow
 {
-    private readonly JsonElement row;
+    private readonly ObjectValue row;
 
-    public JsonProjectionRow(JsonElement row)
+    public ValueProjectionRow(ObjectValue row)
     {
         this.row = row;
     }
 
     public T Read<T>(PropertyExpr<T> property)
-    {
-        if (row.ValueKind != JsonValueKind.Object || !row.TryGetProperty(property.Field, out var element))
-        {
-            // Missing field — return the type's default. Surreal omits nulls from
-            // SELECT projections by default, so an absent field is the canonical
-            // "no value" signal; coercing it to default keeps the materialiser pure.
-            return default!;
-        }
-
-        if (element.ValueKind == JsonValueKind.Null)
-        {
-            return default!;
-        }
-
-        return element.Deserialize<T>(SurrealJson.SerializerOptions)!;
-    }
+        => HydrationValue.ReadOrDefault<T>(row, property.Field);
 }
 
 /// <summary>

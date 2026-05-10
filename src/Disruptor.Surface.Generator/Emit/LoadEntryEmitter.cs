@@ -80,17 +80,14 @@ internal static class LoadEntryEmitter
         sb.Append(indent).Append("public static class ").Append(aggRoot.Name).AppendLine("QueryLoad");
         sb.Append(indent).AppendLine("{");
 
-        // Three overloads: Surreal db (read-mode load), Transaction tx (write-mode
-        // load that sees in-txn writes), and ISurrealTransport (advanced — for tests
-        // and integrations that own their own transport). The Surreal and Transaction
-        // overloads wrap in SurrealSdkTransport; ISurrealTransport dispatches directly.
-        EmitBody(SurrealFqn, "db", ownsTransport: true, $"new {TransportFqn}(db)");
+        // Two overloads: Surreal db (read-mode) and Transaction tx (write-mode load that
+        // sees in-txn writes). Both call PopulateAsync / ExecuteIntoSessionAsync with
+        // the SDK handle directly — no JSON bridge.
+        EmitBody(SurrealFqn, "db");
         sb.AppendLine();
-        EmitBody(TransactionFqn, "tx", ownsTransport: true, $"new {TransportFqn}(tx)");
-        sb.AppendLine();
-        EmitBody("global::Disruptor.Surface.Runtime.ISurrealTransport", "transport", ownsTransport: false, "transport");
+        EmitBody(TransactionFqn, "tx");
 
-        void EmitBody(string paramTypeFqn, string paramName, bool ownsTransport, string transportExpr)
+        void EmitBody(string paramTypeFqn, string paramName)
         {
             sb.Append(memberIndent)
               .AppendLine($"/// <summary>Loads the <c>{aggRoot.Name}</c> aggregate identified by the query's <c>WithId</c> pin. Returns a populated <see cref=\"global::Disruptor.Surface.Runtime.SurrealSession\"/>; concurrent commits surface as <c>SurrealConflictException</c> from the SDK.</summary>");
@@ -108,28 +105,17 @@ internal static class LoadEntryEmitter
             sb.Append(bodyIndent).AppendLine("}");
             sb.AppendLine();
 
-            // For Surreal/Transaction overloads we constructed the SurrealSdkTransport
-            // wrapper, so dispose it. For ISurrealTransport, the caller owns the
-            // lifetime — no `await using`.
-            if (ownsTransport)
-            {
-                sb.Append(bodyIndent).Append("await using var __transport = ").Append(transportExpr).AppendLine(";");
-            }
-            else
-            {
-                sb.Append(bodyIndent).Append("var __transport = ").Append(transportExpr).AppendLine(";");
-            }
             sb.Append(bodyIndent).Append("var session = new ").Append(SessionFqn).Append('(').Append(refRegistryFqn).AppendLine(");");
             sb.AppendLine();
 
             sb.Append(bodyIndent).AppendLine("if (query.Includes.Count > 0)");
             sb.Append(bodyIndent).AppendLine("{");
-            sb.Append(bodyIndent).AppendLine("    await query.ExecuteIntoSessionAsync(session, __transport, ct);");
+            sb.Append(bodyIndent).Append("    await query.ExecuteIntoSessionAsync(session, ").Append(paramName).AppendLine(", ct);");
             sb.Append(bodyIndent).AppendLine("}");
             sb.Append(bodyIndent).AppendLine("else");
             sb.Append(bodyIndent).AppendLine("{");
             sb.Append(bodyIndent).Append("    var rootId = new ").Append(idFqn).AppendLine("(query.PinnedId.Value.Value);");
-            sb.Append(bodyIndent).Append("    await ").Append(loaderFqn).AppendLine(".PopulateAsync(session, __transport, rootId, ct);");
+            sb.Append(bodyIndent).Append("    await ").Append(loaderFqn).Append(".PopulateAsync(session, ").Append(paramName).AppendLine(", rootId, ct);");
             sb.Append(bodyIndent).AppendLine("}");
             sb.AppendLine();
 

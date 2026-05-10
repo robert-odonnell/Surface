@@ -1,5 +1,5 @@
 using System.Text;
-using System.Text.Json;
+using Disruptor.Surreal.Values;
 
 namespace Disruptor.Surface.Runtime.Query;
 
@@ -141,39 +141,39 @@ public sealed class EdgeQuery<TIn, TOut>
     /// undefined results.
     /// </summary>
     public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
-        => ExecuteAsync(new SurrealSdkTransport(db), ct);
+        => ExecuteAsync((sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
 
     /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
     public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
-        => ExecuteAsync(new SurrealSdkTransport(tx), ct);
+        => ExecuteAsync((sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
 
-    public async Task<IReadOnlyList<EdgeRow>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
+    private async Task<IReadOnlyList<EdgeRow>> ExecuteAsync(
+        Func<string, CancellationToken, Task<Disruptor.Surreal.QueryResponse>> queryFn,
+        CancellationToken ct)
     {
         var sql = EdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra, orderClauses, limitCount, startAt);
-        using var doc = await transport.ExecuteAsync(sql, ct);
-        var rs = new SurrealResultSet(doc.RootElement);
-        var rows = rs.ResultAt();
+        var response = await queryFn(sql, ct);
+        var rows = response.Count > 0 ? response.Statements[0].Result : null;
 
         var list = new List<EdgeRow>();
-        switch (rows.ValueKind)
+        if (rows is ArrayValue arr)
         {
-            case JsonValueKind.Array:
-                foreach (var row in rows.EnumerateArray())
-                {
-                    list.Add(ReadEdgeRow(row));
-                }
-                break;
-            case JsonValueKind.Object:
-                list.Add(ReadEdgeRow(rows));
-                break;
+            foreach (var row in arr.Array)
+            {
+                if (row is ObjectValue obj) list.Add(ReadEdgeRow(obj));
+            }
+        }
+        else if (rows is ObjectValue single)
+        {
+            list.Add(ReadEdgeRow(single));
         }
         return list;
     }
 
-    private static EdgeRow ReadEdgeRow(JsonElement row)
+    private static EdgeRow ReadEdgeRow(ObjectValue row)
     {
-        var src = HydrationJson.ReadRecordId(row.GetProperty("in"));
-        var tgt = HydrationJson.ReadRecordId(row.GetProperty("out"));
+        var src = HydrationValue.ReadRecordId(row.Object["in"]);
+        var tgt = HydrationValue.ReadRecordId(row.Object["out"]);
         return new EdgeRow(src, tgt);
     }
 

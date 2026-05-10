@@ -1,4 +1,4 @@
-using System.Text.Json;
+using Disruptor.Surreal.Values;
 
 namespace Disruptor.Surface.Runtime.Query;
 
@@ -156,14 +156,11 @@ public sealed class Query<T>
     /// reachable via the entities' navigation properties.
     /// </summary>
     public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
-        => ExecuteIntoSessionAsync(new SurrealSession(), new SurrealSdkTransport(db), ct);
+        => ExecuteIntoSessionAsync(new SurrealSession(), db, ct);
 
     /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
     public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
-        => ExecuteIntoSessionAsync(new SurrealSession(), new SurrealSdkTransport(tx), ct);
-
-    public Task<IReadOnlyList<T>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
-        => ExecuteIntoSessionAsync(new SurrealSession(), transport, ct);
+        => ExecuteIntoSessionAsync(new SurrealSession(), tx, ct);
 
     /// <summary>
     /// Bind a typed projection to this query. The returned <see cref="ProjectionQuery{T, TRow}"/>
@@ -227,49 +224,55 @@ public sealed class Query<T>
     /// the generated <c>LoadAsync</c> extension.
     /// </para>
     /// </summary>
-    public async Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(
+    public Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(
         SurrealSession session,
-        ISurrealTransport transport,
+        Disruptor.Surreal.Surreal db,
         CancellationToken ct = default)
+        => ExecuteIntoSessionAsync(session, (sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
+
+    /// <inheritdoc cref="ExecuteIntoSessionAsync(SurrealSession, Disruptor.Surreal.Surreal, CancellationToken)"/>
+    public Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(
+        SurrealSession session,
+        Disruptor.Surreal.Transaction tx,
+        CancellationToken ct = default)
+        => ExecuteIntoSessionAsync(session, (sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
+
+    private async Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(
+        SurrealSession session,
+        Func<string, CancellationToken, Task<Disruptor.Surreal.QueryResponse>> queryFn,
+        CancellationToken ct)
     {
         var sql = QueryCompiler.Compile(Table, Filter, PinnedId, Includes, OrderClauses, LimitCount, StartAt);
-        using var doc = await transport.ExecuteAsync(sql, ct);
-        var rs = new SurrealResultSet(doc.RootElement);
-        var rows = rs.ResultAt();
+        var response = await queryFn(sql, ct);
+        var rows = ExtractRows(response);
 
         IHydrationSink sink = session;
 
         var list = new List<T>();
-        switch (rows.ValueKind)
+        if (rows is ArrayValue arr)
         {
-            case JsonValueKind.Array:
-                foreach (var row in rows.EnumerateArray())
-                {
-                    list.Add(HydrateOne(row, sink));
-                }
-                break;
-            case JsonValueKind.Object:
-                list.Add(HydrateOne(rows, sink));
-                break;
-            // Null / Undefined / scalar — no rows.
+            foreach (var row in arr.Array)
+            {
+                if (row is ObjectValue obj) list.Add(HydrateOne(obj, sink));
+            }
+        }
+        else if (rows is ObjectValue single)
+        {
+            list.Add(HydrateOne(single, sink));
         }
 
-        // Walk each root row's nested arrays and feed them through Hydrate as well — so
+        // Walk each root row's nested arrays and feed them through Hydrate as well —
         // children / inline-ref records emitted by the compiler land in the same session
-        // and reads of [Children] / [Reference] resolve correctly. The compiler's chosen
-        // alias names match what the user asked for via WithInclude, so we descend the
-        // include AST to know exactly which keys to look up.
+        // and reads of [Children] / [Reference] resolve correctly.
         for (var i = 0; i < list.Count; i++)
         {
-            var rowJson = rows.ValueKind == JsonValueKind.Array
-                ? GetRowAt(rows, i)
-                : rows;
-            HydrateNested(rowJson, Includes, sink);
+            var rowVal = rows is ArrayValue rowArr ? rowArr.Array[i] : rows!;
+            if (rowVal is ObjectValue rowObj) HydrateNested(rowObj, Includes, sink);
         }
 
         return list;
 
-        static T HydrateOne(JsonElement row, IHydrationSink sink)
+        static T HydrateOne(ObjectValue row, IHydrationSink sink)
         {
             var entity = new T();
             entity.Hydrate(row, sink);
@@ -277,15 +280,11 @@ public sealed class Query<T>
         }
     }
 
-    private static JsonElement GetRowAt(JsonElement array, int index)
+    /// <summary>Pull the rows portion out of a QueryResponse — the first statement's result.</summary>
+    internal static Value? ExtractRows(Disruptor.Surreal.QueryResponse response)
     {
-        var i = 0;
-        foreach (var row in array.EnumerateArray())
-        {
-            if (i == index) return row;
-            i++;
-        }
-        throw new InvalidOperationException($"Row index {index} out of range.");
+        if (response.Count == 0) return null;
+        return response.Statements[0].Result;
     }
 
     /// <summary>
@@ -300,9 +299,9 @@ public sealed class Query<T>
     /// <see cref="HydrationJson.HydrateReference{T}"/>; we still mark the slice loaded
     /// so the read path knows the user asked for it.
     /// </summary>
-    private static void HydrateNested(JsonElement row, IReadOnlyList<IIncludeNode> nodes, IHydrationSink sink)
+    private static void HydrateNested(ObjectValue row, IReadOnlyList<IIncludeNode> nodes, IHydrationSink sink)
     {
-        var hasOwnerId = HydrationJson.TryReadRecordId(row, "id", out var ownerId);
+        var hasOwnerId = HydrationValue.TryReadRecordId(row, "id", out var ownerId);
 
         foreach (var node in nodes)
         {
@@ -320,15 +319,15 @@ public sealed class Query<T>
                     {
                         sink.MarkSliceLoaded(ownerId, sliceKey);
                     }
-                    if (children.Hydrator is null) continue; // ad-hoc node; tests skip nested hydration
-                    if (!row.TryGetProperty(children.ChildTable, out var arr)) continue;
-                    if (arr.ValueKind != JsonValueKind.Array) continue;
+                    if (children.Hydrator is null) continue;
+                    if (!row.Object.TryGetValue(children.ChildTable, out var arrVal)) continue;
+                    if (arrVal is not ArrayValue arr) continue;
 
-                    foreach (var childRow in arr.EnumerateArray())
+                    foreach (var childRow in arr.Array)
                     {
-                        if (childRow.ValueKind != JsonValueKind.Object) continue;
+                        if (childRow is not ObjectValue childObj) continue;
                         children.Hydrator(childRow, sink);
-                        HydrateNested(childRow, children.Nested, sink);
+                        HydrateNested(childObj, children.Nested, sink);
                     }
                     break;
 
@@ -337,18 +336,18 @@ public sealed class Query<T>
                     {
                         sink.MarkSliceLoaded(ownerId, relation.ParentSliceKey);
                     }
-                    if (!row.TryGetProperty(relation.ParentSliceKey, out var relArr)) continue;
-                    if (relArr.ValueKind != JsonValueKind.Array) continue;
+                    if (!row.Object.TryGetValue(relation.ParentSliceKey, out var relVal)) continue;
+                    if (relVal is not ArrayValue relArr) continue;
 
                     if (relation.IdsOnly)
                     {
                         // Cross-aggregate: each item is an edge row { id, in, out }. Feed
                         // the session's edges dict directly — no entity hydration.
-                        foreach (var edgeRow in relArr.EnumerateArray())
+                        foreach (var edgeRow in relArr.Array)
                         {
-                            if (edgeRow.ValueKind != JsonValueKind.Object) continue;
-                            if (!HydrationJson.TryReadRecordId(edgeRow, "in", out var src)) continue;
-                            if (!HydrationJson.TryReadRecordId(edgeRow, "out", out var dst)) continue;
+                            if (edgeRow is not ObjectValue edgeObj) continue;
+                            if (!HydrationValue.TryReadRecordId(edgeObj, "in", out var src)) continue;
+                            if (!HydrationValue.TryReadRecordId(edgeObj, "out", out var dst)) continue;
                             sink.Edge(src, relation.EdgeName, dst);
                         }
                     }
@@ -356,19 +355,16 @@ public sealed class Query<T>
                     {
                         // Within-aggregate: each item is a target row. Hydrate the entity
                         // and synthesize the edge from (parentRowId, edgeName, targetId).
-                        // Direction flips source/target for inverse traversals.
-                        foreach (var targetRow in relArr.EnumerateArray())
+                        foreach (var targetRow in relArr.Array)
                         {
-                            if (targetRow.ValueKind != JsonValueKind.Object) continue;
+                            if (targetRow is not ObjectValue targetObj) continue;
                             relation.Hydrator?.Invoke(targetRow, sink);
                             if (!hasOwnerId) continue;
-                            if (!HydrationJson.TryReadRecordId(targetRow, "id", out var targetId)) continue;
+                            if (!HydrationValue.TryReadRecordId(targetObj, "id", out var targetId)) continue;
                             var src = relation.IsOutgoing ? ownerId : targetId;
                             var dst = relation.IsOutgoing ? targetId : ownerId;
                             sink.Edge(src, relation.EdgeName, dst);
-                            // Recurse — single-target relations may carry their own nested
-                            // includes (multi-target nodes leave Nested empty).
-                            HydrateNested(targetRow, relation.Nested, sink);
+                            HydrateNested(targetObj, relation.Nested, sink);
                         }
                     }
                     break;

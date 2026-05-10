@@ -1,4 +1,4 @@
-using System.Text.Json;
+using Disruptor.Surreal.Values;
 
 namespace Disruptor.Surface.Runtime.Query;
 
@@ -74,31 +74,31 @@ public sealed class ProjectionQuery<T, TRow>
     /// no session.
     /// </summary>
     public Task<IReadOnlyList<TRow>> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
-        => ExecuteAsync(new SurrealSdkTransport(db), ct);
+        => ExecuteAsync((sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
 
     /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
     public Task<IReadOnlyList<TRow>> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
-        => ExecuteAsync(new SurrealSdkTransport(tx), ct);
+        => ExecuteAsync((sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
 
-    public async Task<IReadOnlyList<TRow>> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
+    private async Task<IReadOnlyList<TRow>> ExecuteAsync(
+        Func<string, CancellationToken, Task<Disruptor.Surreal.QueryResponse>> queryFn,
+        CancellationToken ct)
     {
         var sql = Compile();
-        using var doc = await transport.ExecuteAsync(sql, ct);
-        var rs = new SurrealResultSet(doc.RootElement);
-        var rows = rs.ResultAt();
+        var response = await queryFn(sql, ct);
+        var rows = response.Count > 0 ? response.Statements[0].Result : null;
 
         var list = new List<TRow>();
-        switch (rows.ValueKind)
+        if (rows is ArrayValue arr)
         {
-            case JsonValueKind.Array:
-                foreach (var row in rows.EnumerateArray())
-                {
-                    list.Add(Projection.Materialise(row));
-                }
-                break;
-            case JsonValueKind.Object:
-                list.Add(Projection.Materialise(rows));
-                break;
+            foreach (var row in arr.Array)
+            {
+                if (row is ObjectValue obj) list.Add(Projection.Materialise(obj));
+            }
+        }
+        else if (rows is ObjectValue single)
+        {
+            list.Add(Projection.Materialise(single));
         }
         return list;
     }

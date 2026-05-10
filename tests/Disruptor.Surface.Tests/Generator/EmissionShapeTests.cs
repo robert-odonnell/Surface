@@ -187,7 +187,7 @@ public sealed class EmissionShapeTests
         // (constraints' and rules' parent paths back to design — both empty paths here
         // since both are direct children of Design root).
         Assert.Contains("_restricts", loaderSrc);
-        Assert.Contains("HydrateEdges(rootRow.Value, \"_restricts\"", loaderSrc);
+        Assert.Contains("HydrateEdges(rootRow, \"_restricts\"", loaderSrc);
     }
 
     [Fact]
@@ -430,7 +430,7 @@ public sealed class EmissionShapeTests
         // Two-path body: Includes non-empty → ExecuteIntoSessionAsync; empty → legacy
         // aggregate loader. The NIE throw is gone in PR6.
         Assert.Contains("if (query.Includes.Count > 0)", src);
-        Assert.Contains("await query.ExecuteIntoSessionAsync(session, __transport, ct);", src);
+        Assert.Contains("await query.ExecuteIntoSessionAsync(session, db, ct);", src);
         Assert.Contains("global::Disruptor.Surface.Runtime.DesignAggregateLoader.PopulateAsync", src);
         Assert.DoesNotContain("NotImplementedException", src);
     }

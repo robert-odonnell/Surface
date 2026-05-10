@@ -79,42 +79,31 @@ public sealed class HydrationQuery<T>
     /// <see cref="SurrealSession.SaveAsync(IEntity, Disruptor.Surreal.Transaction, CancellationToken)"/>;
     /// concurrent commits surface as <c>SurrealConflictException</c> from the SDK.
     /// </summary>
-    public Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
-        => ExecuteCoreAsync(new SurrealSession(referenceRegistry), new SurrealSdkTransport(db), ct);
+    public async Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
+    {
+        var session = new SurrealSession(referenceRegistry);
+        if (ids.Count == 0) return session;
+        var query = BuildQuery();
+        await query.ExecuteIntoSessionAsync(session, db, ct);
+        return session;
+    }
 
     /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
-    public Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
-        => ExecuteCoreAsync(new SurrealSession(referenceRegistry), new SurrealSdkTransport(tx), ct);
-
-    public Task<SurrealSession> ExecuteAsync(ISurrealTransport transport, CancellationToken ct = default)
-        => ExecuteCoreAsync(new SurrealSession(referenceRegistry), transport, ct);
-
-    private async Task<SurrealSession> ExecuteCoreAsync(SurrealSession session, ISurrealTransport transport, CancellationToken ct)
+    public async Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
     {
-        if (ids.Count == 0)
-        {
-            // No ids = no root rows; the empty session is the right answer. Avoid
-            // emitting `WHERE id IN []` which Surreal accepts but always returns empty
-            // — round-trip with no payload is wasteful.
-            return session;
-        }
-
-        // Reuse Query<T>'s compiler+sink path: hand it an InPredicate over the id
-        // column and the same Includes the user added. Single round-trip, identical
-        // wire SQL to today's `Query<T>.Where(IdIn(...)).WithInclude(...).ExecuteAsync`.
-        var idValues = new object?[ids.Count];
-        for (var i = 0; i < ids.Count; i++)
-        {
-            idValues[i] = ids[i];
-        }
-
-        var query = new Query<T>(table).Where(new InPredicate("id", idValues));
-        for (var i = 0; i < includes.Count; i++)
-        {
-            query = query.WithInclude(includes[i]);
-        }
-
-        await query.ExecuteIntoSessionAsync(session, transport, ct);
+        var session = new SurrealSession(referenceRegistry);
+        if (ids.Count == 0) return session;
+        var query = BuildQuery();
+        await query.ExecuteIntoSessionAsync(session, tx, ct);
         return session;
+    }
+
+    private Query<T> BuildQuery()
+    {
+        var idValues = new object?[ids.Count];
+        for (var i = 0; i < ids.Count; i++) idValues[i] = ids[i];
+        var query = new Query<T>(table).Where(new InPredicate("id", idValues));
+        for (var i = 0; i < includes.Count; i++) query = query.WithInclude(includes[i]);
+        return query;
     }
 }

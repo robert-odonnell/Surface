@@ -1,13 +1,7 @@
 using System.Text;
-using System.Text.Json;
 using Disruptor.Surreal;
 
 namespace Disruptor.Surface.Runtime;
-
-public interface ISurrealTransport : IAsyncDisposable
-{
-    Task<JsonDocument> ExecuteAsync(string sql, CancellationToken ct = default);
-}
 
 /// <summary>
 /// Distinguishes the three flavours of single-field writes the session handles. Lets a
@@ -108,23 +102,18 @@ public interface IEntity
     void Flush(SurrealSession session);
 
     /// <summary>
-    /// Loader-only entry point. Reads the row's JSON payload and writes the entity's
-    /// backing fields plus the corresponding session dicts (parent / reference) via the
-    /// supplied hydration sink. Edges and children are loaded by the per-aggregate loader
-    /// separately.
+    /// Loader-only entry point. Reads the row's <see cref="Disruptor.Surreal.Values.Value"/>
+    /// payload and writes the entity's backing fields plus the corresponding session
+    /// dicts (parent / reference) via the supplied hydration sink. Edges and children
+    /// are loaded by the per-aggregate loader separately. Default-interface no-op for
+    /// hand-written stubs that don't go through hydration.
     /// </summary>
-    void Hydrate(JsonElement json, IHydrationSink sink);
+    void Hydrate(Disruptor.Surreal.Values.Value row, IHydrationSink sink) { }
 
     /// <summary>
-    /// Partial-merge variant of <see cref="Hydrate"/> for the
-    /// <see cref="SurrealSession.FetchAsync{T}"/> path. Same per-field reads, but each
-    /// scalar / parent / reference write is gated on
-    /// <see cref="IHydrationSink.HasPendingWrite"/> — fields the user has already written
-    /// to since the original load are preserved (uncommitted writes win), so a top-up
-    /// Fetch never clobbers in-flight changes. The id, sink.Track call, and inline-record
-    /// hydration recursion (which constructs new sub-entities) are unconditional.
+    /// Partial-merge variant of <see cref="Hydrate"/>. Default no-op for stubs.
     /// </summary>
-    void HydratePartial(JsonElement json, IHydrationSink sink);
+    void HydratePartial(Disruptor.Surreal.Values.Value row, IHydrationSink sink) { }
 
     /// <summary>
     /// SurrealSession calls this immediately before queueing the entity's own DELETE command,
@@ -518,37 +507,38 @@ public sealed class SurrealSession : IHydrationSink
     /// </summary>
     public Task FetchAsync<T>(Query.Query<T> query, Disruptor.Surreal.Surreal db, CancellationToken ct = default)
         where T : class, IEntity, new()
-        => FetchAsync(query, new SurrealSdkTransport(db), ct);
+        => FetchAsync(query, (sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
 
     /// <inheritdoc cref="FetchAsync{T}(Query.Query{T}, Disruptor.Surreal.Surreal, CancellationToken)"/>
     public Task FetchAsync<T>(Query.Query<T> query, Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
         where T : class, IEntity, new()
-        => FetchAsync(query, new SurrealSdkTransport(tx), ct);
+        => FetchAsync(query, (sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
 
-    public async Task FetchAsync<T>(Query.Query<T> query, ISurrealTransport transport, CancellationToken ct = default)
+    private async Task FetchAsync<T>(
+        Query.Query<T> query,
+        Func<string, CancellationToken, Task<Disruptor.Surreal.QueryResponse>> queryFn,
+        CancellationToken ct)
         where T : class, IEntity, new()
     {
         ThrowIfClosed();
 
         var sql = query.Compile();
-        using var doc = await transport.ExecuteAsync(sql, ct);
-        var rs = new SurrealResultSet(doc.RootElement);
-        var rows = rs.ResultAt();
+        var response = await queryFn(sql, ct);
+        var rows = response.Count > 0 ? response.Statements[0].Result : null;
 
         IHydrationSink sink = this;
 
-        switch (rows.ValueKind)
+        if (rows is Disruptor.Surreal.Values.ArrayValue arr)
         {
-            case JsonValueKind.Array:
-                foreach (var row in rows.EnumerateArray())
-                {
-                    HydrateMergingRoot<T>(row, sink, query.Includes);
-                }
-                break;
-            case JsonValueKind.Object:
-                HydrateMergingRoot<T>(rows, sink, query.Includes);
-                break;
-            // Null / Undefined / scalar — nothing to merge.
+            foreach (var row in arr.Array)
+            {
+                if (row is Disruptor.Surreal.Values.ObjectValue obj)
+                    HydrateMergingRoot<T>(obj, sink, query.Includes);
+            }
+        }
+        else if (rows is Disruptor.Surreal.Values.ObjectValue single)
+        {
+            HydrateMergingRoot<T>(single, sink, query.Includes);
         }
     }
 
@@ -557,10 +547,10 @@ public sealed class SurrealSession : IHydrationSink
     /// entities receive HydratePartial (uncommitted writes preserved); new entities get
     /// the full Hydrate via <c>new T()</c>.
     /// </summary>
-    private void HydrateMergingRoot<T>(JsonElement row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes)
+    private void HydrateMergingRoot<T>(Disruptor.Surreal.Values.ObjectValue row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes)
         where T : class, IEntity, new()
     {
-        if (!HydrationJson.TryReadRecordId(row, "id", out var id)) return;
+        if (!HydrationValue.TryReadRecordId(row, "id", out var id)) return;
 
         if (state.Entities.TryGetValue(id, out var existing))
         {
@@ -578,92 +568,79 @@ public sealed class SurrealSession : IHydrationSink
     /// <summary>
     /// Recursively hydrate nested includes for the partial-merge path. Like
     /// <c>Query&lt;T&gt;.HydrateNested</c> but with dedup-on-tracked: child rows whose id
-    /// is already in <see cref="entities"/> get <see cref="IEntity.HydratePartial"/>
-    /// instead of the include's full-hydrate <see cref="IncludeChildrenNode.Hydrator"/>
-    /// callback. Slice marking is identical to the read-mode path.
+    /// is already in the identity map get <see cref="IEntity.HydratePartial"/> instead
+    /// of the include's full-hydrate callback. Slice marking is identical to the
+    /// read-mode path.
     /// </summary>
-    private void HydrateMergingNested(JsonElement row, IReadOnlyList<Query.IIncludeNode> nodes, IHydrationSink sink)
+    private void HydrateMergingNested(Disruptor.Surreal.Values.ObjectValue row, IReadOnlyList<Query.IIncludeNode> nodes, IHydrationSink sink)
     {
-        var hasOwnerId = HydrationJson.TryReadRecordId(row, "id", out var ownerId);
+        var hasOwnerId = HydrationValue.TryReadRecordId(row, "id", out var ownerId);
 
         foreach (var node in nodes)
         {
             switch (node)
             {
                 case Query.IncludeInlineRefNode inlineRef:
-                    if (hasOwnerId)
-                    {
-                        sink.MarkSliceLoaded(ownerId, inlineRef.Field);
-                    }
+                    if (hasOwnerId) sink.MarkSliceLoaded(ownerId, inlineRef.Field);
                     break;
 
                 case Query.IncludeChildrenNode children:
                     if (hasOwnerId && children.ParentSliceKey is { } sliceKey)
-                    {
                         sink.MarkSliceLoaded(ownerId, sliceKey);
-                    }
-                    if (!row.TryGetProperty(children.ChildTable, out var arr)) continue;
-                    if (arr.ValueKind != JsonValueKind.Array) continue;
+                    if (!row.Object.TryGetValue(children.ChildTable, out var arrVal)) continue;
+                    if (arrVal is not Disruptor.Surreal.Values.ArrayValue arr) continue;
 
-                    foreach (var childRow in arr.EnumerateArray())
+                    foreach (var childVal in arr.Array)
                     {
-                        if (childRow.ValueKind != JsonValueKind.Object) continue;
-                        if (HydrationJson.TryReadRecordId(childRow, "id", out var childId)
+                        if (childVal is not Disruptor.Surreal.Values.ObjectValue childObj) continue;
+                        if (HydrationValue.TryReadRecordId(childObj, "id", out var childId)
                             && state.Entities.TryGetValue(childId, out var existingChild))
                         {
-                            existingChild.HydratePartial(childRow, sink);
+                            existingChild.HydratePartial(childObj, sink);
                         }
                         else
                         {
-                            children.Hydrator?.Invoke(childRow, sink);
+                            children.Hydrator?.Invoke(childObj, sink);
                         }
-                        HydrateMergingNested(childRow, children.Nested, sink);
+                        HydrateMergingNested(childObj, children.Nested, sink);
                     }
                     break;
 
                 case Query.IncludeRelationNode relation:
-                    // Mirrors Query<T>.HydrateNested's relation case but with
-                    // dedup-on-tracked: target rows whose id is already in the entities
-                    // dict get HydratePartial (preserving uncommitted writes) instead of
-                    // the relation's full-hydrate callback. Slice marking + edge synth
-                    // are identical to the read-mode path.
-                    if (hasOwnerId)
-                    {
-                        sink.MarkSliceLoaded(ownerId, relation.ParentSliceKey);
-                    }
-                    if (!row.TryGetProperty(relation.ParentSliceKey, out var relArr)) continue;
-                    if (relArr.ValueKind != JsonValueKind.Array) continue;
+                    if (hasOwnerId) sink.MarkSliceLoaded(ownerId, relation.ParentSliceKey);
+                    if (!row.Object.TryGetValue(relation.ParentSliceKey, out var relVal)) continue;
+                    if (relVal is not Disruptor.Surreal.Values.ArrayValue relArr) continue;
 
                     if (relation.IdsOnly)
                     {
-                        foreach (var edgeRow in relArr.EnumerateArray())
+                        foreach (var edgeVal in relArr.Array)
                         {
-                            if (edgeRow.ValueKind != JsonValueKind.Object) continue;
-                            if (!HydrationJson.TryReadRecordId(edgeRow, "in", out var src)) continue;
-                            if (!HydrationJson.TryReadRecordId(edgeRow, "out", out var dst)) continue;
+                            if (edgeVal is not Disruptor.Surreal.Values.ObjectValue edgeObj) continue;
+                            if (!HydrationValue.TryReadRecordId(edgeObj, "in", out var src)) continue;
+                            if (!HydrationValue.TryReadRecordId(edgeObj, "out", out var dst)) continue;
                             sink.Edge(src, relation.EdgeName, dst);
                         }
                     }
                     else
                     {
-                        foreach (var targetRow in relArr.EnumerateArray())
+                        foreach (var targetVal in relArr.Array)
                         {
-                            if (targetRow.ValueKind != JsonValueKind.Object) continue;
-                            if (HydrationJson.TryReadRecordId(targetRow, "id", out var targetId)
+                            if (targetVal is not Disruptor.Surreal.Values.ObjectValue targetObj) continue;
+                            if (HydrationValue.TryReadRecordId(targetObj, "id", out var targetId)
                                 && state.Entities.TryGetValue(targetId, out var existingTarget))
                             {
-                                existingTarget.HydratePartial(targetRow, sink);
+                                existingTarget.HydratePartial(targetObj, sink);
                             }
                             else
                             {
-                                relation.Hydrator?.Invoke(targetRow, sink);
+                                relation.Hydrator?.Invoke(targetObj, sink);
                             }
                             if (!hasOwnerId) continue;
-                            if (!HydrationJson.TryReadRecordId(targetRow, "id", out var tgtForEdge)) continue;
+                            if (!HydrationValue.TryReadRecordId(targetObj, "id", out var tgtForEdge)) continue;
                             var src = relation.IsOutgoing ? ownerId : tgtForEdge;
                             var dst = relation.IsOutgoing ? tgtForEdge : ownerId;
                             sink.Edge(src, relation.EdgeName, dst);
-                            HydrateMergingNested(targetRow, relation.Nested, sink);
+                            HydrateMergingNested(targetObj, relation.Nested, sink);
                         }
                     }
                     break;
