@@ -71,17 +71,11 @@ public static class SurfaceProjection
 /// wraps the row in a <see cref="JsonProjectionRow"/> and runs the lambda again; the
 /// lambda's <see cref="IProjectionRow.Read{T}"/> calls hit the real JSON values.
 /// </summary>
-internal sealed class SurfaceProjection<TRow> : ISurfaceProjection<TRow>
+internal sealed class SurfaceProjection<TRow>(
+    IReadOnlyList<string> selectFields,
+    Func<IProjectionRow, TRow> materialise) : ISurfaceProjection<TRow>
 {
-    private readonly Func<IProjectionRow, TRow> materialise;
-
-    public IReadOnlyList<string> SelectFields { get; }
-
-    public SurfaceProjection(IReadOnlyList<string> selectFields, Func<IProjectionRow, TRow> materialise)
-    {
-        SelectFields = selectFields;
-        this.materialise = materialise;
-    }
+    public IReadOnlyList<string> SelectFields { get; } = selectFields;
 
     public TRow Materialise(ObjectValue row) => materialise(new ValueProjectionRow(row));
 }

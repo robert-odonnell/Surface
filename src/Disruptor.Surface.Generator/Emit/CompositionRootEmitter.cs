@@ -16,7 +16,6 @@ namespace Disruptor.Surface.Generator.Emit;
 internal static class CompositionRootEmitter
 {
     private const string SessionFqn   = "global::Disruptor.Surface.Runtime.SurrealSession";
-    private const string TransportFqn = "global::Disruptor.Surface.Runtime.ISurrealTransport";
     private const string CtFqn        = "global::System.Threading.CancellationToken";
     private const string TaskFqn      = "global::System.Threading.Tasks.Task";
 

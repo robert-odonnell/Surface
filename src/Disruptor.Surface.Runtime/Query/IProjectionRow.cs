@@ -60,15 +60,8 @@ internal sealed class DiscoveryProjectionRow : IProjectionRow
 /// object and converts via <see cref="HydrationValue.ReadOrDefault{T}"/> — same path
 /// entity hydration uses, so naming + nullability + numeric coercion stays consistent.
 /// </summary>
-internal sealed class ValueProjectionRow : IProjectionRow
+internal sealed class ValueProjectionRow(ObjectValue row) : IProjectionRow
 {
-    private readonly ObjectValue row;
-
-    public ValueProjectionRow(ObjectValue row)
-    {
-        this.row = row;
-    }
-
     public T Read<T>(PropertyExpr<T> property)
         => HydrationValue.ReadOrDefault<T>(row, property.Field);
 }
