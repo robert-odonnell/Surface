@@ -154,7 +154,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
         }
     }
 
-    Console.WriteLine($"  tracked: {session.Pending.Records.Count} records, {session.Log.Count} commands");
+    Console.WriteLine($"  tracked: {session.Log.Count} setter writes captured in the log");
     await using var tx = await db.BeginTransactionAsync();
     // Per-entity Save: design's emitted SaveAsync auto-recurses through forward refs
     // (Details), then walks Tracked children (Constraints, Epics, …) recursively, then
@@ -241,7 +241,7 @@ async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SdkSurreal db)
     session.Relate<Concerns>(issue.Id, someConstraintId);
     session.Relate<Revises>(change.Id, targetDesignId);
 
-    Console.WriteLine($"  tracked: {session.Pending.Records.Count} records, {session.Log.Count} commands");
+    Console.WriteLine($"  tracked: {session.Log.Count} setter writes captured in the log");
     await using var tx = await db.BeginTransactionAsync();
     // Per-entity Save: review root recurses through children + new outgoing relations.
     await session.SaveAsync(review, tx);

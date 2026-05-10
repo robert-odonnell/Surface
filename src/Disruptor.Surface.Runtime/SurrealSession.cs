@@ -222,25 +222,25 @@ public sealed class SurrealSession : IHydrationSink
     /// <summary>True after <see cref="CommitAsync"/> or <see cref="Abandon"/> has run; further reads or writes throw.</summary>
     public bool IsClosed => closed;
 
-    // Filled by the loader's HydrateTrack / HydrateEdge — used by PendingState to
-    // distinguish "record (or edge) already in the DB" from "new in this packet". The
-    // commit planner needs that bit to decide whether a Delete actually emits a DELETE
-    // and whether a Create-then-Delete is a no-op (§3.4 / §8.3 of the spec).
+    // Filled by the loader's IHydrationSink.Track / .Edge calls. ISaveContext.IsTracked
+    // checks loadedAtStart to distinguish "in DB" from "constructed in this session";
+    // GetNewOutgoingEdges diff against relationsAtStart to find new edges to RELATE.
     private readonly HashSet<RecordId> loadedAtStart = [];
     private readonly HashSet<(string Kind, RecordId Source, RecordId Target)> relationsAtStart = [];
 
-    /// <summary>Chronological history of recorded model commands. Diagnostic-only — committed via <see cref="Pending"/> + <see cref="CommitPlanner"/>.</summary>
+    // Per-(owner, field) flag set by SetField/UnsetField. Read by HydratePartial
+    // (FetchAsync top-up) to skip overwriting fields the user has mutated since the
+    // initial load.
+    private readonly HashSet<(RecordId Owner, string Field)> pendingFieldWrites = [];
+
+    /// <summary>Chronological history of recorded model commands. Diagnostic-only.</summary>
     public CommandLog Log { get; } = new();
 
-    /// <summary>Indexed write intent. Updated as commands arrive; consumed by <see cref="CommitPlanner.Build"/> at commit time.</summary>
-    public PendingState Pending { get; }
-
     /// <summary>
-    /// The model's reference-field registry — used by the commit planner to resolve
-    /// <c>[Reject]</c> / <c>[Unset]</c> / <c>[Cascade]</c> behavior against incoming
-    /// references. Pass <c>{CompositionRoot}.ReferenceRegistry</c> from your generated
-    /// partial; sessions created without one see no reference metadata, which makes the
-    /// planner permissive on deletes (acceptable for tests, not real consumers).
+    /// The model's reference-field registry. Used today as a placeholder for cascade
+    /// re-anchoring (preview.36) — sessions created with NullReferenceRegistry skip
+    /// reference-aware delete cascade. Pass <c>{CompositionRoot}.ReferenceRegistry</c>
+    /// from your generated partial.
     /// </summary>
     public IReferenceRegistry ReferenceRegistry { get; }
 
@@ -249,7 +249,6 @@ public sealed class SurrealSession : IHydrationSink
     public SurrealSession(IReferenceRegistry referenceRegistry)
     {
         ReferenceRegistry = referenceRegistry;
-        Pending = new PendingState(loadedAtStart, relationsAtStart);
     }
 
     // ──────────────────────────── reads (sync) ───────────────────────────────
@@ -674,9 +673,8 @@ public sealed class SurrealSession : IHydrationSink
         ThrowIfClosed();
         var ownerId = RecordId.From(owner);
         // Entity → cascade-track + use its id; IRecordId → canonicalise; anything else
-        // passes through verbatim (scalars, strings, bools, surreal-array snapshots).
-        // The cascade is what makes nested object initialisers — `new Design { Details =
-        // new Details { … } }` — work without an explicit Track on every fresh ref.
+        // passes through verbatim. Cascade-track is what makes `new Design { Details =
+        // new Details { … } }` work without an explicit Track on every fresh ref.
         object? canonical = value;
         if (value is IEntity entityValue)
         {
@@ -694,13 +692,14 @@ public sealed class SurrealSession : IHydrationSink
                 state.Parents[ownerId] = (RecordId)canonical!;
                 break;
             case FieldKind.Reference:
-                var refId = (RecordId)canonical!;
-                state.References[(ownerId, field)] = refId;
-                Pending.SetReferenceTarget(ownerId, field, refId);
+                state.References[(ownerId, field)] = (RecordId)canonical!;
                 break;
         }
 
-        Record(Command.Set(ownerId, field, canonical));
+        // Per-field write flag: HydratePartial reads this to skip overwriting fields
+        // the user has touched since the initial load.
+        pendingFieldWrites.Add((ownerId, field));
+        Log.Append(Command.Set(ownerId, field, canonical));
     }
 
     /// <summary>Clears a single field. <paramref name="kind"/> picks the local-state dict to evict from.</summary>
@@ -715,11 +714,11 @@ public sealed class SurrealSession : IHydrationSink
                 break;
             case FieldKind.Reference:
                 state.References.Remove((ownerId, field));
-                Pending.UnsetReferenceTarget(ownerId, field);
                 break;
         }
 
-        Record(Command.Unset(ownerId, field));
+        pendingFieldWrites.Add((ownerId, field));
+        Log.Append(Command.Unset(ownerId, field));
     }
 
     /// <summary>
@@ -1076,11 +1075,11 @@ public sealed class SurrealSession : IHydrationSink
         }
     }
 
-    /// <summary>Drop pending writes without flushing. Closes the session — once abandoned, it's done.</summary>
+    /// <summary>Closes the session — once abandoned, it's done.</summary>
     public void Abandon()
     {
         Log.Clear();
-        Pending.Clear();
+        pendingFieldWrites.Clear();
         closed = true;
     }
 
@@ -1143,7 +1142,6 @@ public sealed class SurrealSession : IHydrationSink
     {
         ThrowIfClosed();
         state.References[(ownerId, fieldName)] = refId;
-        Pending.HydrateReference(ownerId, fieldName, refId);
     }
 
     void IHydrationSink.Edge(RecordId source, string edgeKind, RecordId target)
@@ -1165,19 +1163,18 @@ public sealed class SurrealSession : IHydrationSink
     }
 
     bool IHydrationSink.HasPendingWrite(RecordId ownerId, string field)
-        => Pending.HasPendingWrite(ownerId, field);
+        => pendingFieldWrites.Contains((ownerId, field));
 
     // ──────────────────────────── private helpers ───────────────────────────
 
     /// <summary>
-    /// Single chokepoint for "a model command happened" — appends to the chronological
-    /// <see cref="Log"/> AND folds into the indexed <see cref="Pending"/> state. Per
-    /// spec §6 these are separate concerns: log preserves history, pending compacts.
+    /// Append-to-log chokepoint for diagnostic-grade tracing of model commands. Pure
+    /// log; no state updates anymore. Sync write methods record their commands here
+    /// for visibility (and tests) but otherwise update state dicts directly.
     /// </summary>
     private void Record(Command c)
     {
         Log.Append(c);
-        Pending.ApplyCommand(c);
     }
 
     /// <summary>
