@@ -128,6 +128,27 @@ public interface IEntity
             + "If this is a [Table] entity, the generator should emit it. "
             + "If it's a hand-written test stub or non-Table IEntity implementation, "
             + "either implement SaveAsync explicitly or avoid going through SurrealSession.SaveAsync.");
+
+    /// <summary>
+    /// Yields one entry per <c>[Reference]</c> / <c>[Parent]</c> backing field on the
+    /// entity, with the snake-cased SurrealDB field name and the currently-set target id
+    /// (<c>null</c> when the reference is unset). Used by
+    /// <see cref="SurrealSession.DeleteAsync"/>'s pre-flight cascade resolve to find which
+    /// entities point at the delete target. Default-interface empty implementation covers
+    /// entities with no references and hand-written stubs.
+    /// </summary>
+    IEnumerable<(string FieldName, RecordId? Target)> EnumerateReferences() => [];
+
+    /// <summary>
+    /// Writes <paramref name="value"/> into the matching <c>[Reference]</c> backing field
+    /// (snake-cased field name match). Used by <see cref="SurrealSession.DeleteAsync"/>'s
+    /// Unset phase to mirror the substrate's <c>REFERENCE ON DELETE UNSET</c> into the
+    /// in-memory entity, so subsequent reads off the snapshot don't hand back a stale id
+    /// pointing at a cascaded-away record. Generator emits a switch over field names;
+    /// non-nullable <c>[Reference]</c>s are skipped (CG012 already gates Unset on those at
+    /// compile time). Default-interface no-op covers entities with no references.
+    /// </summary>
+    void SetReferenceTo(string fieldName, RecordId? value) { }
 }
 
 /// <summary>
@@ -979,18 +1000,30 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     }
 
     /// <summary>
-    /// Dispatches a DELETE for <paramref name="entity"/> through <paramref name="tx"/>.
-    /// Runs <see cref="IEntity.OnDeleting"/> first so user-side cleanup (child clears,
-    /// reverse references) lands ahead of the entity's own DELETE. Removes the entity
-    /// from the in-memory snapshot (<see cref="CleanupLocalState"/>). The session stays
-    /// open — the app may continue with further SaveAsync / DeleteAsync calls in the
-    /// same transaction.
+    /// Dispatches a DELETE for <paramref name="entity"/> through <paramref name="tx"/>,
+    /// honouring <c>[Reject]</c>/<c>[Cascade]</c>/<c>[Unset]</c>/<c>[Ignore]</c> reference
+    /// semantics by walking the in-memory snapshot first.
     /// <para>
-    /// Cascade planning ([Reject] / [Unset] / [Cascade] semantics on incoming references)
-    /// is deferred to a follow-up — for now, the user is responsible for deleting
-    /// dependents first or accepting whatever the schema's REFERENCE ON DELETE clause
-    /// dictates. Re-anchoring the cascade against the snapshot lands when PendingState
-    /// retires.
+    /// Pre-flight cascade resolve (<see cref="PlanDelete"/>): walks <c>state.Entities</c>
+    /// via <see cref="IEntity.EnumerateReferences"/> + <see cref="IReferenceRegistry"/>,
+    /// classifies every incoming reference, runs three phases — Cascade + Unset to
+    /// fixpoint, then Reject blockers from the steady-state graph. If any blockers
+    /// remain (referencers that point at a doomed record with <see cref="ReferenceDeleteBehavior.Reject"/>
+    /// AND aren't themselves cascading), throws <see cref="CascadeRejectException"/>
+    /// before any wire dispatch.
+    /// </para>
+    /// <para>
+    /// On a clean plan: <see cref="IEntity.OnDeleting"/> fires on every entity in the
+    /// cascade set; Unset actions mirror the substrate's <c>REFERENCE ON DELETE UNSET</c>
+    /// into the in-memory entity backing fields via <see cref="IEntity.SetReferenceTo"/>;
+    /// a single <c>tx.DeleteAsync(target.Id)</c> dispatches — the substrate cascades the
+    /// rest under <c>REFERENCE ON DELETE CASCADE</c>; <see cref="CleanupLocalState"/>
+    /// runs for every cascaded id.
+    /// </para>
+    /// <para>
+    /// The library is the planner; the substrate is the executor. Prediction is
+    /// deterministic from the schema we emitted, so no follow-up read-back is needed to
+    /// reconcile.
     /// </para>
     /// </summary>
     public async Task DeleteAsync(IEntity entity, SurrealTransaction tx, CancellationToken ct = default)
@@ -1000,17 +1033,161 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         ThrowIfClosed();
         try
         {
-            entity.OnDeleting();
-            // Typed SDK dispatch — no SurrealQL string, no formatting.
+            var plan = PlanDelete(entity.Id);
+
+            foreach (var id in plan.CascadeSet)
+            {
+                if (state.Entities.TryGetValue(id, out var e))
+                {
+                    e.OnDeleting();
+                }
+            }
+
+            foreach (var (owner, fieldName) in plan.UnsetActions)
+            {
+                owner.SetReferenceTo(fieldName, null);
+            }
+
+            // Typed SDK dispatch — substrate's REFERENCE ON DELETE clauses cascade the
+            // rest. No per-entity wire calls; the schema does the work.
             await tx.DeleteAsync(entity.Id.ToSdk(), ct).ConfigureAwait(false);
             Record(Command.Delete(entity.Id));
-            CleanupLocalState(entity.Id);
+
+            foreach (var id in plan.CascadeSet)
+            {
+                CleanupLocalState(id);
+            }
         }
         catch
         {
             closed = true;
             throw;
         }
+    }
+
+    /// <summary>
+    /// Cascade-resolve plan: which ids the substrate will delete (directly + cascaded),
+    /// and which (referencer, field-name) pairs need their backing field nulled in the
+    /// in-memory snapshot to mirror the substrate's <c>REFERENCE ON DELETE UNSET</c>.
+    /// </summary>
+    private readonly record struct DeletePlan(
+        IReadOnlyList<RecordId> CascadeSet,
+        IReadOnlyList<(IEntity Owner, string FieldName)> UnsetActions);
+
+    /// <summary>
+    /// Three-phase pre-flight cascade resolve. Phase 1: BFS from <paramref name="target"/>,
+    /// classify every incoming reference by <see cref="ReferenceDeleteBehavior"/>
+    /// (Cascade enqueues; Unset records a pending null-write; Reject collects a blocker;
+    /// Ignore is skipped). Cascade + Unset run to fixpoint. Phase 2: filter rejecters
+    /// whose owner is itself cascading away (transitively) — they don't block. Phase 3:
+    /// throw <see cref="CascadeRejectException"/> if any steady-state blockers remain.
+    /// </summary>
+    private DeletePlan PlanDelete(RecordId target)
+    {
+        var deleted = new HashSet<RecordId> { target };
+        var queue = new Queue<RecordId>();
+        queue.Enqueue(target);
+
+        var unsetActions = new List<(IEntity Owner, string FieldName)>();
+        // Provisional rejecters — re-checked after Cascade reaches fixpoint, since a
+        // rejecter that's itself cascading away doesn't block.
+        var rejecters = new List<(IEntity Owner, string FieldName, RecordId BlockedTarget)>();
+
+        while (queue.TryDequeue(out var current))
+        {
+            var policiesForCurrent = ReferenceRegistry.IncomingReferencesTo(current.Table);
+            if (policiesForCurrent.Count == 0)
+            {
+                continue;
+            }
+
+            foreach (var entity in state.Entities.Values)
+            {
+                var entityTable = entity.Id.Table;
+                ReferenceFieldInfo? hitInfo = null;
+                string? hitField = null;
+
+                foreach (var (fieldName, refTarget) in entity.EnumerateReferences())
+                {
+                    if (refTarget != current)
+                    {
+                        continue;
+                    }
+
+                    // Pick the policy entry that matches this entity's table + field. The
+                    // registry is keyed on the referenced table; we still have to filter
+                    // by the (referencer table, field name) on this end.
+                    foreach (var info in policiesForCurrent)
+                    {
+                        if (info.ReferencerTable == entityTable && info.FieldName == fieldName)
+                        {
+                            hitInfo = info;
+                            hitField = fieldName;
+                            break;
+                        }
+                    }
+
+                    if (hitInfo is null)
+                    {
+                        continue;
+                    }
+
+                    switch (hitInfo.Behavior)
+                    {
+                        case ReferenceDeleteBehavior.Cascade:
+                            if (deleted.Add(entity.Id))
+                            {
+                                queue.Enqueue(entity.Id);
+                            }
+                            break;
+                        case ReferenceDeleteBehavior.Unset:
+                            unsetActions.Add((entity, hitField!));
+                            break;
+                        case ReferenceDeleteBehavior.Reject:
+                            rejecters.Add((entity, hitField!, current));
+                            break;
+                        case ReferenceDeleteBehavior.Ignore:
+                            // Schema declared "leave dangling" — substrate does nothing,
+                            // and we don't need to either.
+                            break;
+                    }
+
+                    hitInfo = null;
+                    hitField = null;
+                }
+            }
+        }
+
+        // Phase 2: filter rejecters whose owner is cascading away — they're going with
+        // the cascade so their reference goes too; not a steady-state blocker.
+        var steadyBlockers = new List<CascadeRejectBlocker>();
+        foreach (var (owner, fieldName, blockedTarget) in rejecters)
+        {
+            if (deleted.Contains(owner.Id))
+            {
+                continue;
+            }
+            steadyBlockers.Add(new CascadeRejectBlocker(owner.Id, fieldName, blockedTarget));
+        }
+
+        // Phase 3: throw if any blockers remain.
+        if (steadyBlockers.Count > 0)
+        {
+            throw new CascadeRejectException(steadyBlockers);
+        }
+
+        // Filter Unset actions whose owner is cascading away — same reason.
+        var liveUnsets = new List<(IEntity Owner, string FieldName)>();
+        foreach (var pair in unsetActions)
+        {
+            if (deleted.Contains(pair.Owner.Id))
+            {
+                continue;
+            }
+            liveUnsets.Add(pair);
+        }
+
+        return new DeletePlan(deleted.ToArray(), liveUnsets);
     }
 
     /// <summary>Closes the session — once abandoned, it's done.</summary>

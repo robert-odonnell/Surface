@@ -342,6 +342,180 @@ public sealed class SurrealSessionTests
     // as the dispatch payload) no longer exists — RelateAsync ships each edge straight
     // through the user's transaction, so the post-load diff has nothing to compute.
 
+    [Fact]
+    public async Task DeleteAsync_CascadeChain_RemovesAllAndFiresOnDeletingForEach()
+    {
+        // a.b_ref → b (Cascade), b.c_ref → c (Cascade). Delete c → b cascades, a cascades.
+        // All three vanish from the snapshot; OnDeleting fires on each. Single tx.DeleteAsync
+        // dispatch — substrate cascades the rest under REFERENCE ON DELETE CASCADE.
+        var registry = new StubReferenceRegistry();
+        registry.Add("b", referencer: "a", field: "b_ref", behavior: ReferenceDeleteBehavior.Cascade);
+        registry.Add("c", referencer: "b", field: "c_ref", behavior: ReferenceDeleteBehavior.Cascade);
+        var session = new SurrealSession(registry);
+
+        var c = new RefStubEntity(new RecordId("c", "c1"));
+        var b = new RefStubEntity(new RecordId("b", "b1"), ("c_ref", c.Id));
+        var a = new RefStubEntity(new RecordId("a", "a1"), ("b_ref", b.Id));
+        ((IHydrationSink)session).Track(c);
+        ((IHydrationSink)session).Track(b);
+        ((IHydrationSink)session).Track(a);
+
+        var db = FakeSurreal.Null();
+        await using var tx = await db.BeginTransactionAsync();
+        await session.DeleteAsync(c, tx);
+
+        Assert.True(c.OnDeletingCalled);
+        Assert.True(b.OnDeletingCalled);
+        Assert.True(a.OnDeletingCalled);
+        Assert.False(session.IsClosed);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_Unset_NullsReferenceInSnapshot()
+    {
+        // a.b_ref → b (Unset). Delete b → a survives, a.b_ref is null in the snapshot
+        // mirroring the substrate's REFERENCE ON DELETE UNSET. Reading a.b_ref via
+        // EnumerateReferences must return (b_ref, null).
+        var registry = new StubReferenceRegistry();
+        registry.Add("b", referencer: "a", field: "b_ref", behavior: ReferenceDeleteBehavior.Unset);
+        var session = new SurrealSession(registry);
+
+        var b = new RefStubEntity(new RecordId("b", "b1"));
+        var a = new RefStubEntity(new RecordId("a", "a1"), ("b_ref", b.Id));
+        ((IHydrationSink)session).Track(b);
+        ((IHydrationSink)session).Track(a);
+
+        var db = FakeSurreal.Null();
+        await using var tx = await db.BeginTransactionAsync();
+        await session.DeleteAsync(b, tx);
+
+        Assert.True(b.OnDeletingCalled);
+        Assert.False(a.OnDeletingCalled);
+        var nowOn = ((IEntity)a).EnumerateReferences().Single();
+        Assert.Equal("b_ref", nowOn.FieldName);
+        Assert.Null(nowOn.Target);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_RejectBlocker_ThrowsCascadeRejectException_BeforeDispatch()
+    {
+        // a.b_ref → b (Reject). Delete b → CascadeRejectException with a as the blocker.
+        // Wire never sees the DELETE: FakeSurreal.Throwing would surface as IOException
+        // if anything reached the connection.
+        var registry = new StubReferenceRegistry();
+        registry.Add("b", referencer: "a", field: "b_ref", behavior: ReferenceDeleteBehavior.Reject);
+        var session = new SurrealSession(registry);
+
+        var b = new RefStubEntity(new RecordId("b", "b1"));
+        var a = new RefStubEntity(new RecordId("a", "a1"), ("b_ref", b.Id));
+        ((IHydrationSink)session).Track(b);
+        ((IHydrationSink)session).Track(a);
+
+        var db = FakeSurreal.Throwing(new IOException("should never reach the wire"));
+        await using var tx = await db.BeginTransactionAsync();
+
+        var ex = await Assert.ThrowsAsync<CascadeRejectException>(() => session.DeleteAsync(b, tx));
+        var blocker = ex.Blockers.Single();
+        Assert.Equal(a.Id, blocker.Referencer);
+        Assert.Equal("b_ref", blocker.FieldName);
+        Assert.Equal(b.Id, blocker.BlockedTarget);
+
+        // Per the one-catcher-many-throwers contract, even a pre-flight throw closes
+        // the session — the catch in DeleteAsync sets closed = true.
+        Assert.True(session.IsClosed);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_MultiPassResolve_RejecterCascadesAwayBeforeBlocking()
+    {
+        // The classic three-phase split: a.c_ref → c (Reject) AND a.d_ref → d (Cascade);
+        // d.c_ref → c (Cascade). Delete c. Phase 1 BFS:
+        //   c → d cascades (via d.c_ref) → enqueue d.
+        //   d → a cascades (via a.d_ref) → enqueue a.
+        //   a's enumeration also yields the c_ref Reject pointing at c — collected as
+        //     a *provisional* rejecter.
+        // Phase 2 filters rejecters whose owner is in the cascade set: a is, so the
+        //   provisional Reject is dropped. No steady-state blockers — no throw.
+        // Single-pass collection would have thrown a false Reject before cascading a.
+        var registry = new StubReferenceRegistry();
+        registry.Add("c", referencer: "a", field: "c_ref", behavior: ReferenceDeleteBehavior.Reject);
+        registry.Add("d", referencer: "a", field: "d_ref", behavior: ReferenceDeleteBehavior.Cascade);
+        registry.Add("c", referencer: "d", field: "c_ref", behavior: ReferenceDeleteBehavior.Cascade);
+        var session = new SurrealSession(registry);
+
+        var c = new RefStubEntity(new RecordId("c", "c1"));
+        var d = new RefStubEntity(new RecordId("d", "d1"), ("c_ref", c.Id));
+        var a = new RefStubEntity(new RecordId("a", "a1"), ("c_ref", c.Id), ("d_ref", d.Id));
+        ((IHydrationSink)session).Track(c);
+        ((IHydrationSink)session).Track(d);
+        ((IHydrationSink)session).Track(a);
+
+        var db = FakeSurreal.Null();
+        await using var tx = await db.BeginTransactionAsync();
+        await session.DeleteAsync(c, tx);
+
+        Assert.True(c.OnDeletingCalled);
+        Assert.True(d.OnDeletingCalled);
+        Assert.True(a.OnDeletingCalled);
+        Assert.False(session.IsClosed);
+    }
+
+    /// <summary>Test-only IReferenceRegistry. Lets each test declare its own (referencedTable → list of referencer fields) mapping without needing a full generated registry.</summary>
+    private sealed class StubReferenceRegistry : IReferenceRegistry
+    {
+        private readonly Dictionary<string, List<ReferenceFieldInfo>> _byReferenced = [];
+
+        public void Add(string referencedTable, string referencer, string field, ReferenceDeleteBehavior behavior, bool isNullable = true)
+        {
+            if (!_byReferenced.TryGetValue(referencedTable, out var list))
+            {
+                list = [];
+                _byReferenced[referencedTable] = list;
+            }
+            list.Add(new ReferenceFieldInfo(referencer, field, referencedTable, behavior, isNullable));
+        }
+
+        public IReadOnlyList<ReferenceFieldInfo> IncomingReferencesTo(string referencedTable)
+            => _byReferenced.TryGetValue(referencedTable, out var refs) ? refs : [];
+    }
+
+    /// <summary>Test-only entity with configurable [Reference] backing fields. Implements EnumerateReferences and SetReferenceTo so the cascade resolve can walk it.</summary>
+    private sealed class RefStubEntity : IEntity
+    {
+        private readonly Dictionary<string, RecordId?> _refs;
+
+        public RefStubEntity(RecordId id, params (string Field, RecordId? Target)[] refs)
+        {
+            Id = id;
+            _refs = refs.ToDictionary(r => r.Field, r => r.Target);
+        }
+
+        public RecordId Id { get; }
+        public SurrealSession? Session { get; private set; }
+        public bool OnDeletingCalled { get; private set; }
+
+        public void Bind(SurrealSession session) => Session = session;
+        public void Initialize(SurrealSession session) { }
+        public void OnDeleting() => OnDeletingCalled = true;
+        public void MarkAllSlicesLoaded(IHydrationSink sink) { }
+
+        IEnumerable<(string FieldName, RecordId? Target)> IEntity.EnumerateReferences()
+        {
+            foreach (var kv in _refs)
+            {
+                yield return (kv.Key, kv.Value);
+            }
+        }
+
+        void IEntity.SetReferenceTo(string fieldName, RecordId? value)
+        {
+            if (_refs.ContainsKey(fieldName))
+            {
+                _refs[fieldName] = value;
+            }
+        }
+    }
+
     /// <summary>Test-only entity that records the order of session-side hook calls.</summary>
     private sealed class StubEntity(RecordId id) : IEntity
     {

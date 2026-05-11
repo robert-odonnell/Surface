@@ -175,6 +175,28 @@ internal static class PartialEmitter
             EmitGetParentId(builder, memberIndent, parentProp);
         }
 
+        // EnumerateReferences + SetReferenceTo — used by DeleteAsync's pre-flight cascade
+        // resolve. EnumerateReferences yields (snake_case field name, current target id)
+        // per [Reference] / [Parent]. SetReferenceTo writes the matching nullable
+        // [Reference] backing field for the Unset phase (non-nullable refs and [Parent]
+        // are skipped since the schema emits REJECT for those). Default-interface
+        // implementations on IEntity cover entities that have neither.
+        var refLikeProps = table.Properties.Where(p =>
+            p.Kinds.HasFlag(PropertyKind.Reference) || p.Kinds.HasFlag(PropertyKind.Parent)).ToList();
+        if (refLikeProps.Count > 0)
+        {
+            builder.AppendLine();
+            EmitEnumerateReferences(builder, memberIndent, refLikeProps);
+
+            var unsetableProps = refLikeProps.Where(p =>
+                p.Kinds.HasFlag(PropertyKind.Reference) && p.Type.IsNullable).ToList();
+            if (unsetableProps.Count > 0)
+            {
+                builder.AppendLine();
+                EmitSetReferenceTo(builder, memberIndent, unsetableProps);
+            }
+        }
+
         // SaveAsync — generator-emitted per-entity Save dispatch. Walks forward dependencies
         // (Reference / Parent) via backing fields, dispatches CREATE/UPDATE-with-CONTENT,
         // recurses into new children, dispatches new outgoing relations.
@@ -988,6 +1010,70 @@ internal static class PartialEmitter
             .Append(".GetParentId() => ")
             .Append(idBacking)
             .AppendLine(";");
+    }
+
+    /// <summary>
+    /// Emits <c>IEnumerable&lt;(string, RecordId?)&gt; IEntity.EnumerateReferences()</c>
+    /// yielding one entry per <c>[Reference]</c> / <c>[Parent]</c> field. Snake-cased
+    /// field name + the <c>_{name}Id</c> backing-field id. Used by
+    /// <see cref="SurrealSession"/>'s pre-flight cascade resolve to find which entities
+    /// in the snapshot point at a delete target.
+    /// </summary>
+    private static void EmitEnumerateReferences(StringBuilder builder, string indent, IReadOnlyList<PropertyModel> refLikeProps)
+    {
+        builder
+            .Append(indent)
+            .Append("global::System.Collections.Generic.IEnumerable<(string FieldName, global::Disruptor.Surface.Runtime.RecordId? Target)> ")
+            .Append(EntityInterface)
+            .AppendLine(".EnumerateReferences()")
+            .Append(indent).AppendLine("{");
+
+        foreach (var p in refLikeProps)
+        {
+            var idBacking = $"_{ToCamel(p.Name)}Id";
+            var fieldNameLit = Quote(SurrealNaming.ToFieldName(p.Name));
+            builder.Append(indent).Append("    yield return (").Append(fieldNameLit).Append(", ").Append(idBacking).AppendLine(");");
+        }
+
+        builder.Append(indent).AppendLine("}");
+    }
+
+    /// <summary>
+    /// Emits <c>void IEntity.SetReferenceTo(string, RecordId?)</c> for entities with at
+    /// least one nullable <c>[Reference]</c>. Switches on the snake-cased field name and
+    /// writes both the id backing field and the cached entity ref (clears the cache so a
+    /// subsequent read doesn't hand back the cascaded-away target). Used by
+    /// <see cref="SurrealSession.DeleteAsync"/>'s Unset phase to mirror the substrate's
+    /// <c>REFERENCE ON DELETE UNSET</c> into the in-memory snapshot. Non-nullable
+    /// references and <c>[Parent]</c>s are NOT in the switch — schema emits REJECT for
+    /// those, so they never enter the Unset phase.
+    /// </summary>
+    private static void EmitSetReferenceTo(StringBuilder builder, string indent, IReadOnlyList<PropertyModel> unsetableProps)
+    {
+        builder
+            .Append(indent)
+            .Append("void ")
+            .Append(EntityInterface)
+            .AppendLine(".SetReferenceTo(string fieldName, global::Disruptor.Surface.Runtime.RecordId? value)")
+            .Append(indent).AppendLine("{")
+            .Append(indent).AppendLine("    switch (fieldName)")
+            .Append(indent).AppendLine("    {");
+
+        foreach (var p in unsetableProps)
+        {
+            var idBacking = $"_{ToCamel(p.Name)}Id";
+            var entityBacking = $"_{ToCamel(p.Name)}";
+            var fieldNameLit = Quote(SurrealNaming.ToFieldName(p.Name));
+            builder
+                .Append(indent).Append("        case ").Append(fieldNameLit).AppendLine(":")
+                .Append(indent).Append("            ").Append(idBacking).AppendLine(" = value;")
+                .Append(indent).Append("            ").Append(entityBacking).AppendLine(" = null;")
+                .Append(indent).AppendLine("            break;");
+        }
+
+        builder
+            .Append(indent).AppendLine("    }")
+            .Append(indent).AppendLine("}");
     }
 
     // ──────────────────────────── SaveAsync emission ────────────────────────
