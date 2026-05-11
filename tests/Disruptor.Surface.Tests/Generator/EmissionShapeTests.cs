@@ -525,6 +525,94 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
+    public void TypedEdgePayload_EmitsRelateAsyncExtensionsClass_WithFourOverloads()
+    {
+        // Per ForwardRelation<TPayload> kind, RelationKindEmitter emits a sibling
+        // {Marker}RelateExtensions static class with four typed RelateAsync overloads
+        // (IRecordId × {with, without explicit edge}, IEntity × {with, without explicit
+        // edge}). The body builds a SurrealObject from TPayload's scalar fields via
+        // ContentValue.Set and dispatches Session.RelateAsyncReplace<TKind>, which
+        // emits INSERT RELATION INTO ... ON DUPLICATE KEY UPDATE — full-replace upsert.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            public sealed class UsesPayload
+            {
+                public string Kind { get; set; } = "";
+                public string FilePath { get; set; } = "";
+                public int Line { get; set; }
+            }
+
+            public sealed class UsesAttribute : ForwardRelation<UsesPayload>;
+            public sealed class UsedByAttribute : InverseRelation<UsesAttribute>;
+
+            [Table, AggregateRoot] public partial class CodeSymbol {
+                [Id] public partial CodeSymbolId Id { get; set; }
+                [Property] public partial string Name { get; set; }
+                [Uses] public partial IReadOnlyCollection<CodeSymbol> UsedSymbols { get; }
+                [UsedBy] public partial IReadOnlyCollection<CodeSymbol> UsersOfMe { get; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, _) = GeneratorHarness.Run(src);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        // Sibling class with the typed RelateAsync surface.
+        Assert.Contains("public static class UsesRelateExtensions", allSrc);
+
+        // IRecordId / IEntity × with/without explicit edge = four overloads. Spot-check
+        // each shape's distinguishing fragment.
+        Assert.Contains("RelateAsync(this global::Disruptor.Surface.Runtime.SurrealSession session, global::Disruptor.Surface.Runtime.IRecordId source, global::Disruptor.Surface.Runtime.IRecordId target, global::M.UsesPayload payload", allSrc);
+        Assert.Contains("RelateAsync(this global::Disruptor.Surface.Runtime.SurrealSession session, global::Disruptor.Surface.Runtime.IRecordId source, global::Disruptor.Surface.Runtime.IRecordId target, global::Disruptor.Surface.Runtime.RecordId edge, global::M.UsesPayload payload", allSrc);
+        Assert.Contains("RelateAsync(this global::Disruptor.Surface.Runtime.SurrealSession session, global::Disruptor.Surface.Runtime.IEntity source, global::Disruptor.Surface.Runtime.IEntity target, global::M.UsesPayload payload", allSrc);
+        Assert.Contains("RelateAsync(this global::Disruptor.Surface.Runtime.SurrealSession session, global::Disruptor.Surface.Runtime.IEntity source, global::Disruptor.Surface.Runtime.IEntity target, global::Disruptor.Surface.Runtime.RecordId edge, global::M.UsesPayload payload", allSrc);
+
+        // Body builds SurrealObject via ContentValue.Set per scalar field — snake-cased
+        // names matching what the schema emitted (kind / file_path / line).
+        Assert.Contains("global::Disruptor.Surface.Runtime.ContentValue.Set(__content, \"kind\", payload.Kind);", allSrc);
+        Assert.Contains("global::Disruptor.Surface.Runtime.ContentValue.Set(__content, \"file_path\", payload.FilePath);", allSrc);
+        Assert.Contains("global::Disruptor.Surface.Runtime.ContentValue.Set(__content, \"line\", payload.Line);", allSrc);
+
+        // Dispatch goes through the public RelateAsyncReplace helper on Session.
+        Assert.Contains("session.RelateAsyncReplace<global::M.Uses>(", allSrc);
+    }
+
+    [Fact]
+    public void BareForwardRelation_EmitsNoRelateAsyncExtensions()
+    {
+        // Regression: bare ForwardRelation (no payload) should NOT get a typed
+        // RelateAsync extension class. The Session.RelateAsync<TKind> overloads (no
+        // payload, payload-via-dictionary) cover the bare case.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            public sealed class CallsAttribute : ForwardRelation;
+            public sealed class CalledByAttribute : InverseRelation<CallsAttribute>;
+
+            [Table, AggregateRoot] public partial class CodeSymbol {
+                [Id] public partial CodeSymbolId Id { get; set; }
+                [Property] public partial string Name { get; set; }
+                [Calls] public partial IReadOnlyCollection<CodeSymbol> Callees { get; }
+                [CalledBy] public partial IReadOnlyCollection<CodeSymbol> Callers { get; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, _) = GeneratorHarness.Run(src);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        Assert.Contains("public sealed class Calls : global::Disruptor.Surface.Runtime.IRelationKind", allSrc);
+        Assert.DoesNotContain("public static class CallsRelateExtensions", allSrc);
+    }
+
+    [Fact]
     public void BareForwardRelation_EmitsNoPayloadFields()
     {
         // Regression: forward relations declared via the non-generic ForwardRelation

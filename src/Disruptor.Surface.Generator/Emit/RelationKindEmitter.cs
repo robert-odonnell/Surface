@@ -66,6 +66,23 @@ internal static class RelationKindEmitter
         sb.Append(memberIndent).Append("private ").Append(markerName).AppendLine("() { }");
         sb.Append(indent).AppendLine("}");
 
+        // Typed-payload RelateAsync extensions: emitted only for ForwardRelation<TPayload>
+        // kinds (PayloadTypeFqn non-null + PayloadFields non-empty). Carries the same
+        // four-overload shape as Session.RelateAsync<TKind> (IRecordId/IEntity × with/
+        // without explicit edge). Each overload builds a SurrealObject from the typed
+        // payload via ContentValue.Set per scalar field, then dispatches via
+        // Session.RelateAsyncReplace<TKind> which emits
+        // INSERT RELATION INTO {edge} $_content ON DUPLICATE KEY UPDATE field1=$_p_field1, …
+        // — a true upsert that replaces every payload field on re-call (because the
+        // generator passed every TPayload field as a key in the SurrealObject).
+        if (kind.Direction == RelationDirection.Forward
+            && !string.IsNullOrEmpty(kind.PayloadTypeFqn)
+            && kind.PayloadFields.Count > 0)
+        {
+            sb.AppendLine();
+            EmitTypedRelateExtensions(sb, indent, memberIndent, markerName, kind);
+        }
+
         if (hasNamespace)
         {
             sb.AppendLine("}");
@@ -75,5 +92,100 @@ internal static class RelationKindEmitter
             ? $"{markerName}.RelationKind.g.cs"
             : $"{kind.Namespace}.{markerName}.RelationKind.g.cs";
         spc.AddSource(hint, SourceText.From(sb.ToString(), Encoding.UTF8));
+    }
+
+    private const string SurrealSessionFqn = "global::Disruptor.Surface.Runtime.SurrealSession";
+    private const string IRecordIdFqn = "global::Disruptor.Surface.Runtime.IRecordId";
+    private const string IEntityFqn = "global::Disruptor.Surface.Runtime.IEntity";
+    private const string RecordIdFqn = "global::Disruptor.Surface.Runtime.RecordId";
+    private const string SurrealTransactionFqn = "global::Disruptor.Surreal.SurrealTransaction";
+    private const string SurrealObjectFqn = "global::Disruptor.Surreal.Values.SurrealObject";
+    private const string ContentValueFqn = "global::Disruptor.Surface.Runtime.ContentValue";
+    private const string TaskFqn = "global::System.Threading.Tasks.Task";
+    private const string CtFqn = "global::System.Threading.CancellationToken";
+
+    private static void EmitTypedRelateExtensions(StringBuilder sb, string indent, string memberIndent, string markerName, RelationKindModel kind)
+    {
+        var className = $"{markerName}RelateExtensions";
+        var markerFqn = $"global::{(string.IsNullOrEmpty(kind.Namespace) ? markerName : $"{kind.Namespace}.{markerName}")}";
+        var payloadFqn = kind.PayloadTypeFqn!;
+
+        sb.Append(indent).AppendLine("/// <summary>");
+        sb.Append(indent).Append("/// Typed-payload <c>RelateAsync</c> extensions for <see cref=\"").Append(markerName).AppendLine("\"/>.");
+        sb.Append(indent).AppendLine("/// Each overload builds a typed-CBOR content payload from the strongly-typed payload");
+        sb.Append(indent).AppendLine("/// object and dispatches an <c>INSERT RELATION INTO … ON DUPLICATE KEY UPDATE …</c>");
+        sb.Append(indent).AppendLine("/// covering every payload field — re-running with a different payload replaces every");
+        sb.Append(indent).AppendLine("/// payload field on the existing edge (full-replace upsert).");
+        sb.Append(indent).AppendLine("/// </summary>");
+        sb.Append(indent).Append("public static class ").AppendLine(className);
+        sb.Append(indent).AppendLine("{");
+
+        // Overload 1: (IRecordId src, IRecordId tgt, TPayload payload, tx, ct)
+        EmitOverload(sb, memberIndent, markerFqn, payloadFqn, kind.PayloadFields, srcType: IRecordIdFqn, tgtType: IRecordIdFqn, withEdge: false);
+        sb.AppendLine();
+
+        // Overload 2: (IRecordId src, IRecordId tgt, RecordId edge, TPayload payload, tx, ct)
+        EmitOverload(sb, memberIndent, markerFqn, payloadFqn, kind.PayloadFields, srcType: IRecordIdFqn, tgtType: IRecordIdFqn, withEdge: true);
+        sb.AppendLine();
+
+        // Overload 3: (IEntity src, IEntity tgt, TPayload payload, tx, ct) — passthrough via .Id
+        EmitEntityPassthrough(sb, memberIndent, markerFqn, payloadFqn, withEdge: false);
+        sb.AppendLine();
+
+        // Overload 4: (IEntity src, IEntity tgt, RecordId edge, TPayload payload, tx, ct) — passthrough
+        EmitEntityPassthrough(sb, memberIndent, markerFqn, payloadFqn, withEdge: true);
+
+        sb.Append(indent).AppendLine("}");
+    }
+
+    private static void EmitOverload(
+        StringBuilder sb, string indent, string markerFqn, string payloadFqn,
+        EquatableArray<EdgePayloadFieldModel> fields,
+        string srcType, string tgtType, bool withEdge)
+    {
+        sb.Append(indent).Append("public static ").Append(TaskFqn).Append(" RelateAsync(this ")
+          .Append(SurrealSessionFqn).Append(" session, ")
+          .Append(srcType).Append(" source, ")
+          .Append(tgtType).Append(" target, ");
+        if (withEdge)
+        {
+            sb.Append(RecordIdFqn).Append(" edge, ");
+        }
+        sb.Append(payloadFqn).Append(" payload, ")
+          .Append(SurrealTransactionFqn).Append(" tx, ")
+          .Append(CtFqn).AppendLine(" ct = default)");
+        sb.Append(indent).AppendLine("{");
+        sb.Append(indent).AppendLine("    global::System.ArgumentNullException.ThrowIfNull(payload);");
+        sb.Append(indent).Append("    var __content = new ").Append(SurrealObjectFqn).AppendLine("();");
+        foreach (var field in fields)
+        {
+            sb.Append(indent).Append("    ").Append(ContentValueFqn).Append(".Set(__content, \"")
+              .Append(field.FieldName).Append("\", payload.").Append(field.Name).AppendLine(");");
+        }
+        sb.Append(indent).Append("    return session.RelateAsyncReplace<").Append(markerFqn).Append(">(source, target, ");
+        sb.Append(withEdge ? "edge" : "explicitEdge: null");
+        sb.AppendLine(", __content, tx, ct);");
+        sb.Append(indent).AppendLine("}");
+    }
+
+    private static void EmitEntityPassthrough(StringBuilder sb, string indent, string markerFqn, string payloadFqn, bool withEdge)
+    {
+        sb.Append(indent).Append("public static ").Append(TaskFqn).Append(" RelateAsync(this ")
+          .Append(SurrealSessionFqn).Append(" session, ")
+          .Append(IEntityFqn).Append(" source, ")
+          .Append(IEntityFqn).Append(" target, ");
+        if (withEdge)
+        {
+            sb.Append(RecordIdFqn).Append(" edge, ");
+        }
+        sb.Append(payloadFqn).Append(" payload, ")
+          .Append(SurrealTransactionFqn).Append(" tx, ")
+          .Append(CtFqn).AppendLine(" ct = default)");
+        sb.Append(indent).Append("    => session.RelateAsync(source.Id, target.Id, ");
+        if (withEdge)
+        {
+            sb.Append("edge, ");
+        }
+        sb.AppendLine("payload, tx, ct);");
     }
 }

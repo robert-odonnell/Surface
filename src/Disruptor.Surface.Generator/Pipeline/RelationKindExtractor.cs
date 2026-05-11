@@ -43,13 +43,15 @@ internal static class RelationKindExtractor
 
         if (TableExtractor.InheritsFromForwardRelation(cls))
         {
+            var (fields, payloadTypeFqn) = ExtractPayloadFields(cls);
             return new RelationKindModel(
                 FullName: fullName,
                 Namespace: ns,
                 Name: cls.Name,
                 Direction: RelationDirection.Forward,
                 PairedForwardFullName: null,
-                PayloadFields: ExtractPayloadFields(cls));
+                PayloadFields: fields,
+                PayloadTypeFqn: payloadTypeFqn);
         }
 
         if (TableExtractor.InheritsFromInverseRelation(cls))
@@ -60,7 +62,8 @@ internal static class RelationKindExtractor
                 Name: cls.Name,
                 Direction: RelationDirection.Inverse,
                 PairedForwardFullName: ResolveInverseForwardArgument(cls),
-                PayloadFields: EquatableArray<EdgePayloadFieldModel>.Empty);
+                PayloadFields: EquatableArray<EdgePayloadFieldModel>.Empty,
+                PayloadTypeFqn: null);
         }
 
         return null;
@@ -73,7 +76,7 @@ internal static class RelationKindExtractor
     /// fields. Empty when the class derives from the non-generic <c>ForwardRelation</c>
     /// (no payload — bare-edge schema, the existing behaviour).
     /// </summary>
-    private static EquatableArray<EdgePayloadFieldModel> ExtractPayloadFields(INamedTypeSymbol cls)
+    private static (EquatableArray<EdgePayloadFieldModel> Fields, string? PayloadTypeFqn) ExtractPayloadFields(INamedTypeSymbol cls)
     {
         for (var current = cls.BaseType; current is not null; current = current.BaseType)
         {
@@ -89,18 +92,19 @@ internal static class RelationKindExtractor
 
             if (current.TypeArguments.Length == 0)
             {
-                return EquatableArray<EdgePayloadFieldModel>.Empty;
+                return (EquatableArray<EdgePayloadFieldModel>.Empty, null);
             }
 
             if (current.TypeArguments[0] is not INamedTypeSymbol payload)
             {
-                return EquatableArray<EdgePayloadFieldModel>.Empty;
+                return (EquatableArray<EdgePayloadFieldModel>.Empty, null);
             }
 
-            return HarvestPayloadFields(payload);
+            var fqn = "global::" + TableExtractor.NormaliseFullName(payload);
+            return (HarvestPayloadFields(payload), fqn);
         }
 
-        return EquatableArray<EdgePayloadFieldModel>.Empty;
+        return (EquatableArray<EdgePayloadFieldModel>.Empty, null);
     }
 
     /// <summary>

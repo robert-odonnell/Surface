@@ -22,6 +22,16 @@ internal static class FakeSurreal
     public static SdkSurreal Null() => new(new RecordingConnection());
 
     /// <summary>
+    /// As <see cref="Null"/>, but also returns the underlying <see cref="RecordingConnection"/>
+    /// so tests can assert on captured RPC method + params (e.g. verify dispatched SQL).
+    /// </summary>
+    public static (SdkSurreal Db, RecordingConnection Connection) NullWithRecording()
+    {
+        var conn = new RecordingConnection();
+        return (new SdkSurreal(conn), conn);
+    }
+
+    /// <summary>
     /// Returns a <see cref="SdkSurreal"/> whose RPCs all throw <paramref name="ex"/>.
     /// "begin" still succeeds (so SaveAsync's failure-mode tests probe the per-RPC
     /// dispatch path, not the txn-open path).

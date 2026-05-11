@@ -29,4 +29,5 @@ public sealed record RelationKindModel(
     string Name,
     RelationDirection Direction,
     string? PairedForwardFullName,
-    EquatableArray<EdgePayloadFieldModel> PayloadFields);
+    EquatableArray<EdgePayloadFieldModel> PayloadFields,
+    string? PayloadTypeFqn);

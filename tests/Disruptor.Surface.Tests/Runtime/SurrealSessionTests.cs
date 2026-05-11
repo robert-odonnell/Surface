@@ -367,6 +367,65 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
+    public async Task RelateAsyncReplace_PayloadFields_DispatchInsertRelationWithUpsertSetClause()
+    {
+        // Generator-emitted typed RelateAsync extension goes through this helper. Asserts
+        // the SQL shape: INSERT RELATION INTO {edge} $_content ON DUPLICATE KEY UPDATE …
+        // with one SET assignment per payload key bound to $_p_{key}. That binding shape
+        // is what makes re-call replace every payload field.
+        var session = new SurrealSession();
+        var src = new RecordId("findings", "f");
+        var tgt = new RecordId("issues", "i");
+        var payload = new global::Disruptor.Surreal.Values.SurrealObject
+        {
+            ["confidence"] = 0.92,
+            ["method"] = "static-analysis",
+        };
+
+        var (db, conn) = FakeSurreal.NullWithRecording();
+        await using var tx = await db.BeginTransactionAsync();
+        await session.RelateAsyncReplace<StubKind>(src, tgt, explicitEdge: null, payload, tx);
+
+        var query = conn.Sent.Single(s => s.Method == "query");
+        var sql = ExtractQuerySql(query.Params);
+
+        Assert.Contains("INSERT RELATION INTO stub_edge $_content", sql);
+        Assert.Contains("ON DUPLICATE KEY UPDATE", sql);
+        Assert.Contains("confidence = $_p_confidence", sql);
+        Assert.Contains("method = $_p_method", sql);
+        Assert.DoesNotContain("INSERT RELATION IGNORE", sql);
+    }
+
+    [Fact]
+    public async Task RelateAsyncReplace_EmptyPayload_FallsBackToInsertRelationIgnore()
+    {
+        // No payload fields means there's nothing to UPDATE on duplicate; the helper
+        // collapses to the IGNORE form (idempotent no-op on duplicate id / unique-index
+        // violation), matching the no-payload RelateAsync<TKind> overload.
+        var session = new SurrealSession();
+        var src = new RecordId("a", "1");
+        var tgt = new RecordId("b", "1");
+
+        var (db, conn) = FakeSurreal.NullWithRecording();
+        await using var tx = await db.BeginTransactionAsync();
+        await session.RelateAsyncReplace<StubKind>(src, tgt, explicitEdge: null, new global::Disruptor.Surreal.Values.SurrealObject(), tx);
+
+        var query = conn.Sent.Single(s => s.Method == "query");
+        var sql = ExtractQuerySql(query.Params);
+
+        Assert.Contains("INSERT RELATION IGNORE INTO stub_edge", sql);
+        Assert.DoesNotContain("ON DUPLICATE KEY UPDATE", sql);
+    }
+
+    private static string ExtractQuerySql(global::Disruptor.Surreal.Values.SurrealValue? @params)
+    {
+        // QueryCommand serialises params as SurrealListValue([sql_string, $vars_object]).
+        var list = Assert.IsType<global::Disruptor.Surreal.Values.SurrealListValue>(@params);
+        var sqlValue = Assert.IsType<global::Disruptor.Surreal.Values.StringSurrealValue>(list.List[0]);
+        return sqlValue.Value;
+    }
+
+    [Fact]
     public async Task SaveAsync_CrossSession_Throws_BeforeAnyWireDispatch()
     {
         // Regression: pre-preview.48 EnsureBoundForSave only bound when entity.Session

@@ -887,6 +887,99 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         where TKind : IRelationKind
         => RelateAsync<TKind>(source.Id, target.Id, edge, payload, tx, ct);
 
+    /// <summary>
+    /// Generator-emission target for typed-payload RelateAsync. The per-kind extension
+    /// methods (emitted alongside the marker class for every <c>ForwardRelation&lt;TPayload&gt;</c>)
+    /// build a <see cref="SurrealObject"/> from the typed payload via
+    /// <see cref="ContentValue"/> and call this helper. The dispatch shape is
+    /// <c>INSERT RELATION INTO {edge} $_content ON DUPLICATE KEY UPDATE field1 = $_p_field1, …</c>:
+    /// re-running the same triple replaces every payload field on the existing edge,
+    /// because the generator passed every TPayload field as a key in
+    /// <paramref name="payload"/>. Empty payloads fall back to <c>INSERT RELATION IGNORE</c>
+    /// (no-op on duplicate, matching the no-payload <see cref="RelateAsync{TKind}(IRecordId, IRecordId, SurrealTransaction, CancellationToken)"/> overload).
+    /// <para>
+    /// Public so emitted code in the consumer assembly can call it. End users normally
+    /// call the typed extension methods directly (e.g. <c>session.RelateAsync(src, tgt, payload, tx)</c>);
+    /// this overload is the dispatch core.
+    /// </para>
+    /// </summary>
+    public async Task RelateAsyncReplace<TKind>(
+        IRecordId source,
+        IRecordId target,
+        RecordId? explicitEdge,
+        SurrealObject payload,
+        SurrealTransaction tx,
+        CancellationToken ct = default) where TKind : IRelationKind
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(payload);
+        ArgumentNullException.ThrowIfNull(tx);
+        ThrowIfClosed();
+        try
+        {
+            var src = RecordId.From(source);
+            var tgt = RecordId.From(target);
+            var edge = (explicitEdge ?? RecordId.Idempotent(TKind.EdgeName)).Resolve(src, tgt);
+            state.Edges.Add((src, TKind.EdgeName, tgt));
+
+            // Build the full content (id, in, out, plus the typed payload's fields). The
+            // generator passed payload as a SurrealObject containing only the user's
+            // payload keys; we wrap in id/in/out before dispatch.
+            var content = new SurrealObject
+            {
+                ["id"] = new SurrealRecordIdValue(edge.ToSdk()),
+                ["in"] = new SurrealRecordIdValue(src.ToSdk()),
+                ["out"] = new SurrealRecordIdValue(tgt.ToSdk()),
+            };
+            foreach (var kv in payload)
+            {
+                content[kv.Key] = kv.Value;
+            }
+
+            var bindings = new SurrealObject { ["_content"] = new SurrealObjectValue(content) };
+
+            string sql;
+            if (payload.Count == 0)
+            {
+                // No payload — IGNORE-shape no-op on duplicate, same as the no-payload
+                // RelateAsync overload. No SET clause to write.
+                sql = $"INSERT RELATION IGNORE INTO {TKind.EdgeName.Identifier()} $_content;";
+            }
+            else
+            {
+                // Bind each payload field separately as $_p_{field} so the SET clause
+                // can reference them. Slight redundancy with $_content (each value is
+                // bound twice), unambiguous and avoids depending on whether SurrealQL
+                // supports $_content.field property access in UPDATE expressions.
+                var setClauses = new StringBuilder();
+                foreach (var kv in payload)
+                {
+                    var bindKey = $"_p_{kv.Key}";
+                    bindings[bindKey] = kv.Value;
+                    if (setClauses.Length > 0)
+                    {
+                        setClauses.Append(", ");
+                    }
+                    setClauses.Append(kv.Key.Identifier()).Append(" = $").Append(bindKey);
+                }
+                sql = $"INSERT RELATION INTO {TKind.EdgeName.Identifier()} $_content ON DUPLICATE KEY UPDATE {setClauses};";
+            }
+
+            var response = await tx.QueryAsync(sql, bindings, ct).ConfigureAwait(false);
+            response.EnsureSuccess();
+            // Diagnostic log carries the edge id; payload values stay typed-CBOR so we
+            // skip the dict copy for the typed path (caller has the original object in
+            // their own scope).
+            Record(Command.Relate(src, edge, tgt));
+        }
+        catch
+        {
+            closed = true;
+            throw;
+        }
+    }
+
     private async Task RelateAsyncCore<TKind>(
         IRecordId source,
         IRecordId target,
