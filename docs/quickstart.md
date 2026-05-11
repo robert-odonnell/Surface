@@ -8,8 +8,8 @@ In a consumer project, reference the runtime package normally and the generator 
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Disruptor.Surface.Runtime" Version="0.1.0-preview.51" />
-  <PackageReference Include="Disruptor.Surface.Generator" Version="0.1.0-preview.51" PrivateAssets="all" />
+  <PackageReference Include="Disruptor.Surface.Runtime" Version="0.1.0-preview.53" />
+  <PackageReference Include="Disruptor.Surface.Generator" Version="0.1.0-preview.53" PrivateAssets="all" />
 </ItemGroup>
 ```
 
