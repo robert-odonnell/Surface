@@ -75,4 +75,41 @@ internal static class EntityEmitterCommon
             .Append(indent).AppendLine("        throw new global::Disruptor.Surface.Runtime.LoadShapeViolationException(__id, sliceKey, fetchHint);")
             .Append(indent).AppendLine("}");
     }
+
+    public static void WriteSessionPlumbing(CodeWriter writer)
+    {
+        writer.Line($"private {SessionType}? _session;");
+        writer.Line();
+
+        writer.Line($"{SessionType}? {EntityInterface}.Session => _session;");
+        writer.Line();
+        using (writer.Block($"void {EntityInterface}.Bind({SessionType} session)"))
+        {
+            writer.Line("if (_session is not null && !global::System.Object.ReferenceEquals(_session, session))");
+            using (writer.Indent())
+            {
+                writer.Line("throw new global::System.InvalidOperationException(\"Entity is already bound to a different session.\");");
+            }
+
+            writer.Line("_session = session;");
+        }
+
+        writer.Line();
+        writer.Line($"protected {SessionType} Session");
+        using (writer.Indent())
+        {
+            writer.Line("=> _session ?? throw new global::System.InvalidOperationException(\"Entity is not bound to a session — call session.Track(...) or hydrate via Sessions.Load*Async first.\");");
+        }
+
+        writer.Line();
+        using (writer.Block("private void __EnsureSliceLoaded(string sliceKey, string fetchHint)"))
+        {
+            writer.Line($"var __id = (({EntityInterface})this).Id;");
+            writer.Line("if (!Session.IsSliceLoaded(__id, sliceKey))");
+            using (writer.Indent())
+            {
+                writer.Line("throw new global::Disruptor.Surface.Runtime.LoadShapeViolationException(__id, sliceKey, fetchHint);");
+            }
+        }
+    }
 }
