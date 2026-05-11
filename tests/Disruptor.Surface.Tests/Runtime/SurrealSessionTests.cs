@@ -343,6 +343,55 @@ public sealed class SurrealSessionTests
     // through the user's transaction, so the post-load diff has nothing to compute.
 
     [Fact]
+    public void Track_CrossSession_Throws_AndDoesNotPolluteIdentityMap()
+    {
+        // Regression: pre-preview.48 Track did `state.Entities[id] = entity` BEFORE
+        // calling entity.Bind(this). If Bind threw because the entity was already bound
+        // to another session, the receiving session's identity map kept the entry — a
+        // dangling reference to an instance whose Session pointed at someone else.
+        // Post-fix: Bind runs first, so the cross-session throw leaves state.Entities
+        // empty.
+        var sessionA = new SurrealSession();
+        var sessionB = new SurrealSession();
+        var entity = new StubEntity(new RecordId("designs", "x"));
+        sessionA.Track(entity);
+
+        Assert.Throws<InvalidOperationException>(() => sessionB.Track(entity));
+
+        // sessionB's identity map must be untouched.
+        Assert.False(sessionB.IsTracked(entity.Id));
+        Assert.Null(sessionB.Get<StubEntity>(entity.Id));
+
+        // The entity is still bound to sessionA.
+        Assert.Same(sessionA, ((IEntity)entity).Session);
+    }
+
+    [Fact]
+    public async Task SaveAsync_CrossSession_Throws_BeforeAnyWireDispatch()
+    {
+        // Regression: pre-preview.48 EnsureBoundForSave only bound when entity.Session
+        // was null — it didn't reject `entity.Session != this`. So SaveAsync would
+        // proceed: the generated body reads .Children / relations through the entity's
+        // *original* session while dispatching writes through this session's tx. Silent
+        // cross-contamination. Post-fix: EnsureBoundForSave throws cleanly before any
+        // wire op.
+        var sessionA = new SurrealSession();
+        var sessionB = new SurrealSession();
+        var entity = sessionA.Track(new StubEntity(new RecordId("designs", "x")));
+
+        // FakeSurreal.Throwing surfaces an IOException if anything reaches the connection.
+        // We expect InvalidOperationException from the cross-session guard, not IOException.
+        var db = FakeSurreal.Throwing(new IOException("should never reach the wire"));
+        await using var tx = await db.BeginTransactionAsync();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => sessionB.SaveAsync(entity, tx));
+
+        // sessionB closes per the fail-closed contract; sessionA stays usable.
+        Assert.True(sessionB.IsClosed);
+        Assert.False(sessionA.IsClosed);
+    }
+
+    [Fact]
     public async Task DeleteAsync_CascadeChain_RemovesAllAndFiresOnDeletingForEach()
     {
         // a.b_ref → b (Cascade), b.c_ref → c (Cascade). Delete c → b cascades, a cascades.
@@ -516,7 +565,7 @@ public sealed class SurrealSessionTests
         }
     }
 
-    /// <summary>Test-only entity that records the order of session-side hook calls.</summary>
+    /// <summary>Test-only entity that records the order of session-side hook calls. Bind matches the generator's emitted shape: throws on a cross-session bind attempt so the cross-session-protection tests exercise the realistic path.</summary>
     private sealed class StubEntity(RecordId id) : IEntity
     {
         public RecordId Id { get; } = id;
@@ -526,6 +575,10 @@ public sealed class SurrealSessionTests
 
         public void Bind(SurrealSession session)
         {
+            if (Session is not null && !ReferenceEquals(Session, session))
+            {
+                throw new InvalidOperationException("Entity is already bound to a different session.");
+            }
             Session = session;
             Calls.Add("Bind");
         }

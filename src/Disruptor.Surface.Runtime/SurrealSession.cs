@@ -414,8 +414,12 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                 $"Cannot track {entity.Id}: a different entity instance is already tracked under this id.");
         }
 
-        state.Entities[entity.Id] = entity;
+        // Bind FIRST — the emitted Bind throws InvalidOperationException if the entity is
+        // already bound to a different session. Doing this before the identity-map assign
+        // means a cross-session attempt fails cleanly without leaving a dangling entry in
+        // state.Entities pointing at an instance whose Session belongs to someone else.
         entity.Bind(this);
+        state.Entities[entity.Id] = entity;
         Record(Command.Create(entity.Id));
         entity.Initialize(this);
         // Fresh-entity Track: the user owns the entire state, so every slice is
@@ -766,6 +770,18 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
             entity.Bind(this);
             entity.Initialize(this);
             entity.MarkAllSlicesLoaded(this);
+        }
+        else if (!ReferenceEquals(entity.Session, this))
+        {
+            // Cross-session SaveAsync: the generated body would dispatch writes through
+            // ctx.Transaction (this session's tx) while reading children/relations through
+            // the entity's *original* session. That split is silent contamination; reject
+            // it cleanly. User can transfer the entity by abandoning its original session
+            // and Tracking on the new one (or restructure their flow to keep one session).
+            throw new InvalidOperationException(
+                $"Cannot SaveAsync entity {entity.Id} through this session: it is bound to a different session. "
+                + "Generated Save bodies read entity-graph slices via the entity's bound Session — "
+                + "dispatching writes through a different session's transaction would split reads and writes.");
         }
     }
 

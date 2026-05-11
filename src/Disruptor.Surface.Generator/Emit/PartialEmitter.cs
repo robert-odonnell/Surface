@@ -1332,8 +1332,16 @@ internal static class PartialEmitter
         var backing = $"_{ToCamel(p.Name)}";
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
         var typeFqn = p.Type.FullyQualifiedName;
+        var nullable = p.Type.IsNullable;
 
-        if (typeFqn is "string" or "global::System.String" or "string?" or "global::System.String?")
+        // Non-nullable string special-cased through ReadString — empty-string fallback
+        // matches the schema's DEFAULT "" clause for a missing/null column.
+        // Nullable string and every nullable value type goes through ReadOrDefault<T>
+        // with the DECLARED type (not stripped), so SurrealNullValue / SurrealNoneValue
+        // round-trip as null instead of being squashed to 0/""/MinValue/false.
+        // Non-nullable value types stay on the stripped path — they have a schema-level
+        // DEFAULT and the convertor's `default` matches it.
+        if (!nullable && typeFqn is "string" or "global::System.String")
         {
             builder
                 .Append(indent)
@@ -1345,7 +1353,10 @@ internal static class PartialEmitter
         }
         else
         {
-            var deserialiseAs = StripNullable(typeFqn);
+            // For nullable: deserialise as the declared type (e.g. ReadOrDefault<int?>)
+            // so default!/null is preserved. For non-nullable value types: strip nullable
+            // (no-op) and use the value-type form; default is the type's natural zero.
+            var deserialiseAs = nullable ? typeFqn : StripNullable(typeFqn);
             builder
                 .Append(indent)
                 .Append("    ")
