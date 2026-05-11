@@ -14,7 +14,7 @@ public partial class Test
 
     [Parent] public partial UserStory UserStory { get; set; }
 
-    [Property] public partial SurrealArray<Fact> Facts { get; }
+    [Property] public partial IReadOnlyList<Fact> Facts { get; }
 
     [Validates] public partial IReadOnlyCollection<AcceptanceCriteria> Validations { get; }
 

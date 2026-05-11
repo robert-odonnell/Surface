@@ -103,9 +103,13 @@ internal static class TableExtractor
     }
 
     /// <summary>
-    /// For a <c>SurrealArray&lt;T&gt;</c> property, walks <c>T</c>'s public instance
-    /// properties so the schema emitter can produce <c>scenarios.*.kind</c>-style
-    /// sub-field DDL. Returns empty for anything else.
+    /// For an inline-element collection property (<c>IReadOnlyList&lt;T&gt;</c> /
+    /// <c>IList&lt;T&gt;</c> / <c>List&lt;T&gt;</c>) where <c>T</c> is a record / POCO with
+    /// public instance properties, walks <c>T</c>'s members so the schema emitter can
+    /// produce <c>scenarios.*.kind</c>-style sub-field DDL and <see cref="PartialEmitter"/>
+    /// can emit typed Hydrate / Save bodies. Returns empty for primitive-element
+    /// collections (<c>IReadOnlyList&lt;int&gt;</c>) and anything that isn't a
+    /// supported collection shape.
     /// </summary>
     private static EquatableArray<InlineMember> ResolveInlineMembers(ITypeSymbol type)
     {
@@ -114,7 +118,9 @@ internal static class TableExtractor
 
         var def = named.ConstructedFrom;
         var ns = def.ContainingNamespace?.ToDisplayString() ?? string.Empty;
-        if (ns != "Disruptor.Surface.Runtime" || def.Name != "SurrealArray") return [];
+        var isCollection = ns == "System.Collections.Generic"
+            && def.Name is "IReadOnlyList" or "IList" or "List";
+        if (!isCollection) return [];
 
         var element = named.TypeArguments[0];
         var members = new List<InlineMember>();

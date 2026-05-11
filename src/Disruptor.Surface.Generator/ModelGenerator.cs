@@ -386,14 +386,17 @@ public sealed class ModelGenerator : IIncrementalGenerator
             // CG025 — [Property] type must map to a SurrealDB scalar. Unmapped types
             // (Uri, TimeSpan, custom value objects, …) compile fine on the CLR side but
             // SchemaEmitter would silently omit the field, so reads/writes would fail at
-            // the database, not at build time. Skip SurrealArray<T> (handled separately
-            // in SchemaEmitter via the array<object> + sub-field path) and skip relation
-            // role overlay (they don't take the scalar-emission code path).
+            // the database, not at build time. Skip element-collection [Property] shapes
+            // (List<T> / IList<T> / IReadOnlyList<T> — handled separately in SchemaEmitter
+            // via the array<object> + sub-field path) and skip relation role overlay
+            // (they don't take the scalar-emission code path).
             foreach (var p in table.Properties)
             {
                 if (!p.Kinds.HasFlag(PropertyKind.Property)) continue;
                 if (p.RelationRole != RelationRole.None) continue;
-                if (p.Type.MetadataName == "Disruptor.Surface.Runtime.SurrealArray`1") continue;
+                if (p.Type.MetadataName is "System.Collections.Generic.IReadOnlyList`1"
+                                        or "System.Collections.Generic.IList`1"
+                                        or "System.Collections.Generic.List`1") continue;
                 if (SchemaEmitter.IsMappableScalar(p.Type)) continue;
                 spc.ReportDiagnostic(Diagnostic.Create(
                     Diagnostics.PropertyTypeNotMappable,

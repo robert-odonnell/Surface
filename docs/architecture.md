@@ -78,7 +78,7 @@ Each `[Table]` maps to a SurrealDB `SCHEMAFULL` table. The generated schema incl
 
 - Table declarations.
 - Scalar field declarations for `[Property]`.
-- `array<object>` fields for `SurrealArray<T>`.
+- `array<object>` fields plus per-member `field.*.member` sub-field DDL for inline element collections (`[Property] partial IReadOnlyList<T>` etc.).
 - `record<target>` fields for `[Reference]`.
 - `option<record<target>>` for nullable references.
 - Parent fields with `REFERENCE ON DELETE REJECT`.

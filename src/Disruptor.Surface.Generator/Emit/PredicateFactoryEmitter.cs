@@ -27,8 +27,12 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class PredicateFactoryEmitter
 {
-    private const string SurrealArrayMetadata = "Disruptor.Surface.Runtime.SurrealArray`1";
     private const string PropertyExprFqn = "global::Disruptor.Surface.Runtime.Query.PropertyExpr";
+
+    private static bool IsElementCollection(TypeRef t) =>
+        t.MetadataName is "System.Collections.Generic.IReadOnlyList`1"
+                       or "System.Collections.Generic.IList`1"
+                       or "System.Collections.Generic.List`1";
 
     public static void Emit(SourceProductionContext spc, TableModel table)
     {
@@ -89,7 +93,7 @@ internal static class PredicateFactoryEmitter
     /// for every property that should appear on the <c>{Name}Q</c> factory. <c>[Id]</c> is
     /// rendered against the SurrealDB built-in <c>id</c> field with the typed
     /// <c>{Name}Id</c> as its C# operand type. Other supported kinds are scalar
-    /// <c>[Property]</c>; <c>SurrealArray&lt;T&gt;</c> / <c>[Reference]</c> / <c>[Parent]</c>
+    /// <c>[Property]</c>; element-collection <c>[Property]</c> / <c>[Reference]</c> / <c>[Parent]</c>
     /// / <c>[Children]</c> / relation properties are skipped.
     /// </summary>
     private static List<(string PropertyName, string SurrealField, string CSharpType)> CollectMembers(TableModel table)
@@ -111,10 +115,10 @@ internal static class PredicateFactoryEmitter
 
             if (!p.Kinds.HasFlag(PropertyKind.Property)) continue;
 
-            // SurrealArray<T> stores as array<object> — equality predicates against the
-            // whole array don't have a sensible SurrealQL shape yet. Skip until we have a
-            // collection-aware predicate (Contains-element, Length, …).
-            if (p.Type.MetadataName == SurrealArrayMetadata) continue;
+            // Element-collection [Property] stores as array<object> — equality predicates
+            // against the whole array don't have a sensible SurrealQL shape yet. Skip
+            // until we have a collection-aware predicate (Contains-element, Length, …).
+            if (IsElementCollection(p.Type)) continue;
 
             // Unmapped scalar types are flagged at validation time (CG025); skip them
             // here too so a `PropertyExpr<Uri>` doesn't show up in IntelliSense even

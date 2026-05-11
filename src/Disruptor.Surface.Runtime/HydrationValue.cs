@@ -1,4 +1,3 @@
-using System.Reflection;
 using Disruptor.Surreal.Values;
 using SdkRecordId = Disruptor.Surreal.Values.SurrealRecordId;
 
@@ -135,9 +134,10 @@ public static class HydrationValue
 
     /// <summary>
     /// Coerce a <see cref="SurrealValue"/> into the target CLR type. Supports primitives,
-    /// nullable wrappers, arrays / List&lt;T&gt;, and POCOs / records. Records are
-    /// constructed by matching SurrealObjectValue fields to public properties via
-    /// snake_case naming (matches the deleted SurrealJson.SerializerOptions convention).
+    /// nullable wrappers, and arrays / List&lt;T&gt; of primitives. Record / POCO
+    /// hydration is no longer routed through here — generator-emitted Hydrate bodies
+    /// build records typed-and-direct (see <see cref="PartialEmitter"/>'s element
+    /// collection handling), eliminating the reflection path that used to live here.
     /// </summary>
     private static object? ConvertValue(SurrealValue v, Type targetType)
     {
@@ -175,8 +175,12 @@ public static class HydrationValue
             case SurrealListValue av:
                 return ConvertArray(av, underlying);
 
-            case SurrealObjectValue ov:
-                return ConvertObject(ov, underlying);
+            case SurrealObjectValue:
+                throw new NotSupportedException(
+                    $"HydrationValue.ReadOrDefault<{targetType.FullName}> received an object payload. "
+                    + "Reflection-based POCO/record hydration was removed under the explicit-Save model. "
+                    + "Use a typed [Property] declaration so the generator emits the per-field reads, "
+                    + "or call HydrationValue.HydrateInlineReference<T> for [Reference, Inline] fields.");
         }
 
         throw new InvalidOperationException(
@@ -217,87 +221,5 @@ public static class HydrationValue
                 list.Add(ConvertValue(av.List[i], elementType));
             return list;
         }
-    }
-
-    /// <summary>
-    /// Construct a POCO / record from a <see cref="SurrealObjectValue"/>. Matches snake_case
-    /// field names to public properties via <c>ToCamelCase</c> reverse, then either
-    /// passes the values to a primary ctor (records) or sets them via property
-    /// initialisers. Preferred constructor: the one whose parameter names match
-    /// existing field-name keys in the SurrealObjectValue.
-    /// </summary>
-    private static object ConvertObject(SurrealObjectValue ov, Type targetType)
-    {
-        // Prefer a constructor with parameters matching object keys (records).
-        var ctors = targetType.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
-            .OrderByDescending(c => c.GetParameters().Length);
-        foreach (var ctor in ctors)
-        {
-            var pars = ctor.GetParameters();
-            if (pars.Length == 0)
-            {
-                // Default ctor — populate via property setters / inits.
-                var obj = ctor.Invoke([]);
-                PopulateProperties(ov, obj, targetType);
-                return obj;
-            }
-
-            // Try to match every parameter to a key. snake_case key ↔ camelCase
-            // parameter name (records use the property name as ctor parameter).
-            var args = new object?[pars.Length];
-            var ok = true;
-            for (var i = 0; i < pars.Length; i++)
-            {
-                var snake = ToSnakeCase(pars[i].Name!);
-                if (ov.Object.TryGetValue(snake, out var fieldValue) && fieldValue is not SurrealNullValue and not SurrealNoneValue)
-                {
-                    args[i] = ConvertValue(fieldValue, pars[i].ParameterType);
-                }
-                else if (pars[i].HasDefaultValue)
-                {
-                    args[i] = pars[i].DefaultValue;
-                }
-                else if (Nullable.GetUnderlyingType(pars[i].ParameterType) is not null
-                         || !pars[i].ParameterType.IsValueType)
-                {
-                    args[i] = null;
-                }
-                else
-                {
-                    ok = false;
-                    break;
-                }
-            }
-            if (ok) return ctor.Invoke(args);
-        }
-        throw new InvalidOperationException(
-            $"Cannot construct {targetType.FullName} from SurrealObjectValue — no matching constructor.");
-    }
-
-    private static void PopulateProperties(SurrealObjectValue ov, object obj, Type targetType)
-    {
-        foreach (var prop in targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
-        {
-            if (!prop.CanWrite) continue;
-            var snake = ToSnakeCase(prop.Name);
-            if (ov.Object.TryGetValue(snake, out var fieldValue)
-                && fieldValue is not SurrealNullValue and not SurrealNoneValue)
-            {
-                prop.SetValue(obj, ConvertValue(fieldValue, prop.PropertyType));
-            }
-        }
-    }
-
-    /// <summary>Trivial PascalCase → snake_case. Mirrors what SurrealNaming.ToFieldName produced.</summary>
-    private static string ToSnakeCase(string name)
-    {
-        var sb = new System.Text.StringBuilder(name.Length + 4);
-        for (var i = 0; i < name.Length; i++)
-        {
-            var c = name[i];
-            if (char.IsUpper(c) && i > 0) sb.Append('_');
-            sb.Append(char.ToLowerInvariant(c));
-        }
-        return sb.ToString();
     }
 }

@@ -133,7 +133,7 @@ catch (SurrealConflictException)
 src/
   Disruptor.Surface.Generator/   — Roslyn source generator (netstandard2.0, analyzer)
   Disruptor.Surface.Runtime/     — runtime core: SurrealSession, IEntity, IRelationKind,
-                                   RecordId, SurrealArray<T>, IReferenceRegistry,
+                                   RecordId, IReferenceRegistry,
                                    HydrationValue, ISaveContext, CommandLog. Two package
                                    deps: Disruptor.Surreal (the SurrealDB SDK — CBOR over
                                    WebSocket) and Ulid. No transport layer of its own.
@@ -187,7 +187,7 @@ grafts the per-aggregate load methods onto it.
 | --------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | `[Id]`                | `partial {Name}Id Id { get; set; }`                       | Lazy-minted typed id; assignable for "construct a handle to a known record"                 |
 | `[Property]`          | `partial T Name { get; set; }`                            | Pure backing field — `get => _name; set => _name = value;`. Get-only also legal. |
-| `[Property]`          | `partial SurrealArray<T> Name { get; }`                   | Inline `array<object>` column with mutation-aware wrapper                                   |
+| `[Property]`          | `partial IReadOnlyList<T> Name { get; }`                  | Inline `array<object>` column. Generator emits `List<T>` backing + `Add{Singular}` / `Remove{Singular}` / `Clear{Plural}` helpers and walks `T`'s public scalar properties at codegen for typed Hydrate / Save (no reflection). |
 | `[Reference]`         | `partial T Name { get; }` (mandatory)                     | Foreign pointer; `OnCreate{Name}` hook auto-mints a fresh target via `new`. Hydrates as id only. |
 | `[Reference]`         | `partial T? Name { get; set; }` (optional)                | Foreign pointer; pure backing-field setter, getter falls back to `Session.Get<T>(id)` when only the id is cached. |
 | `[Reference, Inline]` | either shape above, plus `[Inline]`                       | Owned-sidecar — loader emits `field.*` projection, hydrates the linked record alongside its owner. |
@@ -296,7 +296,7 @@ Functional first cut, post-architectural-pivot to the Disruptor.Surreal SDK. The
 live SurrealDB v3 — schema bootstrap, per-entity Save into an app-owned transaction,
 reload, in-memory reads, query-layer projections, filtered loads with Fetch top-up.
 
-What's exercised end-to-end: scalar properties, `SurrealArray<T>` round-trip, `[Reference]`
+What's exercised end-to-end: scalar properties, inline element collections (`IReadOnlyList<T>` of records) round-trip, `[Reference]`
 mandatory + optional (with inline `field.*` re-hydration), `[Parent]`/`[Children]`,
 `OnCreate` hooks, full aggregate hydration, typed relation kinds (forward + inverse,
 within-aggregate + cross-aggregate), the unified query surface (predicates, traversals,
@@ -319,4 +319,4 @@ wide range of edge cases.
   conventions, the same-pass type-resolution gotcha. Required reading before
   changing anything in `src/Disruptor.Surface.Generator`.
 - Per-class XML doc on the runtime types (`SurrealSession`, `HydrationValue`,
-  `ISaveContext`, `IRelationKind`, `SurrealArray<T>`).
+  `ISaveContext`, `IRelationKind`, `HydrationValue`).

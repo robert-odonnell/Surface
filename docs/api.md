@@ -4,7 +4,7 @@ This is a user-facing API map for the generated surface and the runtime types mo
 
 ## Packages And Namespaces
 
-- `Disruptor.Surface.Runtime`: runtime core — `SurrealSession`, `IEntity`, `IRelationKind`, `RecordId`, `SurrealArray<T>`, `IReferenceRegistry`, `HydrationValue`, `ISaveContext`, `CommandLog`, `LoadShapeViolationException`. Two package dependencies: `Disruptor.Surreal` (the SurrealDB SDK — CBOR over WebSocket) and `Ulid`. There is no in-library transport — connect via the SDK and pass the `Surreal` (read-only) or `Transaction` (write-mode) handle into the generated load methods.
+- `Disruptor.Surface.Runtime`: runtime core — `SurrealSession`, `IEntity`, `IRelationKind`, `RecordId`, `IReferenceRegistry`, `HydrationValue`, `ISaveContext`, `CommandLog`, `LoadShapeViolationException`. Two package dependencies: `Disruptor.Surreal` (the SurrealDB SDK — CBOR over WebSocket) and `Ulid`. There is no in-library transport — connect via the SDK and pass the `Surreal` (read-only) or `Transaction` (write-mode) handle into the generated load methods.
 - `Disruptor.Surface.Generator`: Roslyn source generator. Reference as a private analyzer dependency.
 - `Disruptor.Surface.Annotations`: namespace for modeling attributes (lives inside the runtime package).
 - `Disruptor.Surreal`: the SDK — sibling project at `../surrealdb-dotnet`. Provides `SurrealClient`, `SurrealTransaction`, `SurrealOptions`, `SurrealQueryResponse`, `Disruptor.Surreal.Values.SurrealValue`, and the typed exception hierarchy (`SurrealException`, `SurrealConflictException`, …).
@@ -17,7 +17,7 @@ This is a user-facing API map for the generated surface and the runtime types mo
 | `[AggregateRoot]` | `[Table]` class | Marks the root of a loadable aggregate. Members are discovered through `[Children]`. |
 | `[CompositionRoot]` | partial class | Receives generated `Load{Root}Async`, `Schema`, `ApplySchemaAsync`, `ReferenceRegistry`, `Query`, and `Hydrate` members. Exactly one is allowed per compilation. |
 | `[Id]` | partial property | Optional public typed-id accessor. At most one per table. If omitted, the generator still emits an internal id anchor. |
-| `[Property]` | partial property | Persisted scalar field or `SurrealArray<T>` inline array field. |
+| `[Property]` | partial property | Persisted scalar field, or inline element collection (`IReadOnlyList<T>` / `IList<T>` / `List<T>` of records). |
 | `[Reference]` | partial property | Record reference. Non-nullable get-only references are mandatory; nullable settable references are optional. |
 | `[Inline]` | with `[Reference]` | Hydrates the referenced record inline with its owner. Without `[Inline]`, only the referenced id is hydrated. |
 | `[Parent]` | partial property | Parent link for aggregate hierarchy. |
@@ -49,7 +49,7 @@ Generated property behavior:
 | --- | --- |
 | `[Id] public partial DesignId Id { get; set; }` | Lazy typed id. Setter is allowed only before the entity is bound to a session. |
 | `[Property] public partial string Title { get; set; }` | Synchronous getter/setter. Setter mutates the in-memory snapshot and appends to `CommandLog`. |
-| `[Property] public partial SurrealArray<T> Items { get; }` | Lazy mutation-aware list wrapper. Mutations land in the wrapper's backing list; Save reads it at dispatch time. |
+| `[Property] public partial IReadOnlyList<T> Items { get; }` | Inline element collection. Generator emits `List<T>` backing + `AddItem` / `RemoveItem` / `ClearItems` helpers; walks `T`'s public scalar properties at codegen for typed Hydrate / Save (no reflection). `IList<T>` / `List<T>` are also accepted shapes. |
 | `[Reference] public partial T Ref { get; }` | Mandatory reference. Getter throws if the referenced entity is not available in the session. |
 | `[Reference] public partial T? Ref { get; set; }` | Optional reference. Setting `null` clears the field. |
 | `[Reference, Inline] public partial T? Ref { get; set; }` | Optional owned-sidecar reference that hydrates with the owner. |
@@ -761,18 +761,28 @@ Important members:
 - `TryParse(...)`
 - `IsForTable(table)`
 
-### `SurrealArray<T>`
+### Inline element collections
 
-Use as a `[Property]` for inline ordered arrays:
+Declare an `IReadOnlyList<TElem>`-typed `[Property]` for an inline-record column:
 
 ```csharp
 public sealed record Scenario(string Kind, string Description);
 
 [Property]
-public partial SurrealArray<Scenario> Scenarios { get; }
+public partial IReadOnlyList<Scenario> Scenarios { get; }
 ```
 
-It implements `IList<T>` and `IReadOnlyList<T>`. Mutations such as `Add`, `Remove`, `Clear`, index assignment, and `Move` notify the owning entity so the next `SaveAsync` dispatch sees the updated array as part of the entity's content payload.
+The generator walks `Scenario`'s public scalar properties at codegen time (mirrors how `ForwardRelation<TPayload>` walks payload props — no `[Element]`/`[Field]` annotations needed) and emits:
+
+- `private readonly List<Scenario> _scenarios = new();` backing field
+- `public partial IReadOnlyList<Scenario> Scenarios => _scenarios;`
+- Generator-emitted helpers: `AddScenario(Scenario)`, `RemoveScenario(Scenario)`, `ClearScenarios()`
+- Typed `Hydrate` body (per-element `new Scenario(...)` from `SurrealObjectValue`, no reflection)
+- Typed `SaveAsync` content (per-element `Dictionary<string, object?>` → `SurrealFormatter` renders as `{ kind: ..., description: ... }`)
+
+`IList<TElem>` and `List<TElem>` are also accepted shapes — same backing field, helpers still emitted (the IList/List shapes also let user code mutate the property directly).
+
+Per-element schema lands as `array<object>` plus per-member `field.*.member` sub-field DDL.
 
 ### `HydrationValue`
 
@@ -783,8 +793,9 @@ Value-native helpers used by emitted `IEntity.Hydrate` and the runtime's load/qu
 | `ReadRecordId(SurrealValue v)` | Read any of the wire forms (record-id value / string `"table:value"` / object with `id` field) into a `RecordId`; throws on unrecognised shape. |
 | `TryReadRecordId(SurrealObjectValue parent, string field, out RecordId)` | Try-variant on a named field of a row. |
 | `ReadString(SurrealObjectValue parent, string field, string fallback = "")` | Read a string field with a fallback when missing or not-a-string. |
-| `ReadOrDefault<T>(SurrealObjectValue parent, string field)` | Read a typed field with a default fallback. Reflection-based converter handles primitives, arrays, `List<T>`, and POCOs/records (snake_case property matching). |
-| `HydrateReference<T>(SurrealObjectValue parent, string field, RecordId ownerId, IHydrationSink sink)` | Re-hydrate an inline-expanded `[Reference, Inline]` field — constructs `new T()`, calls `IEntity.Hydrate` against the inlined `field.*` payload. |
+| `ReadOrDefault<T>(SurrealObjectValue parent, string field)` | Read a typed field with a default fallback. Handles primitives, nullable wrappers, and arrays / `List<T>` of primitives. Records / POCOs are no longer routed through here — generator-emitted Hydrate bodies build records typed-and-direct. |
+| `TryReadReferenceId(SurrealObjectValue parent, string field)` | Read a non-Inline `[Reference]` or `[Parent]` id; returns `null` when the field is missing / null / unrecognisable. |
+| `HydrateInlineReference<T>(SurrealObjectValue parent, string field, IHydrationSink sink)` | Construct a `T` from an inline-expanded `[Reference, Inline]` payload and run its `Hydrate`; returns the entity (or null if the field is missing / id-only / already tracked). |
 
 ### `ISaveContext`
 

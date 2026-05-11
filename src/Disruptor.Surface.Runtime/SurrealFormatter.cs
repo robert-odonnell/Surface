@@ -55,6 +55,13 @@ public static partial class SurrealFormatter
         DateTime dt => "d" + dt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture).StringLiteral(),
         DateTimeOffset dto => "d" + dto.ToString("O", CultureInfo.InvariantCulture).StringLiteral(),
         Enum e => e.ToString().StringLiteral(),
+        // IDictionary<string, object?> renders as a SurrealQL object literal `{ k: v, k: v }`.
+        // Used by generator-emitted SaveAsync to put inline-record element collections
+        // into the content dict — each element becomes a Dictionary<string, object?>
+        // which lands here as an inline object. Must come before the IEnumerable case
+        // because Dictionary also implements IEnumerable<KeyValuePair>.
+        IDictionary<string, object?> dict =>
+            "{ " + string.Join(", ", dict.Select(kv => $"{kv.Key.Identifier()}: {kv.Value.RenderSurrealLiteral()}")) + " }",
         IEnumerable e => "[" + string.Join(", ", e.Cast<object?>().Select(RenderSurrealLiteral)) + "]",
         _ => JsonSerializer.Serialize(value, SurrealJson.SerializerOptions),
     };

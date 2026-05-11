@@ -27,7 +27,9 @@ namespace Disruptor.Surface.Generator.Emit;
 ///   <item>Entity table → <c>DEFINE TABLE {pluralised} SCHEMAFULL</c>.</item>
 ///   <item>Scalar <c>[Property]</c> → <c>TYPE string|int|bool|float|decimal|datetime</c>;
 ///         non-nullable types get a <c>DEFAULT</c>, nullable types wrap in <c>option&lt;T&gt;</c>.</item>
-///   <item><c>[Property] SurrealArray&lt;T&gt;</c> → <c>TYPE array&lt;object&gt; DEFAULT []</c>.</item>
+///   <item>Inline-element collection <c>[Property]</c> (<c>IReadOnlyList&lt;T&gt;</c> /
+///         <c>IList&lt;T&gt;</c> / <c>List&lt;T&gt;</c> of records) → <c>TYPE array&lt;object&gt;
+///         DEFAULT []</c> plus per-member <c>field.*.member</c> sub-field DDL.</item>
 ///   <item><c>[Reference]</c> → <c>TYPE record&lt;target&gt;</c> (or <c>option&lt;record&lt;…&gt;&gt;</c> when nullable),
 ///         plus <c>REFERENCE ON DELETE {behavior}</c> matching the <c>[Reject]</c>/<c>[Unset]</c>/
 ///         <c>[Cascade]</c>/<c>[Ignore]</c> attribute.</item>
@@ -39,7 +41,13 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class SchemaEmitter
 {
-    private const string SurrealArrayMetadata = "Disruptor.Surface.Runtime.SurrealArray`1";
+    // Collection shapes recognised as inline-element [Property] columns. Detection
+    // matches what TableExtractor.ResolveInlineMembers walks: any of these three
+    // System.Collections.Generic types with a record/POCO element.
+    private static bool IsElementCollection(TypeRef t) =>
+        t.MetadataName is "System.Collections.Generic.IReadOnlyList`1"
+                       or "System.Collections.Generic.IList`1"
+                       or "System.Collections.Generic.List`1";
 
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
     {
@@ -285,10 +293,10 @@ internal static class SchemaEmitter
 
     private static void EmitPropertyField(StringBuilder sb, string tableName, string fieldName, PropertyModel p)
     {
-        // Inline collection backed by SurrealArray<T> — array<object> at the field, plus
-        // {field}.*.{member} sub-field DDL for each public instance property of T.
+        // Inline-element collection — array<object> at the field, plus {field}.*.{member}
+        // sub-field DDL for each public instance property of the element type.
         // InlineMembers is populated by TableExtractor.ResolveInlineMembers.
-        if (p.Type.MetadataName == SurrealArrayMetadata)
+        if (IsElementCollection(p.Type) && p.InlineMembers.Count > 0)
         {
             sb.Append("DEFINE FIELD IF NOT EXISTS ").Append(fieldName)
               .Append(" ON ").Append(tableName).AppendLine(" TYPE array<object> DEFAULT [];");

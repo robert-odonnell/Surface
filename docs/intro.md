@@ -69,7 +69,7 @@ The main runtime concepts are:
 - `Disruptor.Surreal.SurrealTransaction`: the SDK's transaction handle. **The library never owns one** — the app calls `db.BeginTransactionAsync()`, passes the handle into Save/Delete/Relate/Unrelate (and into write-mode loads), and calls `tx.CommitAsync()` (or `tx.CancelAsync()`) when its logical unit of work is done.
 - `SurrealSession`: snapshot-isolated entity store. Sync reads, sync writes (mutate the in-memory snapshot), async dispatch (`SaveAsync` / `DeleteAsync` / `RelateAsync` / `UnrelateAsync`) against an open `Transaction`.
 - `RecordId` and generated `{Entity}Id` types: strongly typed SurrealDB record ids.
-- `SurrealArray<T>`: mutation-aware inline array field wrapper.
+- Inline element collections via `[Property] partial IReadOnlyList<T> { get; }` — generator emits `List<T>` backing + Add/Remove/Clear helpers, walks `T`'s public scalar properties at codegen for typed Hydrate / Save.
 - `IRelationKind` markers: emitted per forward relation attribute, carry the SurrealDB edge name as a `static abstract` property — no string edge names in user code.
 
 The usual flow is:

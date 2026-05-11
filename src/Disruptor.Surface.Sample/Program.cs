@@ -37,7 +37,7 @@ for (var i = 0; i < 10; i++)
 //    Finding.Cites → Observation, DesignChange.Resolves → Issue).
 var reviewId = await SeedAndCommitReview(seededDesignIds[2], db);
 
-// ── 4. Reload + print. Verifies the round-trip including SurrealArray<Scenario>
+// ── 4. Reload + print. Verifies the round-trip including inline element collections
 //    contents, cross-aggregate id collections, and within-aggregate edge reads.
 await ReloadAndPrintDesign(seededDesignIds[2], db);
 await ReloadAndPrintReview(reviewId, db);
@@ -135,10 +135,10 @@ async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
 
                     for (var m = 0; m < 3; m++)
                     {
-                        ac.Scenarios.Add(new Scenario(
+                        ac.AddScenario(new Scenario(
                             $"scenario.{m}.kind",
                             $"scenario.{m}.description: {text}"));
-                        test.Facts.Add(new Fact(
+                        test.AddFact(new Fact(
                             $"fact.{m}.kind",
                             $"fact.{m}.arrange",
                             $"fact.{m}.act",
@@ -269,7 +269,7 @@ async Task ReloadAndPrintDesign(DesignId designId, SdkSurreal db)
         Console.WriteLine($"    - {c.Id}  '{c.Description}'");
     }
 
-    // SurrealArray round-trip — drill into one acceptance criteria, print scenario count
+    // Inline element-collection round-trip — drill into one acceptance criteria, print scenario count
     // and the first scenario's content. Tests survive the same way via Test.Facts.
     var firstAc = design.Epics
         .SelectMany(e => session.QueryChildren<Feature>(e, "features"))

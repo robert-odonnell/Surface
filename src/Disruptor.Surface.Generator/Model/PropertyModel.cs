@@ -51,9 +51,11 @@ public enum RelationRole
 /// relation attribute — e.g. <c>[RestrictedBy] IReadOnlyCollection&lt;Constraint&gt; Restrictions { get; }</c>.
 /// </param>
 /// <param name="InlineMembers">
-/// For <c>[Property] SurrealArray&lt;T&gt;</c> properties, the public instance members of
-/// <c>T</c>. Drives <c>scenarios.*.kind</c>-style sub-field DDL in the schema emitter.
-/// Empty for any other kind of property.
+/// For inline-element collection <c>[Property]</c> shapes (<c>IReadOnlyList&lt;T&gt;</c> /
+/// <c>IList&lt;T&gt;</c> / <c>List&lt;T&gt;</c> of records / POCOs), the public instance
+/// members of <c>T</c>. Drives <c>scenarios.*.kind</c>-style sub-field DDL in the schema
+/// emitter and the typed per-element Hydrate / Save in the partial emitter. Empty for
+/// any other kind of property (including primitive-element collections).
 /// </param>
 public sealed record PropertyModel(
     string Name,

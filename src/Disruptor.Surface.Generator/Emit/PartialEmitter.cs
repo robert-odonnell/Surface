@@ -37,7 +37,16 @@ internal static class PartialEmitter
     private const string SessionType = "global::Disruptor.Surface.Runtime.SurrealSession";
     private const string EntityInterface = "global::Disruptor.Surface.Runtime.IEntity";
     private const string HydrationSinkType = "global::Disruptor.Surface.Runtime.IHydrationSink";
-    private const string SurrealArrayMetadata = "Disruptor.Surface.Runtime.SurrealArray`1";
+
+    /// <summary>
+    /// True when <paramref name="t"/> is one of the recognised element-collection shapes
+    /// for a <c>[Property]</c> column: <c>IReadOnlyList&lt;T&gt;</c>, <c>IList&lt;T&gt;</c>,
+    /// or <c>List&lt;T&gt;</c>. Detection mirrors <c>TableExtractor.ResolveInlineMembers</c>.
+    /// </summary>
+    private static bool IsElementCollection(TypeRef t) =>
+        t.MetadataName is "System.Collections.Generic.IReadOnlyList`1"
+                       or "System.Collections.Generic.IList`1"
+                       or "System.Collections.Generic.List`1";
 
     public static void Emit(SourceProductionContext spc, TableModel table, ModelGraph graph)
     {
@@ -281,16 +290,17 @@ internal static class PartialEmitter
     }
 
     /// <summary>
-    /// <c>[Property]</c> on a property declaration: scalar columns go through
-    /// <see cref="EmitDataProperty"/> (pure backing field); inline ordered collections
-    /// typed as <c>SurrealArray&lt;T&gt;</c> go through
-    /// <see cref="EmitSurrealArrayProperty"/> (lazy-cached wrapper).
+    /// <c>[Property]</c> on a property declaration: element-collection columns
+    /// (<c>IReadOnlyList&lt;T&gt;</c> / <c>IList&lt;T&gt;</c> / <c>List&lt;T&gt;</c>) go
+    /// through <see cref="EmitElementCollectionProperty"/> (backing <c>List&lt;T&gt;</c>
+    /// + Add/Remove/Clear helpers); plain scalars go through
+    /// <see cref="EmitDataProperty"/> (pure backing field).
     /// </summary>
     private static void EmitPropertyMember(StringBuilder builder, string indent, PropertyModel p)
     {
-        if (p.Type.MetadataName == SurrealArrayMetadata)
+        if (IsElementCollection(p.Type))
         {
-            EmitSurrealArrayProperty(builder, indent, p);
+            EmitElementCollectionProperty(builder, indent, p);
         }
         else
         {
@@ -299,36 +309,42 @@ internal static class PartialEmitter
     }
 
     /// <summary>
-    /// Emits the lazy-cached wrapper for an inline <c>array&lt;object&gt;</c> column.
-    /// The wrapper is created once per entity instance (never replaced), so any reference
-    /// the user holds stays valid as the list mutates. The writer callback is a no-op —
-    /// SurrealArray's mutations land directly in the entity's backing field, and Save
-    /// reads the wrapper at dispatch time.
+    /// Emits the backing <c>List&lt;T&gt;</c> field plus the partial property surface and
+    /// generator-emitted Add/Remove/Clear helpers for an element-collection column.
+    /// The user-facing property is exposed exactly as declared
+    /// (<c>IReadOnlyList&lt;T&gt;</c>, <c>IList&lt;T&gt;</c>, or <c>List&lt;T&gt;</c>);
+    /// the helpers mirror IList semantics regardless so the user has a uniform mutation
+    /// surface even when the property is read-only.
     /// </summary>
-    private static void EmitSurrealArrayProperty(StringBuilder builder, string indent, PropertyModel p)
+    private static void EmitElementCollectionProperty(StringBuilder builder, string indent, PropertyModel p)
     {
         var declaredType = p.Type.FullyQualifiedName;
+        var elementType = p.Type.TypeArguments.Count > 0
+            ? p.Type.TypeArguments[0].FullyQualifiedName
+            : "object";
+        var listType = $"global::System.Collections.Generic.List<{elementType}>";
         var access = FormatAccessibility(p.DeclaredAccessibility);
         var backing = $"_{ToCamel(p.Name)}";
+        var singular = SurrealNaming.Singularize(p.Name);
 
         builder
             .Append(indent)
-            .Append("private ")
-            .Append(declaredType)
-            .Append("? ")
-            .Append(backing)
-            .AppendLine(";")
+            .Append("private readonly ").Append(listType).Append(' ').Append(backing).AppendLine(" = new();")
             .Append(indent)
-            .Append(access)
-            .Append(" partial ")
-            .Append(declaredType)
-            .Append(' ')
-            .Append(p.Name)
-            .Append(" => ")
-            .Append(backing)
-            .Append(" ??= new ")
-            .Append(declaredType)
-            .AppendLine("(null, _ => { });");
+            .Append(access).Append(" partial ").Append(declaredType).Append(' ').Append(p.Name)
+            .Append(" => ").Append(backing).AppendLine(";")
+            .Append(indent)
+            .Append("/// <summary>Append a <typeparamref name=\"T\"/> to <see cref=\"").Append(p.Name).AppendLine("\"/>.</summary>")
+            .Append(indent)
+            .Append("public void Add").Append(singular).Append('(').Append(elementType).Append(" item) => ").Append(backing).AppendLine(".Add(item);")
+            .Append(indent)
+            .Append("/// <summary>Remove the first matching <typeparamref name=\"T\"/> from <see cref=\"").Append(p.Name).AppendLine("\"/>; returns true on a hit.</summary>")
+            .Append(indent)
+            .Append("public bool Remove").Append(singular).Append('(').Append(elementType).Append(" item) => ").Append(backing).AppendLine(".Remove(item);")
+            .Append(indent)
+            .Append("/// <summary>Empty <see cref=\"").Append(p.Name).AppendLine("\"/>.</summary>")
+            .Append(indent)
+            .Append("public void Clear").Append(p.Name).Append("() => ").Append(backing).AppendLine(".Clear();");
     }
 
     /// <summary>
@@ -1009,22 +1025,51 @@ internal static class PartialEmitter
         }
         if (hasForwardDeps) builder.AppendLine();
 
-        // Content dictionary: [Property] (scalar, non-SurrealArray) + [Reference] + [Parent] FKs.
+        // Content dictionary: [Property] (scalar + element collections) + [Reference] + [Parent] FKs.
         builder.Append(indent).AppendLine("    var __content = new global::System.Collections.Generic.Dictionary<string, object?>();");
         foreach (var p in table.Properties)
         {
             if (p.Kinds.HasFlag(PropertyKind.Id)) continue;
             if (p.Kinds.HasFlag(PropertyKind.Children)) continue;
             if (p.RelationRole != RelationRole.None) continue;
-            // SurrealArray<T> serialization is non-trivial; defer.
-            if (p.Kinds.HasFlag(PropertyKind.Property) && p.Type.MetadataName == SurrealArrayMetadata) continue;
 
             var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
 
             if (p.Kinds.HasFlag(PropertyKind.Property))
             {
                 var backing = $"_{ToCamel(p.Name)}";
-                builder.Append(indent).Append("    __content[").Append(fieldLit).Append("] = ").Append(backing).AppendLine(";");
+                if (IsElementCollection(p.Type) && p.InlineMembers.Count > 0)
+                {
+                    // Element collection of records — typed per-element SurrealObject
+                    // construction, no reflection. SurrealFormatter renders the resulting
+                    // List<Dictionary<string, object?>> as a SurrealQL array of object literals.
+                    var elemLocal = $"__elem_{ToCamel(p.Name)}";
+                    builder
+                        .Append(indent).Append("    {")
+                        .AppendLine()
+                        .Append(indent).Append("        var __list = new global::System.Collections.Generic.List<global::System.Collections.Generic.Dictionary<string, object?>>(")
+                        .Append(backing).AppendLine(".Count);")
+                        .Append(indent).Append("        foreach (var ").Append(elemLocal).Append(" in ").Append(backing).AppendLine(")")
+                        .Append(indent).AppendLine("        {")
+                        .Append(indent).AppendLine("            __list.Add(new global::System.Collections.Generic.Dictionary<string, object?>");
+                    builder.Append(indent).AppendLine("            {");
+                    foreach (var im in p.InlineMembers)
+                    {
+                        var subLit = Quote(SurrealNaming.ToFieldName(im.Name));
+                        builder.Append(indent).Append("                [").Append(subLit).Append("] = ").Append(elemLocal).Append('.').Append(im.Name).AppendLine(",");
+                    }
+                    builder.Append(indent).AppendLine("            });");
+                    builder.Append(indent).AppendLine("        }");
+                    builder.Append(indent).Append("        __content[").Append(fieldLit).AppendLine("] = __list;");
+                    builder.Append(indent).AppendLine("    }");
+                }
+                else
+                {
+                    // Scalar [Property] (or primitive-element collection) — pass the
+                    // backing field directly. SurrealFormatter handles primitives,
+                    // primitive arrays, and IEnumerable.
+                    builder.Append(indent).Append("    __content[").Append(fieldLit).Append("] = ").Append(backing).AppendLine(";");
+                }
             }
             else if (p.Kinds.HasFlag(PropertyKind.Reference) || p.Kinds.HasFlag(PropertyKind.Parent))
             {
@@ -1114,7 +1159,7 @@ internal static class PartialEmitter
     ///         target was already tracked (multi-owner inline expansion).</item>
     ///   <item>[Parent] → reads the id, sets <c>_{name}Id</c>.</item>
     /// </list>
-    /// <c>SurrealArray</c> properties hydrate inline via <see cref="EmitHydrateSurrealArray"/>.
+    /// Element-collection properties hydrate inline via <see cref="EmitHydrateElementCollection"/>.
     /// Forward/inverse relation edges are loaded separately by the per-aggregate loader.
     /// </summary>
     private static void EmitHydrate(StringBuilder builder, string indent, TableModel table)
@@ -1148,9 +1193,9 @@ internal static class PartialEmitter
         {
             if (p.Kinds.HasFlag(PropertyKind.Property))
             {
-                if (p.Type.MetadataName == SurrealArrayMetadata)
+                if (IsElementCollection(p.Type) && p.InlineMembers.Count > 0)
                 {
-                    EmitHydrateSurrealArray(builder, indent, p);
+                    EmitHydrateElementCollection(builder, indent, p);
                 }
                 else
                 {
@@ -1176,7 +1221,7 @@ internal static class PartialEmitter
     }
 
     /// <summary>
-    /// Hydrates any non-<c>SurrealArray</c> [Property] — scalar (int, bool, DateTime, …),
+    /// Hydrates any non-element-collection [Property] — scalar (int, bool, DateTime, …),
     /// array (<c>int[]</c>, <c>List&lt;T&gt;</c>), record. String stays special-cased
     /// so its empty-string fallback matches the schema's <c>DEFAULT ""</c> clause without
     /// a round-trip through the converter.
@@ -1213,48 +1258,64 @@ internal static class PartialEmitter
     }
 
     /// <summary>
-    /// Hydrates a <c>SurrealArray&lt;T&gt;</c>-typed property: reads the SDK Value array
-    /// as a <c>List&lt;T&gt;</c> via <see cref="HydrationValue.ReadOrDefault{T}"/>, then
-    /// wraps in a fresh <c>SurrealArray&lt;T&gt;</c>. The wrapper's mutation callback is
-    /// a no-op — Save reads the wrapper at dispatch time.
+    /// Hydrates an element-collection [Property] of records (the
+    /// <c>IReadOnlyList&lt;Scenario&gt;</c> shape): clears the backing list, walks the
+    /// SurrealListValue elements, constructs each <c>T</c> via its primary constructor
+    /// using the public scalar properties discovered at codegen time. Pure typed code,
+    /// no reflection. Primitive-element collections take the
+    /// <see cref="EmitHydrateValueProperty"/> path instead (HydrationValue's typed
+    /// converter handles primitive element types).
     /// </summary>
-    private static void EmitHydrateSurrealArray(StringBuilder builder, string indent, PropertyModel p)
+    private static void EmitHydrateElementCollection(StringBuilder builder, string indent, PropertyModel p)
     {
         var backing = $"_{ToCamel(p.Name)}";
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
-        var declaredType = p.Type.FullyQualifiedName;
         if (p.Type.TypeArguments.Count == 0)
         {
             builder
                 .Append(indent)
-                .Append("    throw new global::System.NotSupportedException(\"Hydrate: SurrealArray element type for property '")
+                .Append("    throw new global::System.NotSupportedException(\"Hydrate: collection element type for property '")
                 .Append(p.Name)
                 .AppendLine("' could not be resolved at codegen time.\");");
             return;
         }
 
         var elementType = p.Type.TypeArguments[0].FullyQualifiedName;
-        var localItems = $"__{ToCamel(p.Name)}Items";
+        var arrLocal = $"__sl_{ToCamel(p.Name)}";
+        var elemLocal = $"__el_{ToCamel(p.Name)}";
+        var elemObjLocal = $"__eo_{ToCamel(p.Name)}";
 
-        builder.Append(indent)
-            .Append("    var ")
-            .Append(localItems)
-            .Append(" = global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<global::System.Collections.Generic.List<")
-            .Append(elementType)
-            .Append(">>(__obj, ")
-            .Append(fieldLit)
-            .AppendLine(");")
-            .Append(indent)
-            .Append("    if (").Append(localItems).AppendLine(" is not null)")
+        builder
+            .Append(indent).Append("    if (__obj.Object.TryGetValue(").Append(fieldLit).Append(", out var ").Append(arrLocal)
+            .Append(") && ").Append(arrLocal).Append(" is global::Disruptor.Surreal.Values.SurrealListValue ").Append(arrLocal).AppendLine("Cast)")
             .Append(indent).AppendLine("    {")
-            .Append(indent)
-            .Append("        ")
-            .Append(backing)
-            .Append(" = new ")
-            .Append(declaredType)
-            .Append('(')
-            .Append(localItems)
-            .AppendLine(", _ => { });")
+            .Append(indent).Append("        ").Append(backing).AppendLine(".Clear();")
+            .Append(indent).Append("        foreach (var ").Append(elemLocal).Append(" in ").Append(arrLocal).AppendLine("Cast.List)")
+            .Append(indent).AppendLine("        {")
+            .Append(indent).Append("            if (").Append(elemLocal).Append(" is not global::Disruptor.Surreal.Values.SurrealObjectValue ").Append(elemObjLocal).AppendLine(") continue;")
+            .Append(indent).Append("            ").Append(backing).Append(".Add(new ").Append(elementType).AppendLine("(");
+        for (var i = 0; i < p.InlineMembers.Count; i++)
+        {
+            var im = p.InlineMembers[i];
+            var subLit = Quote(SurrealNaming.ToFieldName(im.Name));
+            var typeFqn = im.Type.FullyQualifiedName;
+            // String fast-path mirrors EmitHydrateValueProperty's optimisation.
+            var trailing = i == p.InlineMembers.Count - 1 ? "" : ",";
+            if (typeFqn is "string" or "global::System.String" or "string?" or "global::System.String?")
+            {
+                builder.Append(indent).Append("                ").Append(im.Name).Append(": global::Disruptor.Surface.Runtime.HydrationValue.ReadString(")
+                    .Append(elemObjLocal).Append(", ").Append(subLit).Append(')').AppendLine(trailing);
+            }
+            else
+            {
+                var deserialiseAs = StripNullable(typeFqn);
+                builder.Append(indent).Append("                ").Append(im.Name).Append(": global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<")
+                    .Append(deserialiseAs).Append(">(").Append(elemObjLocal).Append(", ").Append(subLit).Append(')').AppendLine(trailing);
+            }
+        }
+        builder
+            .Append(indent).AppendLine("            ));")
+            .Append(indent).AppendLine("        }")
             .Append(indent).AppendLine("    }");
     }
 

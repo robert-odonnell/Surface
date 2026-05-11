@@ -296,18 +296,19 @@ public sealed class DiagnosticsTests
     }
 
     [Fact]
-    public void CG025_DoesNotFire_OnSurrealArrayProperty()
+    public void CG025_DoesNotFire_OnElementCollectionProperty()
     {
-        // SurrealArray<T> goes through the array<object> + sub-field schema path; it's
-        // not a scalar but it's mappable — CG025 must not flag it.
+        // Element-collection [Property] (List<T> / IList<T> / IReadOnlyList<T> of records)
+        // goes through the array<object> + sub-field schema path; it's not a scalar but
+        // it's mappable — CG025 must not flag it.
         const string src = """
             using Disruptor.Surface.Annotations;
-            using Disruptor.Surface.Runtime;
+            using System.Collections.Generic;
             namespace M;
             public sealed record Scenario(string Kind, string Description);
             [Table] public partial class Holder {
                 [Id] public partial HolderId Id { get; set; }
-                [Property] public partial SurrealArray<Scenario> Scenarios { get; }
+                [Property] public partial IReadOnlyList<Scenario> Scenarios { get; }
             }
             """;
         var (_, _, runDiags, _) = GeneratorHarness.Run(src);

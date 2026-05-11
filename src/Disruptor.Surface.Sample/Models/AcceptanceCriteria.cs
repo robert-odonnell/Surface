@@ -14,7 +14,7 @@ public partial class AcceptanceCriteria
 
     [Parent] public partial UserStory UserStory { get; set; }
 
-    [Property] public partial SurrealArray<Scenario> Scenarios { get; }
+    [Property] public partial IReadOnlyList<Scenario> Scenarios { get; }
 
     [FulfilledBy] public partial IReadOnlyCollection<Test> Validations { get; }
     [RestrictedBy] public partial IReadOnlyCollection<Constraint> Restrictions { get; }
