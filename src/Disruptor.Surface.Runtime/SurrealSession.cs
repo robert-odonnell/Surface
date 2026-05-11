@@ -869,38 +869,32 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
             var edge = (explicitEdge ?? RecordId.Idempotent(TKind.EdgeName)).Resolve(src, tgt);
             state.Edges.Add((src, TKind.EdgeName, tgt));
 
-            // Typed dispatch via the SDK's QueryAsync with CBOR-encoded bindings — the
-            // SDK's RelateAsync(src, edgeTable, tgt) auto-mints the edge id, so we
-            // use raw SurrealQL with an explicit edge id to preserve whichever id
-            // strategy the caller chose. Values flow as typed bindings; no SurrealQL
-            // formatting, no string escape rules. Payload entries wrap through
-            // SurfaceQueryCompiler.WrapAsSurrealValue for the same typed-CBOR pipeline
-            // QueryCompiler uses for predicate operands.
-            var bindings = new SurrealObject
+            // Typed UPSERT against the resolved edge id. Same shape as entity Save
+            // (tx.UpsertAsync, CONTENT replaces the row) — and with the Idempotent
+            // strategy the edge id is a deterministic hash of (src, table, tgt), so
+            // re-running the same triple lands on the same row and updates in place
+            // instead of tripping the schema's UNIQUE INDEX on (in, out). No
+            // "loaded at start" diff needed: the substrate handles dedup at the row
+            // level, not the application.
+            //
+            // For caller-minted edge ids (Random Ulid / Slug), behaviour is unchanged
+            // from the prior RELATE path: a different id for the same (in, out) pair
+            // still fails the unique index, exactly as the user's intent ("I want a
+            // distinct row") would expect.
+            var content = new SurrealObject
             {
-                ["_src"] = new SurrealRecordIdValue(src.ToSdk()),
-                ["_edge"] = new SurrealRecordIdValue(edge.ToSdk()),
-                ["_tgt"] = new SurrealRecordIdValue(tgt.ToSdk()),
+                ["in"] = new SurrealRecordIdValue(src.ToSdk()),
+                ["out"] = new SurrealRecordIdValue(tgt.ToSdk()),
             };
-
-            string sql;
-            if (payload is null)
+            if (payload is not null)
             {
-                sql = "RELATE $_src->$_edge->$_tgt;";
-            }
-            else
-            {
-                var content = new SurrealObject();
                 foreach (var kv in payload)
                 {
                     content[kv.Key] = SurfaceQueryCompiler.WrapAsSurrealValue(kv.Value);
                 }
-                bindings["_content"] = new SurrealObjectValue(content);
-                sql = "RELATE $_src->$_edge->$_tgt CONTENT $_content;";
             }
 
-            var response = await tx.QueryAsync(sql, bindings, ct).ConfigureAwait(false);
-            response.EnsureSuccess();
+            await tx.UpsertAsync(edge.ToSdk(), content, ct).ConfigureAwait(false);
             Record(Command.Relate(src, edge, tgt, payload));
         }
         catch

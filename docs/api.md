@@ -587,7 +587,7 @@ DEFINE FIELD IF NOT EXISTS line ON uses TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS run_id ON uses TYPE string DEFAULT "";
 ```
 
-Every relation table gets a `DEFINE INDEX … UNIQUE` on `(in, out)` — duplicate edges between the same pair are rejected at the schema layer. That's the sole uniqueness guard: a duplicate `RELATE` errors against the index. For idempotent re-imports, use the default `RecordId.Idempotent` edge id strategy (deterministic hash of the linkage triple — same triple lands on the same edge row, so re-running `RelateAsync` is a no-op against the unique index).
+Every relation table gets a `DEFINE INDEX … UNIQUE` on `(in, out)`. `RelateAsync` dispatches a typed `UPSERT edge:<id> CONTENT { in, out, …payload }` — with the default `RecordId.Idempotent` edge id strategy, the id is a deterministic hash of `{source}|{table}|{target}` so re-running the same triple lands on the same row and updates in place (idempotent at the wire level, no exception). Caller-minted edge ids (Random Ulid via `RecordId.New(...)`, slug via `new RecordId(...)`) keep the prior shape — a different id for the same `(in, out)` pair still trips the unique index, which is exactly what "I want a distinct row" expects.
 
 The payload class is a plain POCO — no `[Property]` annotations needed; public scalar properties (`string`, `int`/`long`, `bool`, `float`/`double`/`decimal`, `DateTime`/`DateTimeOffset`, `Guid`, `Ulid`) are picked up automatically. Anything else is silently skipped. Static, indexer, write-only, and inherited-already-seen properties are not emitted as fields.
 
