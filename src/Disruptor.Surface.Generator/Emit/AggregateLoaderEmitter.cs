@@ -72,9 +72,9 @@ internal static class AggregateLoaderEmitter
 
         // Two PopulateAsync overloads (Surreal db / Transaction tx). Each calls the
         // appropriate QueryAsync directly — no JSON bridge, no ISurrealTransport.
-        EmitPopulateOverload("global::Disruptor.Surreal.Surreal db", "db");
+        EmitPopulateOverload("global::Disruptor.Surreal.SurrealClient db", "db");
         sb.AppendLine();
-        EmitPopulateOverload("global::Disruptor.Surreal.Transaction tx", "tx");
+        EmitPopulateOverload("global::Disruptor.Surreal.SurrealTransaction tx", "tx");
         sb.AppendLine();
 
         void EmitPopulateOverload(string handleParam, string handleName)
@@ -326,34 +326,34 @@ internal static class AggregateLoaderEmitter
 
     private static void EmitHelpers(StringBuilder sb)
     {
-        sb.AppendLine("        /// <summary>Pull the first row out of a QueryResponse, or null when no row matched.</summary>");
-        sb.AppendLine("        private static ObjectValue? ExtractFirstResultRow(global::Disruptor.Surreal.QueryResponse response)");
+        sb.AppendLine("        /// <summary>Pull the first row out of a SurrealQueryResponse, or null when no row matched.</summary>");
+        sb.AppendLine("        private static SurrealObjectValue? ExtractFirstResultRow(global::Disruptor.Surreal.SurrealQueryResponse response)");
         sb.AppendLine("        {");
         sb.AppendLine("            for (var i = 0; i < response.Count; i++)");
         sb.AppendLine("            {");
         sb.AppendLine("                var stmt = response.Statements[i];");
         sb.AppendLine("                if (stmt.Result is null) continue;");
-        sb.AppendLine("                Value target = stmt.Result;");
-        sb.AppendLine("                if (target is ArrayValue arr)");
+        sb.AppendLine("                SurrealValue target = stmt.Result;");
+        sb.AppendLine("                if (target is SurrealListValue arr)");
         sb.AppendLine("                {");
-        sb.AppendLine("                    foreach (var item in arr.Array)");
+        sb.AppendLine("                    foreach (var item in arr.List)");
         sb.AppendLine("                    {");
-        sb.AppendLine("                        if (item is ObjectValue row) return row;");
+        sb.AppendLine("                        if (item is SurrealObjectValue row) return row;");
         sb.AppendLine("                    }");
         sb.AppendLine("                }");
-        sb.AppendLine("                else if (target is ObjectValue obj) return obj;");
+        sb.AppendLine("                else if (target is SurrealObjectValue obj) return obj;");
         sb.AppendLine("            }");
         sb.AppendLine("            return null;");
         sb.AppendLine("        }");
         sb.AppendLine();
         sb.AppendLine("        /// <summary>Walk an array attached to <paramref name=\"key\"/> on <paramref name=\"parent\"/> and Hydrate each element as a <typeparamref name=\"T\"/>.</summary>");
-        sb.AppendLine("        private static void HydrateChildren<T>(ObjectValue parent, string key, global::Disruptor.Surface.Runtime.IHydrationSink sink)");
+        sb.AppendLine("        private static void HydrateChildren<T>(SurrealObjectValue parent, string key, global::Disruptor.Surface.Runtime.IHydrationSink sink)");
         sb.AppendLine("            where T : class, global::Disruptor.Surface.Runtime.IEntity, new()");
         sb.AppendLine("        {");
-        sb.AppendLine("            if (!parent.Object.TryGetValue(key, out var v) || v is not ArrayValue arr) return;");
-        sb.AppendLine("            foreach (var item in arr.Array)");
+        sb.AppendLine("            if (!parent.Object.TryGetValue(key, out var v) || v is not SurrealListValue arr) return;");
+        sb.AppendLine("            foreach (var item in arr.List)");
         sb.AppendLine("            {");
-        sb.AppendLine("                if (item is not ObjectValue row) continue;");
+        sb.AppendLine("                if (item is not SurrealObjectValue row) continue;");
         sb.AppendLine("                var entity = new T();");
         sb.AppendLine("                ((global::Disruptor.Surface.Runtime.IEntity)entity).Hydrate(row, sink);");
         sb.AppendLine("                ((global::Disruptor.Surface.Runtime.IEntity)entity).MarkAllSlicesLoaded(sink);");
@@ -361,12 +361,12 @@ internal static class AggregateLoaderEmitter
         sb.AppendLine("        }");
         sb.AppendLine();
         sb.AppendLine("        /// <summary>Walk an edge array {{id, in, out}} and call <c>sink.Edge(in, edgeName, out)</c> per row.</summary>");
-        sb.AppendLine("        private static void HydrateEdges(ObjectValue parent, string key, string edgeName, global::Disruptor.Surface.Runtime.IHydrationSink sink)");
+        sb.AppendLine("        private static void HydrateEdges(SurrealObjectValue parent, string key, string edgeName, global::Disruptor.Surface.Runtime.IHydrationSink sink)");
         sb.AppendLine("        {");
-        sb.AppendLine("            if (!parent.Object.TryGetValue(key, out var v) || v is not ArrayValue arr) return;");
-        sb.AppendLine("            foreach (var item in arr.Array)");
+        sb.AppendLine("            if (!parent.Object.TryGetValue(key, out var v) || v is not SurrealListValue arr) return;");
+        sb.AppendLine("            foreach (var item in arr.List)");
         sb.AppendLine("            {");
-        sb.AppendLine("                if (item is not ObjectValue row) continue;");
+        sb.AppendLine("                if (item is not SurrealObjectValue row) continue;");
         sb.AppendLine("                if (!global::Disruptor.Surface.Runtime.HydrationValue.TryReadRecordId(row, \"in\", out var src)) continue;");
         sb.AppendLine("                if (!global::Disruptor.Surface.Runtime.HydrationValue.TryReadRecordId(row, \"out\", out var dst)) continue;");
         sb.AppendLine("                sink.Edge(src, edgeName, dst);");

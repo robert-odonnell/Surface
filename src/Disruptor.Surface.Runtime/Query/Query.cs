@@ -155,11 +155,11 @@ public sealed class Query<T>
     /// rows from <see cref="WithInclude"/> are tracked alongside in an internal session
     /// reachable via the entities' navigation properties.
     /// </summary>
-    public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
+    public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default)
         => ExecuteIntoSessionAsync(new SurrealSession(), db, ct);
 
-    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
-    public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.SurrealClient, CancellationToken)"/>
+    public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default)
         => ExecuteIntoSessionAsync(new SurrealSession(), tx, ct);
 
     /// <summary>
@@ -226,20 +226,20 @@ public sealed class Query<T>
     /// </summary>
     public Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(
         SurrealSession session,
-        Disruptor.Surreal.Surreal db,
+        Disruptor.Surreal.SurrealClient db,
         CancellationToken ct = default)
         => ExecuteIntoSessionAsync(session, (sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
 
-    /// <inheritdoc cref="ExecuteIntoSessionAsync(SurrealSession, Disruptor.Surreal.Surreal, CancellationToken)"/>
+    /// <inheritdoc cref="ExecuteIntoSessionAsync(SurrealSession, Disruptor.Surreal.SurrealClient, CancellationToken)"/>
     public Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(
         SurrealSession session,
-        Disruptor.Surreal.Transaction tx,
+        Disruptor.Surreal.SurrealTransaction tx,
         CancellationToken ct = default)
         => ExecuteIntoSessionAsync(session, (sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
 
     private async Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(
         SurrealSession session,
-        Func<string, CancellationToken, Task<Disruptor.Surreal.QueryResponse>> queryFn,
+        Func<string, CancellationToken, Task<Disruptor.Surreal.SurrealQueryResponse>> queryFn,
         CancellationToken ct)
     {
         var sql = QueryCompiler.Compile(Table, Filter, PinnedId, Includes, OrderClauses, LimitCount, StartAt);
@@ -249,14 +249,14 @@ public sealed class Query<T>
         IHydrationSink sink = session;
 
         var list = new List<T>();
-        if (rows is ArrayValue arr)
+        if (rows is SurrealListValue arr)
         {
-            foreach (var row in arr.Array)
+            foreach (var row in arr.List)
             {
-                if (row is ObjectValue obj) list.Add(HydrateOne(obj, sink));
+                if (row is SurrealObjectValue obj) list.Add(HydrateOne(obj, sink));
             }
         }
-        else if (rows is ObjectValue single)
+        else if (rows is SurrealObjectValue single)
         {
             list.Add(HydrateOne(single, sink));
         }
@@ -266,13 +266,13 @@ public sealed class Query<T>
         // and reads of [Children] / [Reference] resolve correctly.
         for (var i = 0; i < list.Count; i++)
         {
-            var rowVal = rows is ArrayValue rowArr ? rowArr.Array[i] : rows!;
-            if (rowVal is ObjectValue rowObj) HydrateNested(rowObj, Includes, sink);
+            var rowVal = rows is SurrealListValue rowArr ? rowArr.List[i] : rows!;
+            if (rowVal is SurrealObjectValue rowObj) HydrateNested(rowObj, Includes, sink);
         }
 
         return list;
 
-        static T HydrateOne(ObjectValue row, IHydrationSink sink)
+        static T HydrateOne(SurrealObjectValue row, IHydrationSink sink)
         {
             var entity = new T();
             entity.Hydrate(row, sink);
@@ -280,8 +280,8 @@ public sealed class Query<T>
         }
     }
 
-    /// <summary>Pull the rows portion out of a QueryResponse — the first statement's result.</summary>
-    internal static Value? ExtractRows(Disruptor.Surreal.QueryResponse response)
+    /// <summary>Pull the rows portion out of a SurrealQueryResponse — the first statement's result.</summary>
+    internal static SurrealValue? ExtractRows(Disruptor.Surreal.SurrealQueryResponse response)
     {
         if (response.Count == 0) return null;
         return response.Statements[0].Result;
@@ -296,10 +296,10 @@ public sealed class Query<T>
     /// time, captures the right concrete <c>new T()</c> + <c>Hydrate</c>).
     /// <see cref="IncludeInlineRefNode"/> is already projected into the row by
     /// <c>field.*</c> and is picked up by the owning entity's own <c>Hydrate</c> via
-    /// <see cref="HydrationJson.HydrateReference{T}"/>; we still mark the slice loaded
+    /// <see cref="HydrationValue.HydrateReference{T}"/>; we still mark the slice loaded
     /// so the read path knows the user asked for it.
     /// </summary>
-    private static void HydrateNested(ObjectValue row, IReadOnlyList<IIncludeNode> nodes, IHydrationSink sink)
+    private static void HydrateNested(SurrealObjectValue row, IReadOnlyList<IIncludeNode> nodes, IHydrationSink sink)
     {
         var hasOwnerId = HydrationValue.TryReadRecordId(row, "id", out var ownerId);
 
@@ -321,11 +321,11 @@ public sealed class Query<T>
                     }
                     if (children.Hydrator is null) continue;
                     if (!row.Object.TryGetValue(children.ChildTable, out var arrVal)) continue;
-                    if (arrVal is not ArrayValue arr) continue;
+                    if (arrVal is not SurrealListValue arr) continue;
 
-                    foreach (var childRow in arr.Array)
+                    foreach (var childRow in arr.List)
                     {
-                        if (childRow is not ObjectValue childObj) continue;
+                        if (childRow is not SurrealObjectValue childObj) continue;
                         children.Hydrator(childRow, sink);
                         HydrateNested(childObj, children.Nested, sink);
                     }
@@ -337,15 +337,15 @@ public sealed class Query<T>
                         sink.MarkSliceLoaded(ownerId, relation.ParentSliceKey);
                     }
                     if (!row.Object.TryGetValue(relation.ParentSliceKey, out var relVal)) continue;
-                    if (relVal is not ArrayValue relArr) continue;
+                    if (relVal is not SurrealListValue relArr) continue;
 
                     if (relation.IdsOnly)
                     {
                         // Cross-aggregate: each item is an edge row { id, in, out }. Feed
                         // the session's edges dict directly — no entity hydration.
-                        foreach (var edgeRow in relArr.Array)
+                        foreach (var edgeRow in relArr.List)
                         {
-                            if (edgeRow is not ObjectValue edgeObj) continue;
+                            if (edgeRow is not SurrealObjectValue edgeObj) continue;
                             if (!HydrationValue.TryReadRecordId(edgeObj, "in", out var src)) continue;
                             if (!HydrationValue.TryReadRecordId(edgeObj, "out", out var dst)) continue;
                             sink.Edge(src, relation.EdgeName, dst);
@@ -355,9 +355,9 @@ public sealed class Query<T>
                     {
                         // Within-aggregate: each item is a target row. Hydrate the entity
                         // and synthesize the edge from (parentRowId, edgeName, targetId).
-                        foreach (var targetRow in relArr.Array)
+                        foreach (var targetRow in relArr.List)
                         {
-                            if (targetRow is not ObjectValue targetObj) continue;
+                            if (targetRow is not SurrealObjectValue targetObj) continue;
                             relation.Hydrator?.Invoke(targetRow, sink);
                             if (!hasOwnerId) continue;
                             if (!HydrationValue.TryReadRecordId(targetObj, "id", out var targetId)) continue;

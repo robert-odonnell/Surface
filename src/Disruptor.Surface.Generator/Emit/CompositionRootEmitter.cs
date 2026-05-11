@@ -79,7 +79,7 @@ internal static class CompositionRootEmitter
               .AppendLine();
             sb.Append(memberIndent).Append("public async ").Append(TaskFqn).Append('<').Append(SessionFqn)
               .Append("> Load").Append(rootName).Append("Async(")
-              .Append("global::Disruptor.Surreal.Surreal db, ")
+              .Append("global::Disruptor.Surreal.SurrealClient db, ")
               .Append(idType).Append(" rootId, ")
               .Append(CtFqn).AppendLine(" ct = default)");
             sb.Append(memberIndent).AppendLine("{");
@@ -95,7 +95,7 @@ internal static class CompositionRootEmitter
               .AppendLine();
             sb.Append(memberIndent).Append("public async ").Append(TaskFqn).Append('<').Append(SessionFqn)
               .Append("> Load").Append(rootName).Append("Async(")
-              .Append("global::Disruptor.Surreal.Transaction tx, ")
+              .Append("global::Disruptor.Surreal.SurrealTransaction tx, ")
               .Append(idType).Append(" rootId, ")
               .Append(CtFqn).AppendLine(" ct = default)");
             sb.Append(memberIndent).AppendLine("{");

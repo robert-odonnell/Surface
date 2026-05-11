@@ -76,10 +76,10 @@ public sealed class HydrationQuery<T>
     /// <summary>
     /// Materialises the requested rows + slices into a fresh
     /// <see cref="SurrealSession"/>. Caller commits via
-    /// <see cref="SurrealSession.SaveAsync(IEntity, Disruptor.Surreal.Transaction, CancellationToken)"/>;
+    /// <see cref="SurrealSession.SaveAsync(IEntity, Disruptor.Surreal.SurrealTransaction, CancellationToken)"/>;
     /// concurrent commits surface as <c>SurrealConflictException</c> from the SDK.
     /// </summary>
-    public async Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
+    public async Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default)
     {
         var session = new SurrealSession(referenceRegistry);
         if (ids.Count == 0) return session;
@@ -88,8 +88,8 @@ public sealed class HydrationQuery<T>
         return session;
     }
 
-    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
-    public async Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.SurrealClient, CancellationToken)"/>
+    public async Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default)
     {
         var session = new SurrealSession(referenceRegistry);
         if (ids.Count == 0) return session;

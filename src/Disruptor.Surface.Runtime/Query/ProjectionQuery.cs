@@ -73,15 +73,15 @@ public sealed class ProjectionQuery<T, TRow>
     /// rows as immutable instances of <typeparamref name="TRow"/>; no entity hydration,
     /// no session.
     /// </summary>
-    public Task<IReadOnlyList<TRow>> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
+    public Task<IReadOnlyList<TRow>> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default)
         => ExecuteAsync((sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
 
-    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
-    public Task<IReadOnlyList<TRow>> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.SurrealClient, CancellationToken)"/>
+    public Task<IReadOnlyList<TRow>> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default)
         => ExecuteAsync((sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
 
     private async Task<IReadOnlyList<TRow>> ExecuteAsync(
-        Func<string, CancellationToken, Task<Disruptor.Surreal.QueryResponse>> queryFn,
+        Func<string, CancellationToken, Task<Disruptor.Surreal.SurrealQueryResponse>> queryFn,
         CancellationToken ct)
     {
         var sql = Compile();
@@ -89,14 +89,14 @@ public sealed class ProjectionQuery<T, TRow>
         var rows = response.Count > 0 ? response.Statements[0].Result : null;
 
         var list = new List<TRow>();
-        if (rows is ArrayValue arr)
+        if (rows is SurrealListValue arr)
         {
-            foreach (var row in arr.Array)
+            foreach (var row in arr.List)
             {
-                if (row is ObjectValue obj) list.Add(Projection.Materialise(obj));
+                if (row is SurrealObjectValue obj) list.Add(Projection.Materialise(obj));
             }
         }
-        else if (rows is ObjectValue single)
+        else if (rows is SurrealObjectValue single)
         {
             list.Add(Projection.Materialise(single));
         }

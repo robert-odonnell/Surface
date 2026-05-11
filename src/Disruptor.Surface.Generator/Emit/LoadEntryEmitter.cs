@@ -26,8 +26,8 @@ namespace Disruptor.Surface.Generator.Emit;
 internal static class LoadEntryEmitter
 {
     private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.Query";
-    private const string SurrealFqn = "global::Disruptor.Surreal.Surreal";
-    private const string TransactionFqn = "global::Disruptor.Surreal.Transaction";
+    private const string SurrealFqn = "global::Disruptor.Surreal.SurrealClient";
+    private const string TransactionFqn = "global::Disruptor.Surreal.SurrealTransaction";
     private const string SessionFqn = "global::Disruptor.Surface.Runtime.SurrealSession";
     private const string CtFqn = "global::System.Threading.CancellationToken";
     private const string TaskFqn = "global::System.Threading.Tasks.Task";

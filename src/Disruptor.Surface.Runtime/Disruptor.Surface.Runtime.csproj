@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Disruptor.Surreal" Version="0.1.0-preview.7" />
+    <PackageReference Include="Disruptor.Surreal" Version="0.1.0-preview.9" />
     <PackageReference Include="Ulid" Version="1.4.1" />
   </ItemGroup>
 

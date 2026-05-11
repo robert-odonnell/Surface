@@ -77,5 +77,5 @@ internal sealed class SurfaceProjection<TRow>(
 {
     public IReadOnlyList<string> SelectFields { get; } = selectFields;
 
-    public TRow Materialise(ObjectValue row) => materialise(new ValueProjectionRow(row));
+    public TRow Materialise(SurrealObjectValue row) => materialise(new ValueProjectionRow(row));
 }

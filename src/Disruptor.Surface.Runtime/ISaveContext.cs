@@ -9,7 +9,7 @@ namespace Disruptor.Surface.Runtime;
 /// </summary>
 /// <remarks>
 /// The session is the orchestration boundary; entities just describe their own structure.
-/// <see cref="SurrealSession.SaveAsync(IEntity, Transaction, System.Threading.CancellationToken)"/>
+/// <see cref="SurrealSession.SaveAsync(IEntity, SurrealTransaction, System.Threading.CancellationToken)"/>
 /// constructs an <see cref="ISaveContext"/>, calls the root entity's
 /// <see cref="IEntity.SaveAsync"/>, and lets recursion drive itself through the
 /// <see cref="SaveAsync"/> callback back into the session.
@@ -17,7 +17,7 @@ namespace Disruptor.Surface.Runtime;
 public interface ISaveContext
 {
     /// <summary>The transaction to dispatch into. Entities use this for their own RPC sends.</summary>
-    Transaction Transaction { get; }
+    SurrealTransaction Transaction { get; }
 
     /// <summary>
     /// True iff <paramref name="id"/> is in the session's identity map — either because it

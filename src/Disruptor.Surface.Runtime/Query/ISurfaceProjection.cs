@@ -20,5 +20,5 @@ public interface ISurfaceProjection<TRow>
     IReadOnlyList<string> SelectFields { get; }
 
     /// <summary>Materialise a single row into <typeparamref name="TRow"/>.</summary>
-    TRow Materialise(ObjectValue row);
+    TRow Materialise(SurrealObjectValue row);
 }

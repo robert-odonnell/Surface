@@ -55,12 +55,12 @@ internal sealed class DiscoveryProjectionRow : IProjectionRow
 }
 
 /// <summary>
-/// Production row backed by an <see cref="ObjectValue"/> (one row from a SurrealDB
+/// Production row backed by a <see cref="SurrealObjectValue"/> (one row from a SurrealDB
 /// query response). <see cref="Read{T}"/> looks up the snake-cased field on the
 /// object and converts via <see cref="HydrationValue.ReadOrDefault{T}"/> — same path
 /// entity hydration uses, so naming + nullability + numeric coercion stays consistent.
 /// </summary>
-internal sealed class ValueProjectionRow(ObjectValue row) : IProjectionRow
+internal sealed class ValueProjectionRow(SurrealObjectValue row) : IProjectionRow
 {
     public T Read<T>(PropertyExpr<T> property)
         => HydrationValue.ReadOrDefault<T>(row, property.Field);

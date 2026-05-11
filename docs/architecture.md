@@ -25,7 +25,7 @@ Roslyn generator
         v
 Consumer application
         |
-        +--> Surreal.ConnectAsync(...)
+        +--> SurrealClient.ConnectAsync(...)
         +--> Workspace.ApplySchemaAsync(db)
         +--> Workspace.Load{Root}Async(db | tx, id)
         +--> mutate generated entities (sync, in-memory)
@@ -110,7 +110,7 @@ The generated composition-root method is thin:
 
 ```csharp
 public async Task<SurrealSession> LoadDesignAsync(
-    Disruptor.Surreal.Surreal db,
+    Disruptor.Surreal.SurrealClient db,
     DesignId rootId,
     CancellationToken ct = default)
 {
@@ -120,7 +120,7 @@ public async Task<SurrealSession> LoadDesignAsync(
 }
 
 public async Task<SurrealSession> LoadDesignAsync(
-    Disruptor.Surreal.Transaction tx,
+    Disruptor.Surreal.SurrealTransaction tx,
     DesignId rootId,
     CancellationToken ct = default)
 {
@@ -137,7 +137,7 @@ The loader performs one nested SurrealQL query rooted at the aggregate id:
 - Child tables are loaded with subselects scoped back to the root through parent paths.
 - Edge tables touching the aggregate are loaded into edge arrays.
 
-Hydration is routed through `IHydrationSink`, an explicit interface on `SurrealSession`, and consumes the SDK's `Disruptor.Surreal.Values.Value` directly — no JSON intermediary. `HydrationValue` provides the Value-native helpers (`ReadRecordId`, `ReadString`, `ReadOrDefault<T>`, `HydrateReference<T>`) that emitted `IEntity.Hydrate` bodies call into.
+Hydration is routed through `IHydrationSink`, an explicit interface on `SurrealSession`, and consumes the SDK's `Disruptor.Surreal.Values.SurrealValue` directly — no JSON intermediary. `HydrationValue` provides the Value-native helpers (`ReadRecordId`, `ReadString`, `ReadOrDefault<T>`, `HydrateReference<T>`) that emitted `IEntity.Hydrate` bodies call into.
 
 ## Query+Load Surface
 
@@ -162,9 +162,9 @@ QueryCompiler.Compile
              WHERE description = "x" AND id = constraints:01HX…
         |
         v
-Disruptor.Surreal.Surreal.QueryAsync (or Transaction.QueryAsync)
+Disruptor.Surreal.SurrealClient.QueryAsync (or SurrealTransaction.QueryAsync)
         |
-        +--> CBOR over WebSocket → QueryResponse → Value tree
+        +--> CBOR over WebSocket → SurrealQueryResponse → SurrealValue tree
 ```
 
 Generator-emitted hydrator delegates on each `IncludeChildrenNode` capture the right concrete `new TChild()` + `Hydrate(Value, IHydrationSink)` at codegen time, so the runtime walks the `Value` tree without reflection. `Fetch` reuses the same compile-and-hydrate path but dispatches to `IEntity.HydratePartial` when an entity is already tracked — pending writes survive a top-up via the `IHydrationSink.HasPendingWrite` guard.
@@ -256,13 +256,13 @@ The library does not own a transport. `Disruptor.Surreal` is the SDK — CBOR ov
 using Disruptor.Surreal;
 using Disruptor.Surreal.Connection;
 
-await using var db = await Surreal.ConnectAsync(SurrealOptions.Parse(
+await using var db = await SurrealClient.ConnectAsync(SurrealOptions.Parse(
     "Url=ws://localhost:8000;Namespace=app;Database=main;User=root;Password=root"));
 ```
 
 Generated load methods, query terminals, schema application, and per-entity Save dispatch all call `Surreal.QueryAsync(sql, bindings, ct)` (or `Transaction.QueryAsync(...)`) directly. Every value (record ids, strings, numbers) is rendered as a SurrealQL literal by `SurrealFormatter` at the call site (`QueryCompiler`, the per-entity Save bodies emitted by `PartialEmitter`) before reaching the SDK. The bindings dictionary slot stays empty because every literal is already inlined — and SurrealDB's wire-binding of record-shaped objects has historically lost `Thing` types, which inlining sidesteps entirely.
 
-The SDK's `QueryResponse` and `Disruptor.Surreal.Values.Value` are the Value-tree return shape; `HydrationValue` walks them in emitted hydration bodies.
+The SDK's `SurrealQueryResponse` and `Disruptor.Surreal.Values.SurrealValue` are the Value-tree return shape; `HydrationValue` walks them in emitted hydration bodies.
 
 ## Reference Delete Behavior
 

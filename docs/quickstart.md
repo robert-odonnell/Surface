@@ -97,7 +97,7 @@ using Disruptor.Surreal;
 using Disruptor.Surreal.Connection;
 using MyApp.Model;
 
-await using var db = await Surreal.ConnectAsync(SurrealOptions.Parse(
+await using var db = await SurrealClient.ConnectAsync(SurrealOptions.Parse(
     "Url=ws://127.0.0.1:8000;Namespace=project-brain;Database=workspace;User=root;Password=secret"));
 ```
 

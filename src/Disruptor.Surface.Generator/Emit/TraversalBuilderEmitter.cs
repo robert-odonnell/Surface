@@ -542,7 +542,7 @@ internal static class TraversalBuilderEmitter
     {
         var sb = new StringBuilder();
         sb.Append("static (row, sink) => { ");
-        sb.Append("if (row is not global::Disruptor.Surreal.Values.ObjectValue __rowObj) return; ");
+        sb.Append("if (row is not global::Disruptor.Surreal.Values.SurrealObjectValue __rowObj) return; ");
         sb.Append("if (!global::Disruptor.Surface.Runtime.HydrationValue.TryReadRecordId(__rowObj, \"id\", out var __rid)) return; ");
         sb.Append("switch (__rid.Table) { ");
         foreach (var fqn in union.MemberFullNames)

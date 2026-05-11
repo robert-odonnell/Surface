@@ -103,18 +103,18 @@ public interface IEntity
     void Flush(SurrealSession session);
 
     /// <summary>
-    /// Loader-only entry point. Reads the row's <see cref="Disruptor.Surreal.Values.Value"/>
+    /// Loader-only entry point. Reads the row's <see cref="Disruptor.Surreal.Values.SurrealValue"/>
     /// payload and writes the entity's backing fields plus the corresponding session
     /// dicts (parent / reference) via the supplied hydration sink. Edges and children
     /// are loaded by the per-aggregate loader separately. Default-interface no-op for
     /// hand-written stubs that don't go through hydration.
     /// </summary>
-    void Hydrate(Value row, IHydrationSink sink) { }
+    void Hydrate(SurrealValue row, IHydrationSink sink) { }
 
     /// <summary>
     /// Partial-merge variant of <see cref="Hydrate"/>. Default no-op for stubs.
     /// </summary>
-    void HydratePartial(Value row, IHydrationSink sink) { }
+    void HydratePartial(SurrealValue row, IHydrationSink sink) { }
 
     /// <summary>
     /// SurrealSession calls this immediately before queueing the entity's own DELETE command,
@@ -501,18 +501,18 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// want to top up — Fetch never invents new aggregate roots.
     /// </para>
     /// </summary>
-    public Task FetchAsync<T>(Query.Query<T> query, Disruptor.Surreal.Surreal db, CancellationToken ct = default)
+    public Task FetchAsync<T>(Query.Query<T> query, SurrealClient db, CancellationToken ct = default)
         where T : class, IEntity, new()
         => FetchAsync(query, (sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
 
-    /// <inheritdoc cref="FetchAsync{T}(Query.Query{T}, Disruptor.Surreal.Surreal, CancellationToken)"/>
-    public Task FetchAsync<T>(Query.Query<T> query, Transaction tx, CancellationToken ct = default)
+    /// <inheritdoc cref="FetchAsync{T}(Query.Query{T}, SurrealClient, CancellationToken)"/>
+    public Task FetchAsync<T>(Query.Query<T> query, SurrealTransaction tx, CancellationToken ct = default)
         where T : class, IEntity, new()
         => FetchAsync(query, (sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
 
     private async Task FetchAsync<T>(
         Query.Query<T> query,
-        Func<string, CancellationToken, Task<QueryResponse>> queryFn,
+        Func<string, CancellationToken, Task<SurrealQueryResponse>> queryFn,
         CancellationToken ct)
         where T : class, IEntity, new()
     {
@@ -524,15 +524,15 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
 
         IHydrationSink sink = this;
 
-        if (rows is ArrayValue arr)
+        if (rows is SurrealListValue arr)
         {
-            foreach (var row in arr.Array)
+            foreach (var row in arr.List)
             {
-                if (row is ObjectValue obj)
+                if (row is SurrealObjectValue obj)
                     HydrateMergingRoot<T>(obj, sink, query.Includes);
             }
         }
-        else if (rows is ObjectValue single)
+        else if (rows is SurrealObjectValue single)
         {
             HydrateMergingRoot<T>(single, sink, query.Includes);
         }
@@ -543,7 +543,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// entities receive HydratePartial (uncommitted writes preserved); new entities get
     /// the full Hydrate via <c>new T()</c>.
     /// </summary>
-    private void HydrateMergingRoot<T>(ObjectValue row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes)
+    private void HydrateMergingRoot<T>(SurrealObjectValue row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes)
         where T : class, IEntity, new()
     {
         if (!HydrationValue.TryReadRecordId(row, "id", out var id)) return;
@@ -568,7 +568,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// of the include's full-hydrate callback. Slice marking is identical to the
     /// read-mode path.
     /// </summary>
-    private void HydrateMergingNested(ObjectValue row, IReadOnlyList<Query.IIncludeNode> nodes, IHydrationSink sink)
+    private void HydrateMergingNested(SurrealObjectValue row, IReadOnlyList<Query.IIncludeNode> nodes, IHydrationSink sink)
     {
         var hasOwnerId = HydrationValue.TryReadRecordId(row, "id", out var ownerId);
 
@@ -584,11 +584,11 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                     if (hasOwnerId && children.ParentSliceKey is { } sliceKey)
                         sink.MarkSliceLoaded(ownerId, sliceKey);
                     if (!row.Object.TryGetValue(children.ChildTable, out var arrVal)) continue;
-                    if (arrVal is not ArrayValue arr) continue;
+                    if (arrVal is not SurrealListValue arr) continue;
 
-                    foreach (var childVal in arr.Array)
+                    foreach (var childVal in arr.List)
                     {
-                        if (childVal is not ObjectValue childObj) continue;
+                        if (childVal is not SurrealObjectValue childObj) continue;
                         if (HydrationValue.TryReadRecordId(childObj, "id", out var childId)
                             && state.Entities.TryGetValue(childId, out var existingChild))
                         {
@@ -605,13 +605,13 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                 case Query.IncludeRelationNode relation:
                     if (hasOwnerId) sink.MarkSliceLoaded(ownerId, relation.ParentSliceKey);
                     if (!row.Object.TryGetValue(relation.ParentSliceKey, out var relVal)) continue;
-                    if (relVal is not ArrayValue relArr) continue;
+                    if (relVal is not SurrealListValue relArr) continue;
 
                     if (relation.IdsOnly)
                     {
-                        foreach (var edgeVal in relArr.Array)
+                        foreach (var edgeVal in relArr.List)
                         {
-                            if (edgeVal is not ObjectValue edgeObj) continue;
+                            if (edgeVal is not SurrealObjectValue edgeObj) continue;
                             if (!HydrationValue.TryReadRecordId(edgeObj, "in", out var src)) continue;
                             if (!HydrationValue.TryReadRecordId(edgeObj, "out", out var dst)) continue;
                             sink.Edge(src, relation.EdgeName, dst);
@@ -619,9 +619,9 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                     }
                     else
                     {
-                        foreach (var targetVal in relArr.Array)
+                        foreach (var targetVal in relArr.List)
                         {
-                            if (targetVal is not ObjectValue targetObj) continue;
+                            if (targetVal is not SurrealObjectValue targetObj) continue;
                             if (HydrationValue.TryReadRecordId(targetObj, "id", out var targetId)
                                 && state.Entities.TryGetValue(targetId, out var existingTarget))
                             {
@@ -858,7 +858,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// entity is visited at most once per Save pass).
     /// </para>
     /// </summary>
-    public async Task SaveAsync(IEntity entity, Transaction tx, CancellationToken ct = default)
+    public async Task SaveAsync(IEntity entity, SurrealTransaction tx, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(entity);
         ArgumentNullException.ThrowIfNull(tx);
@@ -903,12 +903,12 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// Internal orchestration: tracks visited-this-pass (cycle break + saved-this-pass
     /// signal for the entity body's IsTracked / CREATE-vs-UPDATE check).
     /// </summary>
-    private sealed class SaveContext(SurrealSession session, Transaction tx) : ISaveContext
+    private sealed class SaveContext(SurrealSession session, SurrealTransaction tx) : ISaveContext
     {
         private readonly HashSet<RecordId> visited = [];
         private readonly HashSet<RecordId> savedThisPass = [];
 
-        public Transaction Transaction { get; } = tx;
+        public SurrealTransaction Transaction { get; } = tx;
 
         /// <summary>
         /// True iff <paramref name="id"/> is known to exist in the DB — either loaded
@@ -955,7 +955,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     public async Task RelateAsync<TKind>(
         IRecordId source,
         IRecordId target,
-        Transaction tx,
+        SurrealTransaction tx,
         CancellationToken ct = default) where TKind : IRelationKind
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -989,7 +989,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     public async Task UnrelateAsync<TKind>(
         IRecordId? source,
         IRecordId? target,
-        Transaction tx,
+        SurrealTransaction tx,
         CancellationToken ct = default) where TKind : IRelationKind
     {
         if (source is null && target is null)
@@ -1037,7 +1037,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// retires.
     /// </para>
     /// </summary>
-    public async Task DeleteAsync(IEntity entity, Transaction tx, CancellationToken ct = default)
+    public async Task DeleteAsync(IEntity entity, SurrealTransaction tx, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(entity);
         ArgumentNullException.ThrowIfNull(tx);

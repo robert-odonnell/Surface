@@ -7,7 +7,7 @@ This is a user-facing API map for the generated surface and the runtime types mo
 - `Disruptor.Surface.Runtime`: runtime core — `SurrealSession`, `IEntity`, `IRelationKind`, `RecordId`, `SurrealArray<T>`, `IReferenceRegistry`, `HydrationValue`, `ISaveContext`, `CommandLog`, `LoadShapeViolationException`. Two package dependencies: `Disruptor.Surreal` (the SurrealDB SDK — CBOR over WebSocket) and `Ulid`. There is no in-library transport — connect via the SDK and pass the `Surreal` (read-only) or `Transaction` (write-mode) handle into the generated load methods.
 - `Disruptor.Surface.Generator`: Roslyn source generator. Reference as a private analyzer dependency.
 - `Disruptor.Surface.Annotations`: namespace for modeling attributes (lives inside the runtime package).
-- `Disruptor.Surreal`: the SDK — sibling project at `../surrealdb-dotnet`. Provides `Surreal`, `Transaction`, `SurrealOptions`, `QueryResponse`, `Disruptor.Surreal.Values.Value`, and the typed exception hierarchy (`SurrealException`, `SurrealConflictException`, …).
+- `Disruptor.Surreal`: the SDK — sibling project at `../surrealdb-dotnet`. Provides `SurrealClient`, `SurrealTransaction`, `SurrealOptions`, `SurrealQueryResponse`, `Disruptor.Surreal.Values.SurrealValue`, and the typed exception hierarchy (`SurrealException`, `SurrealConflictException`, …).
 
 ## Modeling Attributes
 
@@ -130,11 +130,11 @@ For a `[CompositionRoot]` named `Workspace`, the generator emits:
 public static IReadOnlyList<string> Schema { get; }
 
 public static Task ApplySchemaAsync(
-    Disruptor.Surreal.Surreal db,
+    Disruptor.Surreal.SurrealClient db,
     CancellationToken ct = default);
 
 public static Task ApplySchemaAsync(
-    Disruptor.Surreal.Transaction tx,
+    Disruptor.Surreal.SurrealTransaction tx,
     CancellationToken ct = default);
 
 // Per-model reference metadata for IHydrationSink wiring at session construction.
@@ -148,12 +148,12 @@ public static GeneratedHydrationRoot Hydrate { get; }
 
 // Per-aggregate-root load methods (instance, two overloads each).
 public Task<SurrealSession> LoadDesignAsync(
-    Disruptor.Surreal.Surreal db,
+    Disruptor.Surreal.SurrealClient db,
     DesignId rootId,
     CancellationToken ct = default);
 
 public Task<SurrealSession> LoadDesignAsync(
-    Disruptor.Surreal.Transaction tx,
+    Disruptor.Surreal.SurrealTransaction tx,
     DesignId rootId,
     CancellationToken ct = default);
 ```
@@ -233,8 +233,8 @@ public sealed class Query<T> where T : class, IEntity, new()
     public Query<T> Limit(int count);   // <= 0 clears the cap
     public Query<T> Start(int count);   // <= 0 clears the offset
 
-    public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default);
-    public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default);
+    public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default);
+    public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default);
     public string Compile();
     public string CompileIdsOnly();   // SELECT id FROM table …; throws if Includes present
 }
@@ -406,8 +406,8 @@ public sealed class EdgeQuery<TIn, TOut>
     public EdgeQuery<TIn, TOut> Limit(int count);
     public EdgeQuery<TIn, TOut> Start(int count);
 
-    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default);
-    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default);
+    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default);
+    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default);
 }
 
 public readonly record struct EdgeRow(RecordId Source, RecordId Target);
@@ -462,12 +462,12 @@ For aggregate-root tables, the generator emits two overloads:
 ```csharp
 public static Task<SurrealSession> LoadAsync(
     this Query<Design> query,
-    Disruptor.Surreal.Surreal db,
+    Disruptor.Surreal.SurrealClient db,
     CancellationToken ct = default);
 
 public static Task<SurrealSession> LoadAsync(
     this Query<Design> query,
-    Disruptor.Surreal.Transaction tx,
+    Disruptor.Surreal.SurrealTransaction tx,
     CancellationToken ct = default);
 ```
 
@@ -513,13 +513,13 @@ catch (LoadShapeViolationException)
 ```csharp
 public Task FetchAsync<T>(
     Query<T> query,
-    Disruptor.Surreal.Surreal db,
+    Disruptor.Surreal.SurrealClient db,
     CancellationToken ct = default)
     where T : class, IEntity, new();
 
 public Task FetchAsync<T>(
     Query<T> query,
-    Disruptor.Surreal.Transaction tx,
+    Disruptor.Surreal.SurrealTransaction tx,
     CancellationToken ct = default)
     where T : class, IEntity, new();
 ```
@@ -632,7 +632,7 @@ The library has no transport of its own. `Disruptor.Surreal` (sibling project at
 using Disruptor.Surreal;
 using Disruptor.Surreal.Connection;
 
-await using var db = await Surreal.ConnectAsync(SurrealOptions.Parse(
+await using var db = await SurrealClient.ConnectAsync(SurrealOptions.Parse(
     "Url=ws://localhost:8000;Namespace=app;Database=main;User=root;Password=root"));
 ```
 
@@ -640,11 +640,11 @@ The relevant SDK surface for Disruptor.Surface consumers:
 
 | Type | Purpose |
 | --- | --- |
-| `Surreal` | Connection handle. `ConnectAsync(SurrealOptions)`, `QueryAsync(sql, bindings, ct)`, `BeginTransactionAsync()`. |
-| `Transaction` | Transaction handle. `QueryAsync`, `CommitAsync()`, `CancelAsync()`. `IAsyncDisposable` — auto-cancels on dispose. |
+| `SurrealClient` | Connection handle. `ConnectAsync(SurrealOptions)`, `QueryAsync(sql, bindings, ct)`, `BeginTransactionAsync()`. |
+| `SurrealTransaction` | Transaction handle. `QueryAsync`, `CommitAsync()`, `CancelAsync()`. `IAsyncDisposable` — auto-cancels on dispose. |
 | `SurrealOptions` | Connection parameters. `Parse(connectionString)` accepts the standard semicolon-separated key/value form. |
-| `QueryResponse` | Multi-statement result envelope; `Statements[i].Result` is a `Value`. |
-| `Disruptor.Surreal.Values.Value` | Tagged union of CBOR-typed values. Walked via `ObjectValue` / `ArrayValue` / scalar variants. |
+| `SurrealQueryResponse` | Multi-statement result envelope; `Statements[i].Result` is a `SurrealValue`. |
+| `Disruptor.Surreal.Values.SurrealValue` | Tagged union of CBOR-typed values. Walked via `SurrealObjectValue` / `SurrealListValue` / scalar variants. |
 | `SurrealException` | Base of the SDK's typed exception hierarchy. |
 | `SurrealConflictException` | Raised at COMMIT (or earlier on a conflicting write) when another writer's commit landed first inside the same MVCC window. Catch, reload, retry. |
 
@@ -781,15 +781,15 @@ It implements `IList<T>` and `IReadOnlyList<T>`. Mutations such as `Add`, `Remov
 
 ### `HydrationValue`
 
-Value-native helpers used by emitted `IEntity.Hydrate` and the runtime's load/query consumers. All inputs are `Disruptor.Surreal.Values.Value` — no JSON intermediary.
+Value-native helpers used by emitted `IEntity.Hydrate` and the runtime's load/query consumers. All inputs are `Disruptor.Surreal.Values.SurrealValue` — no JSON intermediary.
 
 | Method | Purpose |
 | --- | --- |
-| `ReadRecordId(ObjectValue, string field)` | Read a field as `RecordId`; throws on miss. |
-| `TryReadRecordId(ObjectValue, string field, out RecordId)` | Try-variant. |
-| `ReadString(ObjectValue, string field)` | Read a string field. |
-| `ReadOrDefault<T>(ObjectValue, string field)` | Read a typed field with a default fallback. Reflection-based converter handles primitives, arrays, `List<T>`, and POCOs/records (snake_case property matching). |
-| `HydrateReference<T>(ObjectValue, string field, IHydrationSink)` | Re-hydrate an inline-expanded `[Reference, Inline]` field — constructs `new T()`, calls `IEntity.Hydrate` against the inlined `field.*` payload. |
+| `ReadRecordId(SurrealValue v)` | Read any of the wire forms (record-id value / string `"table:value"` / object with `id` field) into a `RecordId`; throws on unrecognised shape. |
+| `TryReadRecordId(SurrealObjectValue parent, string field, out RecordId)` | Try-variant on a named field of a row. |
+| `ReadString(SurrealObjectValue parent, string field, string fallback = "")` | Read a string field with a fallback when missing or not-a-string. |
+| `ReadOrDefault<T>(SurrealObjectValue parent, string field)` | Read a typed field with a default fallback. Reflection-based converter handles primitives, arrays, `List<T>`, and POCOs/records (snake_case property matching). |
+| `HydrateReference<T>(SurrealObjectValue parent, string field, RecordId ownerId, IHydrationSink sink)` | Re-hydrate an inline-expanded `[Reference, Inline]` field — constructs `new T()`, calls `IEntity.Hydrate` against the inlined `field.*` payload. |
 
 ### `ISaveContext`
 
@@ -798,7 +798,7 @@ Per-entity Save orchestration interface. Passed to generator-emitted `IEntity.Sa
 ```csharp
 public interface ISaveContext
 {
-    Disruptor.Surreal.Transaction Transaction { get; }
+    Disruptor.Surreal.SurrealTransaction Transaction { get; }
 
     // True iff `id` is known to exist in the DB — either loaded from a prior Hydrate
     // (loadedAtStart) or already CREATEd in this Save pass. NOT a check on the

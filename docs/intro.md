@@ -1,6 +1,6 @@
 # Introduction
 
-Disruptor.Surface is a C# source-generator based persistence layer for SurrealDB. You describe your domain model with partial classes and attributes, and the generator emits the plumbing needed to load aggregates, hold an in-memory snapshot, and dispatch per-entity writes into an app-owned `Disruptor.Surreal.Transaction`.
+Disruptor.Surface is a C# source-generator based persistence layer for SurrealDB. You describe your domain model with partial classes and attributes, and the generator emits the plumbing needed to load aggregates, hold an in-memory snapshot, and dispatch per-entity writes into an app-owned `Disruptor.Surreal.SurrealTransaction`.
 
 The library is aimed at domain models where aggregates matter. A `[AggregateRoot]` plus its `[Children]` graph becomes the unit of loading. A `SurrealSession` represents one loaded snapshot. You read and mutate the generated model synchronously, then call `session.SaveAsync(entity, tx)` to dispatch writes into a transaction the *application* owns — the library never opens or commits transactions on your behalf.
 
@@ -52,7 +52,7 @@ For that model, the generator contributes:
 
 - Typed ids such as `DesignId` and `ConstraintId`.
 - Implementations for the partial properties.
-- Two `Workspace.LoadDesignAsync` overloads — one taking `Disruptor.Surreal.Surreal db` (read-only), one taking `Disruptor.Surreal.Transaction tx` (write-mode load that sees in-txn writes from the same transaction). Both hydrate the aggregate into a `SurrealSession`.
+- Two `Workspace.LoadDesignAsync` overloads — one taking `Disruptor.Surreal.SurrealClient db` (read-only), one taking `Disruptor.Surreal.SurrealTransaction tx` (write-mode load that sees in-txn writes from the same transaction). Both hydrate the aggregate into a `SurrealSession`.
 - `Workspace.Query` — a typed query surface with predicate factories (`ConstraintQ.Description.Contains("…")`), traversal builders (`IncludeConstraints(c => c.Where(...))`), edge query roots (`Workspace.Query.Edges.Restricts.WhereIn(...)`), and five terminal verbs sharing one AST: `IdsAsync` (typed id list), `Select(projection).ExecuteAsync` (immutable projection rows), `ExecuteAsync` (hydrated entities), `LoadAsync` (write-mode aggregate session), and `Workspace.Hydrate.{Table}(ids)` for non-aggregate-shaped slices into a tracked session. Every terminal accepts either `Surreal db` (read) or `Transaction tx` (in-txn read with full visibility into pending writes).
 - `Workspace.Schema` and `Workspace.ApplySchemaAsync(db)` / `ApplySchemaAsync(tx)`.
 - `Workspace.ReferenceRegistry`, used by reference metadata at session construction time.
@@ -65,8 +65,8 @@ The generated code does not require your entities to inherit from a base class. 
 
 The main runtime concepts are:
 
-- `Disruptor.Surreal.Surreal`: the SurrealDB SDK connection — CBOR over WebSocket. The library has no transport layer of its own; you connect once via `Surreal.ConnectAsync(...)` and pass the handle into the generated load methods.
-- `Disruptor.Surreal.Transaction`: the SDK's transaction handle. **The library never owns one** — the app calls `db.BeginTransactionAsync()`, passes the handle into Save/Delete/Relate/Unrelate (and into write-mode loads), and calls `tx.CommitAsync()` (or `tx.CancelAsync()`) when its logical unit of work is done.
+- `Disruptor.Surreal.SurrealClient`: the SurrealDB SDK connection — CBOR over WebSocket. The library has no transport layer of its own; you connect once via `SurrealClient.ConnectAsync(...)` and pass the handle into the generated load methods.
+- `Disruptor.Surreal.SurrealTransaction`: the SDK's transaction handle. **The library never owns one** — the app calls `db.BeginTransactionAsync()`, passes the handle into Save/Delete/Relate/Unrelate (and into write-mode loads), and calls `tx.CommitAsync()` (or `tx.CancelAsync()`) when its logical unit of work is done.
 - `SurrealSession`: snapshot-isolated entity store. Sync reads, sync writes (mutate the in-memory snapshot), async dispatch (`SaveAsync` / `DeleteAsync` / `RelateAsync` / `UnrelateAsync`) against an open `Transaction`.
 - `RecordId` and generated `{Entity}Id` types: strongly typed SurrealDB record ids.
 - `SurrealArray<T>`: mutation-aware inline array field wrapper.
@@ -74,7 +74,7 @@ The main runtime concepts are:
 
 The usual flow is:
 
-1. Connect once via `Surreal.ConnectAsync(SurrealOptions.Parse(...))`.
+1. Connect once via `SurrealClient.ConnectAsync(SurrealOptions.Parse(...))`.
 2. Apply the generated schema at startup: `await Workspace.ApplySchemaAsync(db)`.
 3. Read or load. Pick the terminal that matches the workload:
    - **Id selection** — `Workspace.Query.{Table}.Where(...).IdsAsync(db)` returns `IReadOnlyList<{Table}Id>`. The "identify, don't materialise" terminal; pairs with `Hydrate` below.

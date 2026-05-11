@@ -77,7 +77,7 @@ internal static class SchemaEmitter
         sb.Append(memberIndent).AppendLine("public static System.Collections.Generic.IReadOnlyList<string> Schema => DisruptorSurfaceSchema._chunks;");
         sb.AppendLine();
         sb.Append(memberIndent).AppendLine("/// <summary>Applies every chunk of <see cref=\"Schema\"/> to <paramref name=\"db\"/> in order. Idempotent — every <c>DEFINE</c> uses <c>IF NOT EXISTS</c>, so re-running this at boot is safe.</summary>");
-        sb.Append(memberIndent).AppendLine("public static async global::System.Threading.Tasks.Task ApplySchemaAsync(global::Disruptor.Surreal.Surreal db, global::System.Threading.CancellationToken ct = default)");
+        sb.Append(memberIndent).AppendLine("public static async global::System.Threading.Tasks.Task ApplySchemaAsync(global::Disruptor.Surreal.SurrealClient db, global::System.Threading.CancellationToken ct = default)");
         sb.Append(memberIndent).AppendLine("{");
         sb.Append(memberIndent).AppendLine("    foreach (var chunk in Schema)");
         sb.Append(memberIndent).AppendLine("    {");
@@ -85,8 +85,8 @@ internal static class SchemaEmitter
         sb.Append(memberIndent).AppendLine("    }");
         sb.Append(memberIndent).AppendLine("}");
         sb.AppendLine();
-        sb.Append(memberIndent).AppendLine("/// <summary>Applies every chunk of <see cref=\"Schema\"/> inside <paramref name=\"tx\"/> in order. Same idempotency guarantees as the <see cref=\"global::Disruptor.Surreal.Surreal\"/> overload; use this when you want the entire schema apply to land atomically with other in-txn work.</summary>");
-        sb.Append(memberIndent).AppendLine("public static async global::System.Threading.Tasks.Task ApplySchemaAsync(global::Disruptor.Surreal.Transaction tx, global::System.Threading.CancellationToken ct = default)");
+        sb.Append(memberIndent).AppendLine("/// <summary>Applies every chunk of <see cref=\"Schema\"/> inside <paramref name=\"tx\"/> in order. Same idempotency guarantees as the <see cref=\"global::Disruptor.Surreal.SurrealClient\"/> overload; use this when you want the entire schema apply to land atomically with other in-txn work.</summary>");
+        sb.Append(memberIndent).AppendLine("public static async global::System.Threading.Tasks.Task ApplySchemaAsync(global::Disruptor.Surreal.SurrealTransaction tx, global::System.Threading.CancellationToken ct = default)");
         sb.Append(memberIndent).AppendLine("{");
         sb.Append(memberIndent).AppendLine("    foreach (var chunk in Schema)");
         sb.Append(memberIndent).AppendLine("    {");

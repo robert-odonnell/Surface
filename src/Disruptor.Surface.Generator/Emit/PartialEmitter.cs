@@ -1156,17 +1156,17 @@ internal static class PartialEmitter
             .Append(indent)
             .Append("void ")
             .Append(EntityInterface)
-            .Append('.').Append(methodName).AppendLine($"(global::Disruptor.Surreal.Values.Value row, {HydrationSinkType} sink)")
+            .Append('.').Append(methodName).AppendLine($"(global::Disruptor.Surreal.Values.SurrealValue row, {HydrationSinkType} sink)")
             .Append(indent)
             .AppendLine("{");
 
-        // Hydrate is always invoked with an ObjectValue (a row payload). Coerce once at
-        // the top so HydrationValue helpers (which take ObjectValue) and per-field
+        // Hydrate is always invoked with an SurrealObjectValue (a row payload). Coerce once at
+        // the top so HydrationValue helpers (which take SurrealObjectValue) and per-field
         // accesses can operate on the unwrapped object directly. Anything else is
         // silently a no-op.
         builder
             .Append(indent)
-            .AppendLine("    if (row is not global::Disruptor.Surreal.Values.ObjectValue __obj) return;");
+            .AppendLine("    if (row is not global::Disruptor.Surreal.Values.SurrealObjectValue __obj) return;");
 
         // The id anchor: {Name}Id wraps a validated string; pass the canonical RecordId
         // value through directly. DB rows are trusted (we wrote them or Surreal returned
@@ -1327,7 +1327,7 @@ internal static class PartialEmitter
         var inner = OpenGate(builder, indent, gated, fieldLit);
 
         // SurrealArray<T> hydration: read the field as a List<T> via HydrationValue's
-        // generic ReadOrDefault (handles ArrayValue → List<T> and per-element record
+        // generic ReadOrDefault (handles SurrealListValue → List<T> and per-element record
         // construction), then wrap in a new SurrealArray<T> bound to __WriteField for
         // mutation propagation.
         builder.Append(inner)

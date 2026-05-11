@@ -32,15 +32,12 @@ namespace Disruptor.Surface.Generator.Emit;
 internal static class IdsAsyncEmitter
 {
     private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.Query";
-    private const string SurrealFqn = "global::Disruptor.Surreal.Surreal";
-    private const string TransactionFqn = "global::Disruptor.Surreal.Transaction";
+    private const string SurrealFqn = "global::Disruptor.Surreal.SurrealClient";
+    private const string TransactionFqn = "global::Disruptor.Surreal.SurrealTransaction";
     private const string CtFqn = "global::System.Threading.CancellationToken";
     private const string TaskFqn = "global::System.Threading.Tasks.Task";
     private const string ListFqn = "global::System.Collections.Generic.List";
     private const string ReadOnlyListFqn = "global::System.Collections.Generic.IReadOnlyList";
-    private const string ResultSetFqn = "global::Disruptor.Surface.Runtime.SurrealResultSet";
-    private const string HydrationJsonFqn = "global::Disruptor.Surface.Runtime.HydrationJson";
-    private const string JsonValueKindFqn = "global::System.Text.Json.JsonValueKind";
 
     public static void Emit(SourceProductionContext spc, TableModel table)
     {
@@ -72,7 +69,7 @@ internal static class IdsAsyncEmitter
         sb.Append(indent).AppendLine("{");
 
         // Two overloads: Surreal db + Transaction tx. Both call QueryAsync directly
-        // and consume the SDK's QueryResponse / Value tree — no JSON bridge.
+        // and consume the SDK's SurrealQueryResponse / SurrealValue tree — no JSON bridge.
         EmitOverload(SurrealFqn, "db");
         sb.AppendLine();
         EmitOverload(TransactionFqn, "tx");
@@ -94,16 +91,16 @@ internal static class IdsAsyncEmitter
             sb.AppendLine();
 
             sb.Append(bodyIndent).Append("var list = new ").Append(ListFqn).Append('<').Append(idFqn).AppendLine(">();");
-            sb.Append(bodyIndent).AppendLine("if (rows is global::Disruptor.Surreal.Values.ArrayValue __arr)");
+            sb.Append(bodyIndent).AppendLine("if (rows is global::Disruptor.Surreal.Values.SurrealListValue __arr)");
             sb.Append(bodyIndent).AppendLine("{");
-            sb.Append(bodyIndent).AppendLine("    foreach (var __item in __arr.Array)");
+            sb.Append(bodyIndent).AppendLine("    foreach (var __item in __arr.List)");
             sb.Append(bodyIndent).AppendLine("    {");
-            sb.Append(bodyIndent).AppendLine("        if (__item is not global::Disruptor.Surreal.Values.ObjectValue __row) continue;");
+            sb.Append(bodyIndent).AppendLine("        if (__item is not global::Disruptor.Surreal.Values.SurrealObjectValue __row) continue;");
             sb.Append(bodyIndent).AppendLine("        if (global::Disruptor.Surface.Runtime.HydrationValue.TryReadRecordId(__row, \"id\", out var rid))");
             sb.Append(bodyIndent).Append("            list.Add(new ").Append(idFqn).AppendLine("(rid.Value));");
             sb.Append(bodyIndent).AppendLine("    }");
             sb.Append(bodyIndent).AppendLine("}");
-            sb.Append(bodyIndent).AppendLine("else if (rows is global::Disruptor.Surreal.Values.ObjectValue __single)");
+            sb.Append(bodyIndent).AppendLine("else if (rows is global::Disruptor.Surreal.Values.SurrealObjectValue __single)");
             sb.Append(bodyIndent).AppendLine("{");
             sb.Append(bodyIndent).AppendLine("    if (global::Disruptor.Surface.Runtime.HydrationValue.TryReadRecordId(__single, \"id\", out var rid))");
             sb.Append(bodyIndent).Append("        list.Add(new ").Append(idFqn).AppendLine("(rid.Value));");

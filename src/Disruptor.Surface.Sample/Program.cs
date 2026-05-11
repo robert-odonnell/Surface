@@ -4,7 +4,7 @@ using Disruptor.Surface.Sample;
 using Disruptor.Surface.Sample.Models;
 using Disruptor.Surface.Sample.Relations;
 using Disruptor.Surreal.Connection;
-using SdkSurreal = Disruptor.Surreal.Surreal;
+using SdkSurreal = Disruptor.Surreal.SurrealClient;
 
 // Mirror of: surreal start --bind 127.0.0.1:8000 --default-namespace project-brain
 //                          --default-database workspace --username root --password secret

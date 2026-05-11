@@ -140,15 +140,15 @@ public sealed class EdgeQuery<TIn, TOut>
     /// projects each row to an <see cref="EdgeRow"/>. Returns an empty list on null /
     /// undefined results.
     /// </summary>
-    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.Surreal db, CancellationToken ct = default)
+    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default)
         => ExecuteAsync((sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
 
-    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.Surreal, CancellationToken)"/>
-    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.Transaction tx, CancellationToken ct = default)
+    /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.SurrealClient, CancellationToken)"/>
+    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default)
         => ExecuteAsync((sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
 
     private async Task<IReadOnlyList<EdgeRow>> ExecuteAsync(
-        Func<string, CancellationToken, Task<Disruptor.Surreal.QueryResponse>> queryFn,
+        Func<string, CancellationToken, Task<Disruptor.Surreal.SurrealQueryResponse>> queryFn,
         CancellationToken ct)
     {
         var sql = EdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra, orderClauses, limitCount, startAt);
@@ -156,21 +156,21 @@ public sealed class EdgeQuery<TIn, TOut>
         var rows = response.Count > 0 ? response.Statements[0].Result : null;
 
         var list = new List<EdgeRow>();
-        if (rows is ArrayValue arr)
+        if (rows is SurrealListValue arr)
         {
-            foreach (var row in arr.Array)
+            foreach (var row in arr.List)
             {
-                if (row is ObjectValue obj) list.Add(ReadEdgeRow(obj));
+                if (row is SurrealObjectValue obj) list.Add(ReadEdgeRow(obj));
             }
         }
-        else if (rows is ObjectValue single)
+        else if (rows is SurrealObjectValue single)
         {
             list.Add(ReadEdgeRow(single));
         }
         return list;
     }
 
-    private static EdgeRow ReadEdgeRow(ObjectValue row)
+    private static EdgeRow ReadEdgeRow(SurrealObjectValue row)
     {
         var src = HydrationValue.ReadRecordId(row.Object["in"]);
         var tgt = HydrationValue.ReadRecordId(row.Object["out"]);

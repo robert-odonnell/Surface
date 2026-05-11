@@ -46,7 +46,7 @@ public partial class Workspace { }
 The generator emits everything needed to make this work end-to-end:
 
 - Per-table `{Name}Id` `readonly record struct` with implicit conversion to the canonical `RecordId`
-- Two `Workspace.Load{Root}Async` overloads grafted onto your `[CompositionRoot]` partial — one taking `Disruptor.Surreal.Surreal db` (read-only), one taking `Disruptor.Surreal.Transaction tx` (write-mode load that sees in-txn writes)
+- Two `Workspace.Load{Root}Async` overloads grafted onto your `[CompositionRoot]` partial — one taking `Disruptor.Surreal.SurrealClient db` (read-only), one taking `Disruptor.Surreal.SurrealTransaction tx` (write-mode load that sees in-txn writes)
 - A unified query surface with terminal verbs sharing one AST — `…IdsAsync(db|tx)` for id-only selection (`IReadOnlyList<{Table}Id>`), `…Select(projection).ExecuteAsync(db|tx)` for projection rows, `…ExecuteAsync(db|tx)` for hydrated entities, `…WithId(id).IncludeConstraints(c => c.Where(...)).LoadAsync(db|tx)` for filtered write-mode loads of an aggregate root, `Workspace.Hydrate.{Table}(ids).WithInclude(...).ExecuteAsync(db|tx)` to materialise a non-aggregate slice into a tracked session, and `Workspace.Query.Edges.Restricts.WhereIn(...).ExecuteAsync(db|tx)` for flat edge pairs. Strict-with-escape on filtered loads — unloaded slices throw `LoadShapeViolationException`, `session.FetchAsync(...)` extends the slice in place
 - A `SurrealSession` surface with sync reads (`design.Description`, `design.Constraints`) and sync mutations into the in-memory snapshot
 - Per-entity dispatch via `session.SaveAsync(entity, tx, ct)` — auto-recursive on the entity's reference graph (forward refs → entity → new children → new outgoing relations) as a whole-entity `CREATE/UPDATE … CONTENT { ... }`
@@ -73,7 +73,7 @@ telemetry, and DI however you want. The library only contributes the load method
 using Disruptor.Surreal;
 
 // One-shot SDK connection. CBOR over WebSocket.
-await using var db = await Surreal.ConnectAsync(SurrealOptions.Parse(
+await using var db = await SurrealClient.ConnectAsync(SurrealOptions.Parse(
     "Url=ws://localhost:8000;Namespace=app;Database=main;User=root;Password=root"));
 
 // Bootstrap (idempotent — every run is fine). One RPC per chunk so a failure
@@ -233,7 +233,7 @@ Plus aggregate / relation marker attributes:
   nothing touches Surreal until you call an async dispatch method (`SaveAsync`,
   `DeleteAsync`, `RelateAsync`, `UnrelateAsync`) against an app-owned `Transaction`.
 - **App-owned `Transaction`.** The library never opens or commits transactions. The
-  app calls `db.BeginTransactionAsync()` to get a `Disruptor.Surreal.Transaction`,
+  app calls `db.BeginTransactionAsync()` to get a `Disruptor.Surreal.SurrealTransaction`,
   passes the handle into Save/Delete/Relate/Unrelate (and into write-mode loads), and
   calls `tx.CommitAsync()` (or `tx.CancelAsync()`) when its logical unit of work is
   done. Cross-session, cross-aggregate, mixed raw SDK calls — all atomic if they share
