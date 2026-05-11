@@ -133,6 +133,37 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
+    public void InlineRecordCollectionHydrate_PreservesNullableMembers()
+    {
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using System.Collections.Generic;
+            namespace M;
+
+            public sealed record Scenario(string? Title, int? Estimate, string Key, int Count);
+
+            [Table] public partial class Root {
+                [Id] public partial RootId Id { get; set; }
+                [Property] public partial IReadOnlyList<Scenario> Scenarios { get; }
+            }
+            """;
+
+        var (result, _, _, compileDiags) = GeneratorHarness.Run(src);
+        Assert.Empty(compileDiags);
+
+        var rootFile = GeneratorHarness.FindGeneratedFile(result, "M.Root.g.cs");
+        Assert.NotNull(rootFile);
+
+        var rootSrc = rootFile.ToString();
+        Assert.Contains("Title: global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<string>(__eo_scenarios, \"title\"),", rootSrc);
+        Assert.Contains("Estimate: global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<int?>(__eo_scenarios, \"estimate\"),", rootSrc);
+        Assert.Contains("Key: global::Disruptor.Surface.Runtime.HydrationValue.ReadString(__eo_scenarios, \"key\"),", rootSrc);
+        Assert.Contains("Count: global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<int>(__eo_scenarios, \"count\")", rootSrc);
+        Assert.DoesNotContain("Title: global::Disruptor.Surface.Runtime.HydrationValue.ReadString(__eo_scenarios, \"title\")", rootSrc);
+        Assert.DoesNotContain("Estimate: global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<int>(__eo_scenarios, \"estimate\")", rootSrc);
+    }
+
+    [Fact]
     public void Loader_EmitsEdgeSubselect_ForMultiSourceRelationKind()
     {
         // Bug regression: BuildEdgeWhere previously delegated to a FindSingleSourceTable
@@ -1120,6 +1151,14 @@ public sealed class EmissionShapeTests
 
         // SaveAsync impl signature.
         Assert.Contains(".SaveAsync(global::Disruptor.Surface.Runtime.ISaveContext ctx, global::System.Threading.CancellationToken ct)", src);
+        // Endpoint ids are resolved explicitly before building $_content; missing
+        // entity-typed endpoints throw a clear error instead of dereferencing null.
+        Assert.Contains("var __sourceId = _sourceId ?? (_source is { } __sourceEntity ? ((global::Disruptor.Surface.Runtime.IEntity)__sourceEntity).Id : throw new global::System.InvalidOperationException(\"Endpoint 'Source' is not set.\"));", src);
+        Assert.Contains("var __targetId = _targetId ?? (_target is { } __targetEntity ? ((global::Disruptor.Surface.Runtime.IEntity)__targetEntity).Id : throw new global::System.InvalidOperationException(\"Endpoint 'Target' is not set.\"));", src);
+        Assert.Contains("[\"in\"] = new global::Disruptor.Surreal.Values.SurrealRecordIdValue(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk(__sourceId)),", src);
+        Assert.Contains("[\"out\"] = new global::Disruptor.Surreal.Values.SurrealRecordIdValue(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk(__targetId)),", src);
+        Assert.DoesNotContain("_sourceId ?? ((global::Disruptor.Surface.Runtime.IEntity)_source).Id", src);
+        Assert.DoesNotContain("_targetId ?? ((global::Disruptor.Surface.Runtime.IEntity)_target).Id", src);
         // SQL emission — INSERT RELATION INTO restricts $_content ON DUPLICATE KEY UPDATE severity = $_p_severity;
         Assert.Contains("INSERT RELATION INTO restricts $_content ON DUPLICATE KEY UPDATE severity = $_p_severity;", src);
 

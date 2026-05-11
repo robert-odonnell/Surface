@@ -1365,16 +1365,19 @@ internal static class PartialEmitter
             var im = p.InlineMembers[i];
             var subLit = Quote(SurrealNaming.ToFieldName(im.Name));
             var typeFqn = im.Type.FullyQualifiedName;
-            // String fast-path mirrors EmitHydrateValueProperty's optimisation.
+            // String fast-path mirrors EmitHydrateValueProperty's optimisation:
+            // only non-nullable strings use the empty-string fallback.
             var trailing = i == p.InlineMembers.Count - 1 ? "" : ",";
-            if (typeFqn is "string" or "global::System.String" or "string?" or "global::System.String?")
+            var nullable = im.Type.IsNullable;
+            var isString = typeFqn is "string" or "global::System.String" or "string?" or "global::System.String?";
+            if (!nullable && isString)
             {
                 builder.Append(indent).Append("                ").Append(im.Name).Append(": global::Disruptor.Surface.Runtime.HydrationValue.ReadString(")
                     .Append(elemObjLocal).Append(", ").Append(subLit).Append(')').AppendLine(trailing);
             }
             else
             {
-                var deserialiseAs = StripNullable(typeFqn);
+                var deserialiseAs = nullable && !isString ? typeFqn : StripNullable(typeFqn);
                 builder.Append(indent).Append("                ").Append(im.Name).Append(": global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<")
                     .Append(deserialiseAs).Append(">(").Append(elemObjLocal).Append(", ").Append(subLit).Append(')').AppendLine(trailing);
             }

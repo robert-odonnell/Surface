@@ -539,9 +539,22 @@ internal static class RelationVariantEmitter
     /// </summary>
     private static void EmitSetReferenceTo(StringBuilder sb, string indent, RelationVariantModel variant)
     {
+        var hasNullableEndpoint = variant.In.Type.IsNullable || variant.Out.Type.IsNullable;
+
         sb.Append(indent).Append("void ").Append(EntityEmitterCommon.EntityInterface)
-          .AppendLine(".SetReferenceTo(string fieldName, global::Disruptor.Surface.Runtime.RecordId? value)")
-          .Append(indent).AppendLine("{")
+          .AppendLine(".SetReferenceTo(string fieldName, global::Disruptor.Surface.Runtime.RecordId? value)");
+
+        if (!hasNullableEndpoint)
+        {
+            // Skip the switch when no case will be emitted — both endpoints non-nullable
+            // means there's nothing to unset, and an empty switch would trip CS1522.
+            sb.Append(indent).AppendLine("{")
+              .Append(indent).AppendLine("    // Both [In] and [Out] are non-nullable; nothing to unset.")
+              .Append(indent).AppendLine("}");
+            return;
+        }
+
+        sb.Append(indent).AppendLine("{")
           .Append(indent).AppendLine("    switch (fieldName)")
           .Append(indent).AppendLine("    {");
 
@@ -629,13 +642,20 @@ internal static class RelationVariantEmitter
             sb.AppendLine();
         }
 
+        var inEndpointId = EmitEndpointIdResolution(sb, indent, variant.In);
+        var outEndpointId = EmitEndpointIdResolution(sb, indent, variant.Out);
+        if (variant.In.Type.IsTableType || variant.Out.Type.IsTableType)
+        {
+            sb.AppendLine();
+        }
+
         // Build the wire content: id + in + out + payload fields.
         sb.Append(indent).AppendLine("    var __content = new global::Disruptor.Surreal.Values.SurrealObject")
           .Append(indent).AppendLine("    {")
           .Append(indent).AppendLine("        [\"id\"] = new global::Disruptor.Surreal.Values.SurrealRecordIdValue(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk(__id)),");
 
-        EmitContentEndpoint(sb, indent, variant.In, "in");
-        EmitContentEndpoint(sb, indent, variant.Out, "out");
+        EmitContentEndpoint(sb, indent, variant.In, "in", inEndpointId);
+        EmitContentEndpoint(sb, indent, variant.Out, "out", outEndpointId);
 
         sb.Append(indent).AppendLine("    };");
 
@@ -729,19 +749,36 @@ internal static class RelationVariantEmitter
           .Append(".MarkAllSlicesLoaded(").Append(EntityEmitterCommon.HydrationSinkType).AppendLine(" sink) { }");
     }
 
-    private static void EmitContentEndpoint(StringBuilder sb, string indent, RelationVariantPropertyModel p, string fieldName)
+    private static string? EmitEndpointIdResolution(StringBuilder sb, string indent, RelationVariantPropertyModel p)
+    {
+        if (!p.Type.IsTableType)
+        {
+            return null;
+        }
+
+        var entityBacking = $"_{ToCamel(p.Name)}";
+        var idBacking = $"_{ToCamel(p.Name)}Id";
+        var idLocal = $"__{ToCamel(p.Name)}Id";
+        var entityLocal = $"__{ToCamel(p.Name)}Entity";
+
+        sb.Append(indent).Append("    var ").Append(idLocal).Append(" = ").Append(idBacking)
+          .Append(" ?? (").Append(entityBacking).Append(" is { } ").Append(entityLocal)
+          .Append(" ? ((").Append(EntityEmitterCommon.EntityInterface).Append(')').Append(entityLocal).Append(").Id")
+          .Append(" : throw new global::System.InvalidOperationException(\"Endpoint '").Append(p.Name).AppendLine("' is not set.\"));");
+
+        return idLocal;
+    }
+
+    private static void EmitContentEndpoint(StringBuilder sb, string indent, RelationVariantPropertyModel p, string fieldName, string? resolvedEndpointId)
     {
         var fieldLit = Quote(fieldName);
         if (p.Type.IsTableType)
         {
-            // Entity-typed: prefer the cached id; fall back to the entity ref's .Id.
-            // Builder pattern matches the entity SaveAsync's [Reference] / [Parent]
-            // dispatch.
-            var entityBacking = $"_{ToCamel(p.Name)}";
-            var idBacking = $"_{ToCamel(p.Name)}Id";
+            // Entity-typed endpoints were resolved into explicit locals above so a
+            // missing endpoint produces a clear error instead of a nullable dereference.
             sb.Append(indent).Append("        [").Append(fieldLit)
               .Append("] = new global::Disruptor.Surreal.Values.SurrealRecordIdValue(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk(")
-              .Append(idBacking).Append(" ?? ((global::Disruptor.Surface.Runtime.IEntity)").Append(entityBacking).AppendLine(").Id)),");
+              .Append(resolvedEndpointId).AppendLine(")),");
         }
         else
         {
