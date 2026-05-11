@@ -836,28 +836,28 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     }
 
     /// <summary>
-    /// Dispatches a RELATE through <paramref name="tx"/>: creates an edge of kind
-    /// <typeparamref name="TKind"/> from <paramref name="source"/> to <paramref name="target"/>.
+    /// Idempotently creates an edge of kind <typeparamref name="TKind"/> from
+    /// <paramref name="source"/> to <paramref name="target"/> through <paramref name="tx"/>.
     /// Updates the in-memory edge index too so subsequent reads see the new edge.
     /// <para>
     /// No explicit edge id and no payload — the edge id defaults to
     /// <see cref="RecordId.Idempotent"/> (deterministic hash of <c>{source}|{table}|{target}</c>),
-    /// so re-dispatching the same triple lands on the same row. The schema's
-    /// <c>UNIQUE INDEX</c> guards against duplicates regardless. Use the four-arg
-    /// overload to override the edge id, or pass a <c>payload</c> dictionary for
-    /// <c>RELATE … CONTENT { … }</c>.
+    /// dispatched as <c>INSERT RELATION IGNORE INTO {edge} { id, in, out }</c>. Re-running
+    /// the same triple is a substrate-side no-op (IGNORE absorbs the duplicate id and
+    /// the UNIQUE INDEX violation). Use the four-arg overload to override the edge id,
+    /// or pass a <c>payload</c> dictionary for the equivalent of <c>RELATE … CONTENT</c>.
     /// </para>
     /// </summary>
     public Task RelateAsync<TKind>(IRecordId source, IRecordId target, SurrealTransaction tx, CancellationToken ct = default)
         where TKind : IRelationKind
         => RelateAsyncCore<TKind>(source, target, explicitEdge: null, payload: null, tx, ct);
 
-    /// <summary>RELATE with a caller-specified edge id (Random Ulid, Slug, or explicit Idempotent).</summary>
+    /// <summary>Idempotent RELATE with a caller-specified edge id (Random Ulid, Slug, or explicit Idempotent). IGNORE absorbs duplicate-id and UNIQUE INDEX (in, out) conflicts.</summary>
     public Task RelateAsync<TKind>(IRecordId source, IRecordId target, RecordId edge, SurrealTransaction tx, CancellationToken ct = default)
         where TKind : IRelationKind
         => RelateAsyncCore<TKind>(source, target, edge, payload: null, tx, ct);
 
-    /// <summary>RELATE with payload — emits <c>RELATE src-&gt;edge-&gt;tgt CONTENT { … }</c>. Edge id defaults to Idempotent.</summary>
+    /// <summary>RELATE with payload — first call wins; a re-call with different payload is a no-op (IGNORE semantics). UPDATE the edge id directly if you need to mutate payload.</summary>
     public Task RelateAsync<TKind>(IRecordId source, IRecordId target, IReadOnlyDictionary<string, object?> payload, SurrealTransaction tx, CancellationToken ct = default)
         where TKind : IRelationKind
     {
@@ -906,20 +906,26 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
             var edge = (explicitEdge ?? RecordId.Idempotent(TKind.EdgeName)).Resolve(src, tgt);
             state.Edges.Add((src, TKind.EdgeName, tgt));
 
-            // Typed UPSERT against the resolved edge id. Same shape as entity Save
-            // (tx.UpsertAsync, CONTENT replaces the row) — and with the Idempotent
-            // strategy the edge id is a deterministic hash of (src, table, tgt), so
-            // re-running the same triple lands on the same row and updates in place
-            // instead of tripping the schema's UNIQUE INDEX on (in, out). No
-            // "loaded at start" diff needed: the substrate handles dedup at the row
-            // level, not the application.
+            // INSERT RELATION IGNORE — SurrealDB's substrate-native idempotent edge
+            // create. The IGNORE clause makes a duplicate id (or a duplicate (in, out)
+            // tripping the UNIQUE INDEX) a silent no-op rather than an error, so
+            // re-running RelateAsync on the same triple is safe. The RELATION keyword
+            // satisfies TYPE RELATION ENFORCED schemas (which UPSERT does NOT — UPSERT
+            // creates a regular row that the substrate then refuses to recognise as a
+            // valid edge; preview.46 was wrong about this).
             //
-            // For caller-minted edge ids (Random Ulid / Slug), behaviour is unchanged
-            // from the prior RELATE path: a different id for the same (in, out) pair
-            // still fails the unique index, exactly as the user's intent ("I want a
-            // distinct row") would expect.
+            // Semantic note: with IGNORE, the FIRST RelateAsync call wins. A second
+            // call with a different payload is a no-op — payload is not updated. Users
+            // wanting to change payload should UPDATE the edge id directly. This
+            // matches the "Relate is idempotent" contract: re-calling is safe and
+            // doesn't surprise-write.
+            //
+            // For caller-minted edge ids (Random Ulid / Slug), behaviour is the same:
+            // a different id for the same (in, out) pair trips the unique index and
+            // IGNORE silently absorbs it — no error, no duplicate row.
             var content = new SurrealObject
             {
+                ["id"] = new SurrealRecordIdValue(edge.ToSdk()),
                 ["in"] = new SurrealRecordIdValue(src.ToSdk()),
                 ["out"] = new SurrealRecordIdValue(tgt.ToSdk()),
             };
@@ -931,7 +937,10 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                 }
             }
 
-            await tx.UpsertAsync(edge.ToSdk(), content, ct).ConfigureAwait(false);
+            var sql = $"INSERT RELATION IGNORE INTO {TKind.EdgeName.Identifier()} $_content;";
+            var bindings = new SurrealObject { ["_content"] = new SurrealObjectValue(content) };
+            var response = await tx.QueryAsync(sql, bindings, ct).ConfigureAwait(false);
+            response.EnsureSuccess();
             Record(Command.Relate(src, edge, tgt, payload));
         }
         catch
