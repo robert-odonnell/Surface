@@ -25,8 +25,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class PredicateFactoryEmitter
 {
-    private const string PropertyExprFqn = "global::Disruptor.Surface.Runtime.Query.PropertyExpr";
-
     private static bool IsElementCollection(TypeRef t) =>
         t.MetadataName is "System.Collections.Generic.IReadOnlyList`1"
                        or "System.Collections.Generic.IList`1"
@@ -46,12 +44,11 @@ internal static class PredicateFactoryEmitter
         var writer = new CodeWriter().Header();
         using (writer.Namespace(table.Namespace))
         {
-            writer.Line($"/// <summary>Predicate factory for <see cref=\"{table.Name}\"/>. One <c>PropertyExpr&lt;T&gt;</c> per scalar column; compose via <c>.Eq(...)</c> and the <c>Predicate</c> static helpers.</summary>");
             using (writer.Block($"public static class {qTypeName}"))
             {
                 foreach (var (propertyName, surrealField, csharpType) in members)
                 {
-                    writer.Line($"public static readonly {PropertyExprFqn}<{csharpType}> {propertyName} = new(\"{surrealField}\");");
+                    writer.Line($"public static readonly {Namespaces.PropertyExprFqn}<{csharpType}> {propertyName} = new(\"{surrealField}\");");
                 }
             }
         }

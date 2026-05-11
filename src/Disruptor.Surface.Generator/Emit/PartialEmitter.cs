@@ -32,10 +32,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class PartialEmitter
 {
-    private const string SessionType = "global::Disruptor.Surface.Runtime.SurrealSession";
-    private const string EntityInterface = "global::Disruptor.Surface.Runtime.IEntity";
-    private const string HydrationSinkType = "global::Disruptor.Surface.Runtime.IHydrationSink";
-
     /// <summary>
     /// True when <paramref name="t"/> is one of the recognised element-collection shapes
     /// for a <c>[Property]</c> column: <c>IReadOnlyList&lt;T&gt;</c>, <c>IList&lt;T&gt;</c>,
@@ -84,7 +80,8 @@ internal static class PartialEmitter
                 : string.Empty;
             declarationParts.Add($"partial class {table.Name}{typeParameters}");
 
-            var baseTypes = new List<string> { EntityInterface };
+            var baseTypes = new List<string> {
+                Namespaces.EntityInterface };
             baseTypes.AddRange(graph.UnionsForTable(table.FullName).Select(union => $"global::{union.InterfaceFullName}"));
             var declaration = $"{string.Join(" ", declarationParts)} : {string.Join(", ", baseTypes)}";
 
@@ -95,7 +92,6 @@ internal static class PartialEmitter
                 // The id anchor is emitted unconditionally — the runtime needs IEntity.Id to read
                 // every entity's identity, and the typed {Name}Id struct is always emitted by
                 // IdEmitter regardless of whether the user opted into a public-facing [Id] property.
-                writer.Line();
                 EmitIdAnchor(writer, table);
 
                 var mandatoryRefs = new List<PropertyModel>();
@@ -103,7 +99,6 @@ internal static class PartialEmitter
 
                 foreach (var t in partialProps)
                 {
-                    writer.Line();
                     EmitProperty(writer, t, graph);
 
                     if (IsMandatoryReference(t))
@@ -118,24 +113,20 @@ internal static class PartialEmitter
 
                 // Initialize hook always emitted, even when empty — IEntity demands it and a
                 // no-op for entities without mandatory refs is the cleanest path.
-                writer.Line();
                 EmitInitialize(writer, mandatoryRefs);
 
                 // Hydrate hook — invoked by the per-aggregate loader on each loaded row.
-                writer.Line();
                 EmitHydrate(writer, table);
 
                 // OnDeleting hook — invoked by Session.DeleteAsync(IEntity) before the entity's
                 // own DELETE is dispatched. User can implement the simple-form partial method to
                 // queue child deletes / clears.
-                writer.Line();
                 EmitOnDeleting(writer);
 
                 // MarkAllSlicesLoaded — used by the legacy aggregate loader (after Hydrate) and by
                 // SurrealSession.Track<T> (fresh-entity path) to declare every slice on this entity
                 // is "loaded". The compiler-driven path marks slices selectively via the include
                 // AST instead.
-                writer.Line();
                 EmitMarkAllSlicesLoaded(writer, table);
 
                 // GetParentId — emitted iff the entity has a [Parent] property. Default-interface
@@ -143,7 +134,6 @@ internal static class PartialEmitter
                 // to match a child against its parent owner.
                 if (parentProp is not null)
                 {
-                    writer.Line();
                     EmitGetParentId(writer, parentProp);
                 }
 
@@ -157,14 +147,12 @@ internal static class PartialEmitter
                     p.Kinds.HasFlag(PropertyKind.Reference) || p.Kinds.HasFlag(PropertyKind.Parent)).ToList();
                 if (refLikeProps.Count > 0)
                 {
-                    writer.Line();
                     EmitEnumerateReferences(writer, refLikeProps);
 
                     var unsetableProps = refLikeProps.Where(p =>
                         p.Kinds.HasFlag(PropertyKind.Reference) && p.Type.IsNullable).ToList();
                     if (unsetableProps.Count > 0)
                     {
-                        writer.Line();
                         EmitSetReferenceTo(writer, unsetableProps);
                     }
                 }
@@ -172,7 +160,6 @@ internal static class PartialEmitter
                 // SaveAsync — generator-emitted per-entity Save dispatch. Walks forward dependencies
                 // (Reference / Parent) via backing fields, dispatches CREATE/UPDATE-with-CONTENT,
                 // recurses into new children, dispatches new outgoing relations.
-                writer.Line();
                 EmitSaveAsync(writer, table);
             }
         }
@@ -270,11 +257,8 @@ internal static class PartialEmitter
 
         writer.Line($"private readonly {listType} {backing} = new();");
         writer.Line($"{access} partial {declaredType} {p.Name} => {backing};");
-        writer.Line($"/// <summary>Append a <typeparamref name=\"T\"/> to <see cref=\"{p.Name}\"/>.</summary>");
         writer.Line($"public void Add{singular}({elementType} item) => {backing}.Add(item);");
-        writer.Line($"/// <summary>Remove the first matching <typeparamref name=\"T\"/> from <see cref=\"{p.Name}\"/>; returns true on a hit.</summary>");
         writer.Line($"public bool Remove{singular}({elementType} item) => {backing}.Remove(item);");
-        writer.Line($"/// <summary>Empty <see cref=\"{p.Name}\"/>.</summary>");
         writer.Line($"public void Clear{p.Name}() => {backing}.Clear();");
     }
 
@@ -289,7 +273,7 @@ internal static class PartialEmitter
     {
         var idType = $"global::{(string.IsNullOrEmpty(table.Namespace) ? table.Name : $"{table.Namespace}.{table.Name}")}Id";
         writer.Line($"private {idType}? _id;");
-        writer.Line($"global::Disruptor.Surface.Runtime.RecordId {EntityInterface}.Id => _id ??= {idType}.New();");
+        writer.Line($"global::Disruptor.Surface.Runtime.RecordId {Namespaces.EntityInterface}.Id => _id ??= {idType}.New();");
     }
 
     /// <summary>
@@ -419,14 +403,14 @@ internal static class PartialEmitter
                 {
                     writer.Line($"{backing} = value;");
                     writer.Line(nullable
-                        ? $"{idBacking} = value is null ? null : (({EntityInterface})value).Id;"
-                        : $"{idBacking} = (({EntityInterface})value).Id;");
+                        ? $"{idBacking} = value is null ? null : (({Namespaces.EntityInterface})value).Id;"
+                        : $"{idBacking} = (({Namespaces.EntityInterface})value).Id;");
                     // Cascade-track: assigning a parent that's bound to a session should pull
                     // this child into that session, so the parent's [Children] sees it at Save
                     // time. AdoptIfUnbound is a no-op when this entity already has a session.
                     // IEntity.Session is the explicit-impl public accessor; the parent's own
                     // `protected Session` would be inaccessible from this site.
-                    writer.Line($"if (value is not null && (({EntityInterface})value).Session is {{ }} __ps) __ps.AdoptIfUnbound(this);");
+                    writer.Line($"if (value is not null && (({Namespaces.EntityInterface})value).Session is {{ }} __ps) __ps.AdoptIfUnbound(this);");
                 }
             }
         }
@@ -511,8 +495,8 @@ internal static class PartialEmitter
                 {
                     writer.Line($"{backing} = value;");
                     writer.Line(nullable
-                        ? $"{idBacking} = value is null ? null : (({EntityInterface})value).Id;"
-                        : $"{idBacking} = (({EntityInterface})value).Id;");
+                        ? $"{idBacking} = value is null ? null : (({Namespaces.EntityInterface})value).Id;"
+                        : $"{idBacking} = (({Namespaces.EntityInterface})value).Id;");
                 }
             }
         }
@@ -683,18 +667,13 @@ internal static class PartialEmitter
             writer.Line($"partial void OnCreate{p.Name}({typeArg} entity);");
         }
 
-        if (mandatoryRefs.Count > 0)
-        {
-            writer.Line();
-        }
-
         if (mandatoryRefs.Count == 0)
         {
-            writer.Line($"void {EntityInterface}.Initialize({SessionType} session) {{ }}");
+            writer.Line($"void {Namespaces.EntityInterface}.Initialize({Namespaces.SessionType} session) {{ }}");
             return;
         }
 
-        using (writer.Block($"void {EntityInterface}.Initialize({SessionType} session)"))
+        using (writer.Block($"void {Namespaces.EntityInterface}.Initialize({Namespaces.SessionType} session)"))
         {
             foreach (var p in mandatoryRefs)
             {
@@ -706,7 +685,7 @@ internal static class PartialEmitter
                 {
                     writer.Line($"{backing} = new {typeArg}();");
                     writer.Line($"OnCreate{p.Name}({backing});");
-                    writer.Line($"{idBacking} = (({EntityInterface}){backing}).Id;");
+                    writer.Line($"{idBacking} = (({Namespaces.EntityInterface}){backing}).Id;");
                 }
             }
         }
@@ -727,8 +706,7 @@ internal static class PartialEmitter
     private static void EmitOnDeleting(CodeWriter writer)
     {
         writer.Line("partial void OnDeleting();");
-        writer.Line();
-        writer.Line($"void {EntityInterface}.OnDeleting() => OnDeleting();");
+        writer.Line($"void {Namespaces.EntityInterface}.OnDeleting() => OnDeleting();");
     }
 
     /// <summary>
@@ -740,9 +718,9 @@ internal static class PartialEmitter
     /// </summary>
     private static void EmitMarkAllSlicesLoaded(CodeWriter writer, TableModel table)
     {
-        using (writer.Block($"void {EntityInterface}.MarkAllSlicesLoaded({HydrationSinkType} sink)"))
+        using (writer.Block($"void {Namespaces.EntityInterface}.MarkAllSlicesLoaded({Namespaces.HydrationSinkType} sink)"))
         {
-            writer.Line($"var __id = (({EntityInterface})this).Id;");
+            writer.Line($"var __id = (({Namespaces.EntityInterface})this).Id;");
 
             foreach (var p in table.Properties)
             {
@@ -775,7 +753,7 @@ internal static class PartialEmitter
     private static void EmitGetParentId(CodeWriter writer, PropertyModel parentProp)
     {
         var idBacking = $"_{ToCamel(parentProp.Name)}Id";
-        writer.Line($"global::Disruptor.Surface.Runtime.RecordId? {EntityInterface}.GetParentId() => {idBacking};");
+        writer.Line($"global::Disruptor.Surface.Runtime.RecordId? {Namespaces.EntityInterface}.GetParentId() => {idBacking};");
     }
 
     /// <summary>
@@ -787,7 +765,7 @@ internal static class PartialEmitter
     /// </summary>
     private static void EmitEnumerateReferences(CodeWriter writer, IReadOnlyList<PropertyModel> refLikeProps)
     {
-        using (writer.Block($"global::System.Collections.Generic.IEnumerable<(string FieldName, global::Disruptor.Surface.Runtime.RecordId? Target)> {EntityInterface}.EnumerateReferences()"))
+        using (writer.Block($"global::System.Collections.Generic.IEnumerable<(string FieldName, global::Disruptor.Surface.Runtime.RecordId? Target)> {Namespaces.EntityInterface}.EnumerateReferences()"))
         {
             foreach (var p in refLikeProps)
             {
@@ -810,7 +788,7 @@ internal static class PartialEmitter
     /// </summary>
     private static void EmitSetReferenceTo(CodeWriter writer, IReadOnlyList<PropertyModel> unsetableProps)
     {
-        using (writer.Block($"void {EntityInterface}.SetReferenceTo(string fieldName, global::Disruptor.Surface.Runtime.RecordId? value)"))
+        using (writer.Block($"void {Namespaces.EntityInterface}.SetReferenceTo(string fieldName, global::Disruptor.Surface.Runtime.RecordId? value)"))
         {
             using (writer.Block("switch (fieldName)"))
             {
@@ -847,16 +825,14 @@ internal static class PartialEmitter
     /// </summary>
     private static void EmitSaveAsync(CodeWriter writer, TableModel table)
     {
-        using (writer.Block($"async global::System.Threading.Tasks.Task {EntityInterface}.SaveAsync(global::Disruptor.Surface.Runtime.ISaveContext ctx, global::System.Threading.CancellationToken ct)"))
+        using (writer.Block($"async global::System.Threading.Tasks.Task {Namespaces.EntityInterface}.SaveAsync(global::Disruptor.Surface.Runtime.ISaveContext ctx, global::System.Threading.CancellationToken ct)"))
         {
-            writer.Line($"var __id = (({EntityInterface})this).Id;");
+            writer.Line($"var __id = (({Namespaces.EntityInterface})this).Id;");
             writer.Line("var __isNew = !ctx.IsTracked(__id);");
-            writer.Line();
 
             // Forward dependency walk: [Reference] + [Parent], skip relation-role properties.
             // Backing fields hold the entity ref directly under the new pure-setter model, so
             // the walk reads `_{name}` (the entity ref) rather than going through Session.
-            var hasForwardDeps = false;
             foreach (var p in table.Properties)
             {
                 var isFwdDep = (p.Kinds.HasFlag(PropertyKind.Reference) || p.Kinds.HasFlag(PropertyKind.Parent))
@@ -866,19 +842,13 @@ internal static class PartialEmitter
                     continue;
                 }
 
-                hasForwardDeps = true;
                 var backing = $"_{ToCamel(p.Name)}";
-                writer.Line($"if ({backing} is not null && !ctx.IsTracked((({EntityInterface}){backing}).Id))");
+                writer.Line($"if ({backing} is not null && !ctx.IsTracked((({Namespaces.EntityInterface}){backing}).Id))");
                 using (writer.Indent())
                 {
                     writer.Line($"await ctx.SaveAsync({backing}, ct);");
                 }
             }
-            if (hasForwardDeps)
-            {
-                writer.Line();
-            }
-
             // Typed CBOR content — SurrealObject built via ContentValue.Set helpers (the
             // mirror of HydrationValue's read side). Each scalar wraps into the right
             // SurrealValue variant; nullable values that are null get omitted so the
@@ -946,10 +916,9 @@ internal static class PartialEmitter
                     // as a typed SurrealRecordIdValue, preserving Thing typing through CBOR.
                     var backing = $"_{ToCamel(p.Name)}";
                     var idBacking = $"_{ToCamel(p.Name)}Id";
-                    writer.Line($"global::Disruptor.Surface.Runtime.ContentValue.SetRef(__content, {fieldLit}, {idBacking} ?? ({backing} is null ? (global::Disruptor.Surface.Runtime.RecordId?)null : (({EntityInterface}){backing}).Id));");
+                    writer.Line($"global::Disruptor.Surface.Runtime.ContentValue.SetRef(__content, {fieldLit}, {idBacking} ?? ({backing} is null ? (global::Disruptor.Surface.Runtime.RecordId?)null : (({Namespaces.EntityInterface}){backing}).Id));");
                 }
             }
-            writer.Line();
 
             // Typed CBOR dispatch — SDK methods accept ISurrealRecordId + SurrealObject and
             // CBOR-encode end-to-end. No SurrealQL string, no escape rules.
@@ -965,7 +934,6 @@ internal static class PartialEmitter
                 writer.Line("await ctx.Transaction.UpsertAsync(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk(__id), __content, ct);");
             }
 
-            writer.Line();
             writer.Line("ctx.MarkSaved(this);");
 
             // Children walk: AFTER self-dispatch (children's [Parent] FK needs this row to
@@ -979,10 +947,9 @@ internal static class PartialEmitter
                 }
 
                 var elemLocal = $"__child_{ToCamel(p.Name)}";
-                writer.Line();
                 using (writer.Block($"foreach (var {elemLocal} in this.{p.Name})"))
                 {
-                    writer.Line($"if (!ctx.IsTracked((({EntityInterface}){elemLocal}).Id))");
+                    writer.Line($"if (!ctx.IsTracked((({Namespaces.EntityInterface}){elemLocal}).Id))");
                     using (writer.Indent())
                     {
                         writer.Line($"await ctx.SaveAsync({elemLocal}, ct);");
@@ -1021,7 +988,7 @@ internal static class PartialEmitter
     /// </summary>
     private static void EmitHydrate(CodeWriter writer, TableModel table)
     {
-        using (writer.Block($"void {EntityInterface}.Hydrate(global::Disruptor.Surreal.Values.SurrealValue row, {HydrationSinkType} sink)"))
+        using (writer.Block($"void {Namespaces.EntityInterface}.Hydrate(global::Disruptor.Surreal.Values.SurrealValue row, {Namespaces.HydrationSinkType} sink)"))
         {
             writer.Line("if (row is not global::Disruptor.Surreal.Values.SurrealObjectValue __obj) return;");
 
@@ -1177,7 +1144,7 @@ internal static class PartialEmitter
         using (writer.Block($"if ({inlineLocal} is not null)"))
         {
             writer.Line($"{backing} = {inlineLocal};");
-            writer.Line($"{idBacking} = (({EntityInterface}){inlineLocal}).Id;");
+            writer.Line($"{idBacking} = (({Namespaces.EntityInterface}){inlineLocal}).Id;");
         }
 
         writer.Line("else");

@@ -5,15 +5,10 @@ namespace Disruptor.Surface.Generator.Emit;
 /// <summary>
 /// Allocates stable, collision-free generated local names from readable hints.
 /// </summary>
-internal sealed class NameAllocator
+internal sealed class NameAllocator(string prefix = "__")
 {
-    private readonly string prefix;
+    private readonly string prefix = prefix ?? throw new ArgumentNullException(nameof(prefix));
     private readonly HashSet<string> used = new(StringComparer.Ordinal);
-
-    public NameAllocator(string prefix = "__")
-    {
-        this.prefix = prefix ?? throw new ArgumentNullException(nameof(prefix));
-    }
 
     public void Reserve(string name)
     {
@@ -66,7 +61,7 @@ internal sealed class NameAllocator
             {
                 builder.Append(ch);
             }
-            else if (builder.Length == 0 || builder[builder.Length - 1] != '_')
+            else if (builder.Length == 0 || builder[^1] != '_')
             {
                 builder.Append('_');
             }

@@ -21,11 +21,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class HydrateRootEmitter
 {
-    private const string HydrationQueryFqn = "global::Disruptor.Surface.Runtime.Query.HydrationQuery";
-    private const string RecordIdFqn = "global::Disruptor.Surface.Runtime.RecordId";
-    private const string IRecordIdFqn = "global::Disruptor.Surface.Runtime.IRecordId";
-    private const string IEnumerableFqn = "global::System.Collections.Generic.IEnumerable";
-    private const string IReadOnlyListFqn = "global::System.Collections.Generic.IReadOnlyList";
     private const string GeneratedClass = "GeneratedHydrationRoot";
 
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
@@ -57,16 +52,12 @@ internal static class HydrateRootEmitter
             // Partial fragment of [CompositionRoot] — adds the static Hydrate accessor.
             using (writer.Block(FormatTypeDeclaration(root.DeclaredAccessibility, root.Name)))
             {
-                writer.Line("/// <summary>Hydration entry points — one per <c>[Table]</c>. Pass a list of ids; chain <c>.WithInclude(...)</c> to widen the slice; terminate with <c>.ExecuteAsync(transport, [lease])</c> to materialise into a tracked session.</summary>");
                 writer.Line($"public static {GeneratedClass} Hydrate => {GeneratedClass}.Instance;");
             }
-
-            writer.Line();
-
+            
             using (writer.Block($"public sealed class {GeneratedClass}"))
             {
                 writer.Line($"public static readonly {GeneratedClass} Instance = new {GeneratedClass}();");
-                writer.Line();
                 writer.Line($"private {GeneratedClass}() {{ }}");
 
                 foreach (var table in ordered)
@@ -78,24 +69,18 @@ internal static class HydrateRootEmitter
                         : $"global::{table.Namespace}.{table.Name}";
                     var idFqn = $"{entityFqn}Id";
 
-                    writer.Line();
-                    writer.Line($"/// <summary>Hydrate the matching <see cref=\"{entityFqn["global::".Length..]}\"/> rows into a fresh tracked session. Typed-id overload — preferred call site shape.</summary>");
-                    using (writer.Block($"public {HydrationQueryFqn}<{entityFqn}> {methodName}({IEnumerableFqn}<{idFqn}> ids)"))
+                    using (writer.Block($"public {Namespaces.HydrationQueryFqn}<{entityFqn}> {methodName}({Namespaces.IEnumerableFqn}<{idFqn}> ids)"))
                     {
                         writer.Line("global::System.ArgumentNullException.ThrowIfNull(ids);");
                         writer.Line("var snap = SnapshotIds(ids);");
-                        writer.Line();
-                        writer.Line($"return new {HydrationQueryFqn}<{entityFqn}>(\"{tableName}\", snap, {refRegistryFqn});");
+                        writer.Line($"return new {Namespaces.HydrationQueryFqn}<{entityFqn}>(\"{tableName}\", snap, {refRegistryFqn});");
                     }
 
-                    writer.Line();
-                    writer.Line("/// <summary>Raw-id overload — accepts any <see cref=\"global::Disruptor.Surface.Runtime.IRecordId\"/>; useful for cross-aggregate edge endpoints already collapsed to canonical record ids.</summary>");
-                    using (writer.Block($"public {HydrationQueryFqn}<{entityFqn}> {methodName}({IEnumerableFqn}<{IRecordIdFqn}> ids)"))
+                    using (writer.Block($"public {Namespaces.HydrationQueryFqn}<{entityFqn}> {methodName}({Namespaces.IEnumerableFqn}<{Namespaces.IRecordIdFqn}> ids)"))
                     {
                         writer.Line("global::System.ArgumentNullException.ThrowIfNull(ids);");
                         writer.Line("var snap = SnapshotIds(ids);");
-                        writer.Line();
-                        writer.Line($"return new {HydrationQueryFqn}<{entityFqn}>(\"{tableName}\", snap, {refRegistryFqn});");
+                        writer.Line($"return new {Namespaces.HydrationQueryFqn}<{entityFqn}>(\"{tableName}\", snap, {refRegistryFqn});");
                     }
                 }
 
@@ -103,26 +88,24 @@ internal static class HydrateRootEmitter
                 // Each typed {Table}Id implicitly converts to RecordId; raw IRecordId converts via
                 // RecordId.From. Snapshotting up front means the HydrationQuery sees a stable list
                 // even if the caller mutates the source enumerable mid-flight.
-                writer.Line();
-                using (writer.Block($"private static {IReadOnlyListFqn}<{RecordIdFqn}> SnapshotIds<TId>({IEnumerableFqn}<TId> ids) where TId : {IRecordIdFqn}"))
+                using (writer.Block($"private static {Namespaces.IReadOnlyListFqn}<{Namespaces.RecordIdFqn}> SnapshotIds<TId>({Namespaces.IEnumerableFqn}<TId> ids) where TId : {Namespaces.IRecordIdFqn}"))
                 {
                     using (writer.Block("if (ids is global::System.Collections.Generic.ICollection<TId> col)"))
                     {
-                        writer.Line($"var arr = new {RecordIdFqn}[col.Count];");
+                        writer.Line($"var arr = new {Namespaces.RecordIdFqn}[col.Count];");
                         writer.Line("var i = 0;");
                         using (writer.Block("foreach (var id in col)"))
                         {
-                            writer.Line($"arr[i++] = {RecordIdFqn}.From(id);");
+                            writer.Line($"arr[i++] = {Namespaces.RecordIdFqn}.From(id);");
                         }
 
                         writer.Line("return arr;");
                     }
 
-                    writer.Line();
-                    writer.Line($"var list = new global::System.Collections.Generic.List<{RecordIdFqn}>();");
+                    writer.Line($"var list = new global::System.Collections.Generic.List<{Namespaces.RecordIdFqn}>();");
                     using (writer.Block("foreach (var id in ids)"))
                     {
-                        writer.Line($"list.Add({RecordIdFqn}.From(id));");
+                        writer.Line($"list.Add({Namespaces.RecordIdFqn}.From(id));");
                     }
 
                     writer.Line("return list;");

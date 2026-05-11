@@ -26,13 +26,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class TraversalBuilderEmitter
 {
-    private const string IncludeNodeFqn = "global::Disruptor.Surface.Runtime.Query.IIncludeNode";
-    private const string IncludeChildrenNodeFqn = "global::Disruptor.Surface.Runtime.Query.IncludeChildrenNode";
-    private const string IncludeInlineRefNodeFqn = "global::Disruptor.Surface.Runtime.Query.IncludeInlineRefNode";
-    private const string IncludeRelationNodeFqn = "global::Disruptor.Surface.Runtime.Query.IncludeRelationNode";
-    private const string PredicateFqn = "global::Disruptor.Surface.Runtime.Query.IPredicate";
-    private const string PredicateHelperFqn = "global::Disruptor.Surface.Runtime.Query.Predicate";
-
     public static void Emit(SourceProductionContext spc, TableModel table, ModelGraph graph)
     {
         var inlineRefs = CollectInlineRefs(table);
@@ -46,19 +39,17 @@ internal static class TraversalBuilderEmitter
         var writer = new CodeWriter().Header();
         using (writer.Namespace(table.Namespace))
         {
-            writer.Line($"/// <summary>Traversal builder for <see cref=\"{table.Name}\"/>. Emitted by <c>TraversalBuilderEmitter</c>; passed as the configure-action argument to <c>Query&lt;{table.Name}&gt;.Include*</c> extensions.</summary>");
             using (writer.Block($"public sealed class {typeName}"))
             {
                 // Mutable accumulators. Builders are throw-away (per-Include invocation) so a
                 // tiny per-instance List<> is fine; no concern about cross-call aliasing.
-                writer.Line($"private {PredicateFqn}? _filter;");
-                writer.Line($"private readonly System.Collections.Generic.List<{IncludeNodeFqn}> _nested = new();");
-                writer.Line();
-
+                writer.Line($"private {Namespaces.PredicateFqn}? _filter;");
+                writer.Line($"private readonly System.Collections.Generic.List<{Namespaces.IncludeNodeFqn}> _nested = new();");
+                
                 // Where(predicate) — AND-merges into _filter, returns this for fluent chaining.
-                using (writer.Block($"public {typeName} Where({PredicateFqn} predicate)"))
+                using (writer.Block($"public {typeName} Where({Namespaces.PredicateFqn} predicate)"))
                 {
-                    writer.Line($"_filter = _filter is null ? predicate : {PredicateHelperFqn}.And(_filter, predicate);");
+                    writer.Line($"_filter = _filter is null ? predicate : {Namespaces.PredicateHelperFqn}.And(_filter, predicate);");
                     writer.Line("return this;");
                 }
 
@@ -79,9 +70,7 @@ internal static class TraversalBuilderEmitter
 
                 // Build() — snapshot accumulator state for the AST. Called by the per-table
                 // Include extension on Query<T>.
-                writer.Line();
-                writer.Line("/// <summary>Snapshot the accumulated state. Called by the per-table <c>Include</c> extension on <c>Query&lt;T&gt;</c>.</summary>");
-                writer.Line($"internal ({PredicateFqn}? Filter, System.Collections.Generic.IReadOnlyList<{IncludeNodeFqn}> Nested) Build()");
+                writer.Line($"internal ({Namespaces.PredicateFqn}? Filter, System.Collections.Generic.IReadOnlyList<{Namespaces.IncludeNodeFqn}> Nested) Build()");
                 using (writer.Indent())
                 {
                     writer.Line("=> (_filter, _nested.ToArray());");
@@ -124,57 +113,33 @@ internal static class TraversalBuilderEmitter
         var queryFqn = $"global::Disruptor.Surface.Runtime.Query.SurfaceQuery<{entityFqn}>";
         var extName = $"{table.Name}QueryIncludes";
 
-        writer.Line();
-        writer.Line($"/// <summary>Root-level <c>Include*</c> extensions on <c>Query&lt;{table.Name}&gt;</c>. Mirror the per-level methods on <see cref=\"{table.Name}TraversalBuilder\"/>.</summary>");
         using (writer.Block($"public static class {extName}"))
         {
-            var first = true;
             foreach (var inline in inlineRefs)
             {
-                if (!first)
-                {
-                    writer.Line();
-                }
-
-                first = false;
-                writer.Line($"/// <summary>Pulls the inline <c>[Reference, Inline]</c> record at <c>{inline.Field}</c> into the projection (<c>{inline.Field}.*</c>).</summary>");
                 using (writer.Block($"public static {queryFqn} Include{inline.PropertyName}(this {queryFqn} query)"))
                 {
-                    writer.Line($"return query.WithInclude(new {IncludeInlineRefNodeFqn}(\"{inline.Field}\"));");
+                    writer.Line($"return query.WithInclude(new {Namespaces.IncludeInlineRefNodeFqn}(\"{inline.Field}\"));");
                 }
             }
 
             foreach (var child in children)
             {
-                if (!first)
-                {
-                    writer.Line();
-                }
-
-                first = false;
-
                 var childBuilderFqn = string.IsNullOrEmpty(child.ChildNamespace)
                     ? $"global::{child.ChildTypeName}TraversalBuilder"
                     : $"global::{child.ChildNamespace}.{child.ChildTypeName}TraversalBuilder";
 
-                writer.Line($"/// <summary>Pulls children rows from <c>{child.ChildTable}</c> (parent link <c>{child.ParentField}</c>). Pass <paramref name=\"configure\"/> to filter or descend further.</summary>");
                 using (writer.Block($"public static {queryFqn} Include{child.PropertyName}(this {queryFqn} query, global::System.Action<{childBuilderFqn}>? configure = null)"))
                 {
                     writer.Line($"var __sub = new {childBuilderFqn}();");
                     writer.Line("configure?.Invoke(__sub);");
                     writer.Line("var (__filter, __nested) = __sub.Build();");
-                    writer.Line($"return query.WithInclude(new {IncludeChildrenNodeFqn}(\"{child.ChildTable}\", \"{child.ParentField}\", __filter, __nested, {child.HydratorExpression}, \"{child.SliceKey}\"));");
+                    writer.Line($"return query.WithInclude(new {Namespaces.IncludeChildrenNodeFqn}(\"{child.ChildTable}\", \"{child.ParentField}\", __filter, __nested, {child.HydratorExpression}, \"{child.SliceKey}\"));");
                 }
             }
 
             foreach (var rel in relations)
             {
-                if (!first)
-                {
-                    writer.Line();
-                }
-
-                first = false;
                 EmitRelationIncludeExtension(writer, queryFqn, rel);
             }
         }
@@ -182,11 +147,9 @@ internal static class TraversalBuilderEmitter
 
     private static void EmitInlineRefInclude(CodeWriter writer, string typeName, InlineRefMember inline)
     {
-        writer.Line();
-        writer.Line($"/// <summary>Pulls the inline <c>[Reference, Inline]</c> record at <c>{inline.Field}</c> into the projection (<c>{inline.Field}.*</c>).</summary>");
         using (writer.Block($"public {typeName} Include{inline.PropertyName}()"))
         {
-            writer.Line($"_nested.Add(new {IncludeInlineRefNodeFqn}(\"{inline.Field}\"));");
+            writer.Line($"_nested.Add(new {Namespaces.IncludeInlineRefNodeFqn}(\"{inline.Field}\"));");
             writer.Line("return this;");
         }
     }
@@ -197,14 +160,12 @@ internal static class TraversalBuilderEmitter
             ? $"global::{child.ChildTypeName}TraversalBuilder"
             : $"global::{child.ChildNamespace}.{child.ChildTypeName}TraversalBuilder";
 
-        writer.Line();
-        writer.Line($"/// <summary>Pulls children rows from <c>{child.ChildTable}</c> (parent link <c>{child.ParentField}</c>). Pass <paramref name=\"configure\"/> to filter or descend further.</summary>");
         using (writer.Block($"public {typeName} Include{child.PropertyName}(global::System.Action<{childBuilderFqn}>? configure = null)"))
         {
             writer.Line($"var __sub = new {childBuilderFqn}();");
             writer.Line("configure?.Invoke(__sub);");
             writer.Line("var (__filter, __nested) = __sub.Build();");
-            writer.Line($"_nested.Add(new {IncludeChildrenNodeFqn}(\"{child.ChildTable}\", \"{child.ParentField}\", __filter, __nested, {child.HydratorExpression}, \"{child.SliceKey}\"));");
+            writer.Line($"_nested.Add(new {Namespaces.IncludeChildrenNodeFqn}(\"{child.ChildTable}\", \"{child.ParentField}\", __filter, __nested, {child.HydratorExpression}, \"{child.SliceKey}\"));");
             writer.Line("return this;");
         }
     }
@@ -293,9 +254,6 @@ internal static class TraversalBuilderEmitter
     /// </summary>
     private static void EmitRelationInclude(CodeWriter writer, string typeName, RelationMember rel)
     {
-        writer.Line();
-        writer.Line($"/// <summary>{RelationDocBlurb(rel)}</summary>");
-
         if (rel.SingleTargetBuilderFqn is { } targetBuilder)
         {
             // Single-target within-aggregate: configure lambda + filter at target.
@@ -304,7 +262,7 @@ internal static class TraversalBuilderEmitter
                 writer.Line($"var __sub = new {targetBuilder}();");
                 writer.Line("configure?.Invoke(__sub);");
                 writer.Line("var (__filter, __nested) = __sub.Build();");
-                writer.Line($"_nested.Add(new {IncludeRelationNodeFqn}({RelationCtorArgs(rel, "__filter", "__nested")}));");
+                writer.Line($"_nested.Add(new {Namespaces.IncludeRelationNodeFqn}({RelationCtorArgs(rel, "__filter", "__nested")}));");
                 writer.Line("return this;");
             }
             return;
@@ -313,7 +271,7 @@ internal static class TraversalBuilderEmitter
         // Multi-target or cross-aggregate: no configure lambda, no filter, no nesting.
         using (writer.Block($"public {typeName} Include{rel.PropertyName}()"))
         {
-            writer.Line($"_nested.Add(new {IncludeRelationNodeFqn}({RelationCtorArgs(rel, "null", $"global::System.Array.Empty<{IncludeNodeFqn}>()")}));");
+            writer.Line($"_nested.Add(new {Namespaces.IncludeRelationNodeFqn}({RelationCtorArgs(rel, "null", $"global::System.Array.Empty<{Namespaces.IncludeNodeFqn}>()")}));");
             writer.Line("return this;");
         }
     }
@@ -321,8 +279,6 @@ internal static class TraversalBuilderEmitter
     /// <summary>Same shape as <see cref="EmitRelationInclude"/>, but on the Query&lt;T&gt; extension class.</summary>
     private static void EmitRelationIncludeExtension(CodeWriter writer, string queryFqn, RelationMember rel)
     {
-        writer.Line($"/// <summary>{RelationDocBlurb(rel)}</summary>");
-
         if (rel.SingleTargetBuilderFqn is { } targetBuilder)
         {
             using (writer.Block($"public static {queryFqn} Include{rel.PropertyName}(this {queryFqn} query, global::System.Action<{targetBuilder}>? configure = null)"))
@@ -330,14 +286,14 @@ internal static class TraversalBuilderEmitter
                 writer.Line($"var __sub = new {targetBuilder}();");
                 writer.Line("configure?.Invoke(__sub);");
                 writer.Line("var (__filter, __nested) = __sub.Build();");
-                writer.Line($"return query.WithInclude(new {IncludeRelationNodeFqn}({RelationCtorArgs(rel, "__filter", "__nested")}));");
+                writer.Line($"return query.WithInclude(new {Namespaces.IncludeRelationNodeFqn}({RelationCtorArgs(rel, "__filter", "__nested")}));");
             }
             return;
         }
 
         using (writer.Block($"public static {queryFqn} Include{rel.PropertyName}(this {queryFqn} query)"))
         {
-            writer.Line($"return query.WithInclude(new {IncludeRelationNodeFqn}({RelationCtorArgs(rel, "null", $"global::System.Array.Empty<{IncludeNodeFqn}>()")}));");
+            writer.Line($"return query.WithInclude(new {Namespaces.IncludeRelationNodeFqn}({RelationCtorArgs(rel, "null", $"global::System.Array.Empty<{Namespaces.IncludeNodeFqn}>()")}));");
         }
     }
 
@@ -347,17 +303,6 @@ internal static class TraversalBuilderEmitter
     /// </summary>
     private static string RelationCtorArgs(RelationMember rel, string filterExpr, string nestedExpr)
         => $"\"{rel.EdgeName}\", {(rel.IsOutgoing ? "true" : "false")}, \"{rel.SliceKey}\", {(rel.IdsOnly ? "true" : "false")}, {(rel.SingleTargetTable is { } t ? $"\"{t}\"" : "null")}, {filterExpr}, {nestedExpr}, {rel.HydratorExpression}";
-
-    private static string RelationDocBlurb(RelationMember rel)
-    {
-        var direction = rel.IsOutgoing ? "outgoing" : "incoming";
-        var shape = rel.IdsOnly
-            ? "edges only — id-typed (cross-aggregate)"
-            : rel.SingleTargetBuilderFqn is null
-                ? "target rows (multi-target — leaf, no further nesting)"
-                : "target rows (single-target — supports nested traversal and target-side filter)";
-        return $"Pulls {direction} <c>{rel.EdgeName}</c> relation {shape}.";
-    }
 
     /// <summary>
     /// Relation members for traversal: every <c>[Forward]</c> / <c>[Inverse]</c>

@@ -85,7 +85,7 @@ internal static class RelationVariantEmitter
             // variant kinds skip the marker (the variant class itself is the discriminator).
             if (variants.Count >= 2)
             {
-                EmitVariantMarkerInterface(spc, forward, variants);
+                EmitVariantMarkerInterface(spc, forward);
             }
 
             EmitHydrationDispatcher(spc, forward, variants);
@@ -165,8 +165,8 @@ internal static class RelationVariantEmitter
 
         var baseTypes = new List<string>
         {
-            EntityEmitterCommon.EntityInterface,
-            EntityEmitterCommon.RelationVariantInterface,
+            Namespaces.EntityInterface,
+            Namespaces.RelationVariantInterface,
         };
 
         // Multi-variant kinds also implement the per-kind I{KindName}Variant marker so
@@ -195,21 +195,17 @@ internal static class RelationVariantEmitter
 
                 // Endpoint + payload properties — backing fields + property bodies. [In] / [Out]
                 // are required endpoints (one each); [Property] members carry the typed payload.
-                writer.Line();
                 EmitEndpointProperty(writer, variant.In, typedIdNamespaces);
-                writer.Line();
                 EmitEndpointProperty(writer, variant.Out, typedIdNamespaces);
 
                 foreach (var p in variant.PayloadProperties)
                 {
-                    writer.Line();
                     EmitPayloadProperty(writer, p);
                 }
 
                 // Hydrate — parses the loaded edge row (id / in / out / payload fields) into
                 // backing fields. Per-variant Hydrate doesn't discriminate; the per-kind dispatcher
                 // picks the right variant class first based on (in.tb, out.tb).
-                writer.Line();
                 EmitHydrate(writer, variant, idTypeFqn, typedIdNamespaces);
 
                 // EnumerateReferences — yields ("in", inId) and ("out", outId). Variants don't
@@ -219,25 +215,21 @@ internal static class RelationVariantEmitter
                 // existing endpoint walk. SurrealSession.MarkSaved + CleanupLocalState use this
                 // method (via the IRelationVariant marker) to mirror the variant's own edge
                 // tuple in/out of the read-side index.
-                writer.Line();
                 EmitEnumerateReferences(writer, variant);
 
                 // SetReferenceTo — only meaningful for nullable [In] / [Out] (rare; non-nullable
                 // endpoints can't be unset). Empty switch when nothing is nullable.
-                writer.Line();
                 EmitSetReferenceTo(writer, variant);
 
                 // SaveAsync — dispatches INSERT RELATION INTO {edge} $_content [ON DUPLICATE KEY
                 // UPDATE …] against the user's transaction. Forward-deps walk for entity-typed
                 // endpoints; pure pass-through for typed-id endpoints.
-                writer.Line();
                 EmitSaveAsync(writer, variant, forward);
 
                 // Initialize / OnDeleting / MarkAllSlicesLoaded — IEntity contract completion.
                 // Variants have no mandatory-reference seeding (endpoints are required at
                 // construction), no slices (state is the row itself), and may opt into delete
                 // hooks via the partial method.
-                writer.Line();
                 EmitInitializeAndDeletingAndSlices(writer);
             }
         }
@@ -248,9 +240,8 @@ internal static class RelationVariantEmitter
 
     private static void EmitIdAnchor(CodeWriter writer, string idTypeFqn)
     {
-        writer.Line();
         writer.Line($"private {idTypeFqn}? _id;");
-        writer.Line($"global::Disruptor.Surface.Runtime.RecordId {EntityEmitterCommon.EntityInterface}.Id => _id ??= {idTypeFqn}.New();");
+        writer.Line($"global::Disruptor.Surface.Runtime.RecordId {Namespaces.EntityInterface}.Id => _id ??= {idTypeFqn}.New();");
     }
 
     /// <summary>
@@ -319,8 +310,8 @@ internal static class RelationVariantEmitter
                     {
                         writer.Line($"{backing} = value;");
                         writer.Line(nullable
-                            ? $"{idBacking} = value is null ? null : (({EntityEmitterCommon.EntityInterface})value).Id;"
-                            : $"{idBacking} = (({EntityEmitterCommon.EntityInterface})value).Id;");
+                            ? $"{idBacking} = value is null ? null : (({Namespaces.EntityInterface})value).Id;"
+                            : $"{idBacking} = (({Namespaces.EntityInterface})value).Id;");
                     }
                 }
             }
@@ -363,7 +354,7 @@ internal static class RelationVariantEmitter
         CodeWriter writer, RelationVariantModel variant, string idTypeFqn,
         IReadOnlyDictionary<string, string> typedIdNamespaces)
     {
-        using (writer.Block($"void {EntityEmitterCommon.EntityInterface}.Hydrate(global::Disruptor.Surreal.Values.SurrealValue row, {EntityEmitterCommon.HydrationSinkType} sink)"))
+        using (writer.Block($"void {Namespaces.EntityInterface}.Hydrate(global::Disruptor.Surreal.Values.SurrealValue row, {Namespaces.HydrationSinkType} sink)"))
         {
             writer.Line("if (row is not global::Disruptor.Surreal.Values.SurrealObjectValue __obj) return;");
             writer.Line("if (__obj.Object.TryGetValue(\"id\", out var __idVal))");
@@ -461,7 +452,7 @@ internal static class RelationVariantEmitter
     /// </summary>
     private static void EmitEnumerateReferences(CodeWriter writer, RelationVariantModel variant)
     {
-        using (writer.Block($"global::System.Collections.Generic.IEnumerable<(string FieldName, global::Disruptor.Surface.Runtime.RecordId? Target)> {EntityEmitterCommon.EntityInterface}.EnumerateReferences()"))
+        using (writer.Block($"global::System.Collections.Generic.IEnumerable<(string FieldName, global::Disruptor.Surface.Runtime.RecordId? Target)> {Namespaces.EntityInterface}.EnumerateReferences()"))
         {
             EmitEnumerateReferenceEntry(writer, variant.In, fieldName: "in");
             EmitEnumerateReferenceEntry(writer, variant.Out, fieldName: "out");
@@ -498,13 +489,12 @@ internal static class RelationVariantEmitter
     {
         var hasNullableEndpoint = variant.In.Type.IsNullable || variant.Out.Type.IsNullable;
 
-        using (writer.Block($"void {EntityEmitterCommon.EntityInterface}.SetReferenceTo(string fieldName, global::Disruptor.Surface.Runtime.RecordId? value)"))
+        using (writer.Block($"void {Namespaces.EntityInterface}.SetReferenceTo(string fieldName, global::Disruptor.Surface.Runtime.RecordId? value)"))
         {
             if (!hasNullableEndpoint)
             {
                 // Skip the switch when no case will be emitted — both endpoints non-nullable
                 // means there's nothing to unset, and an empty switch would trip CS1522.
-                writer.Line("// Both [In] and [Out] are non-nullable; nothing to unset.");
                 return;
             }
 
@@ -569,43 +559,31 @@ internal static class RelationVariantEmitter
         var edgeName = SurrealNaming.ToEdgeName(forward.Name);
         var hasPayload = variant.PayloadProperties.Count > 0;
 
-        using (writer.Block($"async global::System.Threading.Tasks.Task {EntityEmitterCommon.EntityInterface}.SaveAsync(global::Disruptor.Surface.Runtime.ISaveContext ctx, global::System.Threading.CancellationToken ct)"))
+        using (writer.Block($"async global::System.Threading.Tasks.Task {Namespaces.EntityInterface}.SaveAsync(global::Disruptor.Surface.Runtime.ISaveContext ctx, global::System.Threading.CancellationToken ct)"))
         {
             writer.Line("var __id = ((global::Disruptor.Surface.Runtime.IEntity)this).Id;");
-            writer.Line();
-
+            
             // Forward-dep walk: entity-typed endpoints whose ref is set but not yet tracked
             // recurse so the endpoint row exists in the substrate before we INSERT RELATION
             // (the foreign key from the edge to the endpoint is checked at write time).
             // Typed-id endpoints skip this — caller is expected to have created the foreign
             // entity in a separate session/aggregate.
-            var hasForwardDep = false;
             foreach (var endpoint in new[] { variant.In, variant.Out })
             {
                 if (!endpoint.Type.IsTableType)
                 {
                     continue;
                 }
-                hasForwardDep = true;
                 var backing = $"_{ToCamel(endpoint.Name)}";
-                writer.Line($"if ({backing} is not null && !ctx.IsTracked((({EntityEmitterCommon.EntityInterface}){backing}).Id))");
+                writer.Line($"if ({backing} is not null && !ctx.IsTracked((({Namespaces.EntityInterface}){backing}).Id))");
                 using (writer.Indent())
                 {
                     writer.Line($"await ctx.SaveAsync({backing}, ct);");
                 }
             }
-
-            if (hasForwardDep)
-            {
-                writer.Line();
-            }
-
+            
             var inEndpointId = EmitEndpointIdResolution(writer, variant.In);
             var outEndpointId = EmitEndpointIdResolution(writer, variant.Out);
-            if (variant.In.Type.IsTableType || variant.Out.Type.IsTableType)
-            {
-                writer.Line();
-            }
 
             // Build the wire content: id + in + out + payload fields.
             writer.Line("var __content = new global::Disruptor.Surreal.Values.SurrealObject");
@@ -628,7 +606,6 @@ internal static class RelationVariantEmitter
                 writer.Line($"global::Disruptor.Surface.Runtime.ContentValue.Set(__content, {fieldLit}, {backing});");
             }
 
-            writer.Line();
             writer.Line("var __bindings = new global::Disruptor.Surreal.Values.SurrealObject");
             writer.Line("{");
             using (writer.Indent())
@@ -650,8 +627,6 @@ internal static class RelationVariantEmitter
                     writer.Line($"global::Disruptor.Surface.Runtime.ContentValue.Set(__bindings, {bindLit}, {backing});");
                 }
             }
-
-            writer.Line();
 
             // SQL — baked at codegen time. Edge name is snake_case lower (validated by
             // SurrealNaming.ToEdgeName); payload field names are snake_case lower
@@ -688,12 +663,10 @@ internal static class RelationVariantEmitter
     /// </summary>
     private static void EmitInitializeAndDeletingAndSlices(CodeWriter writer)
     {
-        writer.Line($"void {EntityEmitterCommon.EntityInterface}.Initialize({EntityEmitterCommon.SessionType} session) {{ }}");
-        writer.Line();
+        writer.Line($"void {Namespaces.EntityInterface}.Initialize({Namespaces.SessionType} session) {{ }}");
         writer.Line("partial void OnDeleting();");
-        writer.Line($"void {EntityEmitterCommon.EntityInterface}.OnDeleting() => OnDeleting();");
-        writer.Line();
-        writer.Line($"void {EntityEmitterCommon.EntityInterface}.MarkAllSlicesLoaded({EntityEmitterCommon.HydrationSinkType} sink) {{ }}");
+        writer.Line($"void {Namespaces.EntityInterface}.OnDeleting() => OnDeleting();");
+        writer.Line($"void {Namespaces.EntityInterface}.MarkAllSlicesLoaded({Namespaces.HydrationSinkType} sink) {{ }}");
     }
 
     private static string? EmitEndpointIdResolution(CodeWriter writer, RelationVariantPropertyModel p)
@@ -708,7 +681,7 @@ internal static class RelationVariantEmitter
         var idLocal = $"__{ToCamel(p.Name)}Id";
         var entityLocal = $"__{ToCamel(p.Name)}Entity";
 
-        writer.Line($"var {idLocal} = {idBacking} ?? ({entityBacking} is {{ }} {entityLocal} ? (({EntityEmitterCommon.EntityInterface}){entityLocal}).Id : throw new global::System.InvalidOperationException(\"Endpoint '{p.Name}' is not set.\"));");
+        writer.Line($"var {idLocal} = {idBacking} ?? ({entityBacking} is {{ }} {entityLocal} ? (({Namespaces.EntityInterface}){entityLocal}).Id : throw new global::System.InvalidOperationException(\"Endpoint '{p.Name}' is not set.\"));");
 
         return idLocal;
     }
@@ -801,8 +774,7 @@ internal static class RelationVariantEmitter
     /// </summary>
     private static void EmitVariantMarkerInterface(
         SourceProductionContext spc,
-        RelationKindModel forward,
-        IReadOnlyList<RelationVariantModel> variants)
+        RelationKindModel forward)
     {
         var markerName = SurrealNaming.StripAttributeSuffix(forward.Name);
         var interfaceName = $"I{markerName}Variant";
@@ -810,8 +782,7 @@ internal static class RelationVariantEmitter
         var writer = new CodeWriter().Header();
         using (writer.Namespace(forward.Namespace))
         {
-            writer.Line($"/// <summary>Generated marker for any variant of the relation kind <c>{forward.FullName}</c>.</summary>");
-            writer.Line($"public interface {interfaceName} : {EntityEmitterCommon.EntityInterface} {{ }}");
+            writer.Line($"public interface {interfaceName} : {Namespaces.EntityInterface};");
         }
 
         var hint = string.IsNullOrEmpty(forward.Namespace)
@@ -877,18 +848,16 @@ internal static class RelationVariantEmitter
         var writer = new CodeWriter().Header();
         using (writer.Namespace(forward.Namespace))
         {
-            writer.Line($"/// <summary>Per-kind variant hydration dispatcher for the relation kind <c>{forward.FullName}</c>.</summary>");
             using (writer.Block($"internal static class {dispatcherName}"))
             {
-                writer.Line("/// <summary>Discriminates the loaded edge row by <c>(in.tb, out.tb)</c> and instantiates the matching variant.</summary>");
-                using (writer.Block($"public static {EntityEmitterCommon.EntityInterface}? HydrateVariant(global::Disruptor.Surreal.Values.SurrealValue row, {EntityEmitterCommon.HydrationSinkType} sink)"))
+                using (writer.Block($"public static {Namespaces.EntityInterface}? HydrateVariant(global::Disruptor.Surreal.Values.SurrealValue row, {Namespaces.HydrationSinkType} sink)"))
                 {
                     writer.Line("if (row is not global::Disruptor.Surreal.Values.SurrealObjectValue __obj) return null;");
                     writer.Line("if (!__obj.Object.TryGetValue(\"in\", out var __inV)) return null;");
                     writer.Line("if (!__obj.Object.TryGetValue(\"out\", out var __outV)) return null;");
                     writer.Line("var __inTb = global::Disruptor.Surface.Runtime.HydrationValue.ReadRecordId(__inV).Table;");
                     writer.Line("var __outTb = global::Disruptor.Surface.Runtime.HydrationValue.ReadRecordId(__outV).Table;");
-                    writer.Line($"{EntityEmitterCommon.EntityInterface}? __variant = (__inTb, __outTb) switch");
+                    writer.Line($"{Namespaces.EntityInterface}? __variant = (__inTb, __outTb) switch");
                     writer.Line("{");
                     using (writer.Indent())
                     {

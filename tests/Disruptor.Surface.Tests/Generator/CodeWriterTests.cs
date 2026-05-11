@@ -8,15 +8,14 @@ namespace Disruptor.Surface.Tests.Generator;
 public sealed class CodeWriterTests
 {
     [Fact]
-    public void Line_WritesIndentedLinesAndBlankLines()
+    public void Line_WritesIndentedLines()
     {
         var writer = new CodeWriter();
 
         writer.Line("first");
-        writer.Line();
         writer.Line("second");
 
-        Assert.Equal(Expected("first", "", "second"), writer.ToString());
+        Assert.Equal(Expected("first", "second"), writer.ToString());
     }
 
     [Fact]

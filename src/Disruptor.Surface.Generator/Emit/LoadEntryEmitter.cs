@@ -23,13 +23,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class LoadEntryEmitter
 {
-    private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.SurfaceQuery";
-    private const string SurrealFqn = "global::Disruptor.Surreal.SurrealClient";
-    private const string TransactionFqn = "global::Disruptor.Surreal.SurrealTransaction";
-    private const string SessionFqn = "global::Disruptor.Surface.Runtime.SurrealSession";
-    private const string CtFqn = "global::System.Threading.CancellationToken";
-    private const string TaskFqn = "global::System.Threading.Tasks.Task";
-
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
     {
         if (graph.CompositionRoots.Count != 1)
@@ -69,21 +62,18 @@ internal static class LoadEntryEmitter
         var writer = new CodeWriter().Header();
         using (writer.Namespace(root.Namespace))
         {
-            writer.Line($"/// <summary>Write-mode entry on <c>Query&lt;{aggRoot.Name}&gt;</c>. Two paths: with no <c>Include*</c> calls, delegates to the legacy <c>{aggRoot.Name}AggregateLoader.PopulateAsync</c> (matches <c>Workspace.Load{aggRoot.Name}Async</c>); with at least one <c>Include*</c>, the compiler-driven path emits a nested <c>SELECT</c> and hydrates only the user-chosen slice through <see cref=\"global::Disruptor.Surface.Runtime.IHydrationSink\"/>.</summary>");
             using (writer.Block($"public static class {aggRoot.Name}QueryLoad"))
             {
                 // Two overloads: Surreal db (read-mode) and Transaction tx (write-mode load that
                 // sees in-txn writes). Both call PopulateAsync / ExecuteIntoSessionAsync with
                 // the SDK handle directly — no JSON bridge.
-                EmitBody(SurrealFqn, "db");
-                writer.Line();
-                EmitBody(TransactionFqn, "tx");
+                EmitBody(Namespaces.SurrealFqn, "db");
+                EmitBody(Namespaces.TransactionFqn, "tx");
             }
 
             void EmitBody(string paramTypeFqn, string paramName)
             {
-                writer.Line($"/// <summary>Loads the <c>{aggRoot.Name}</c> aggregate identified by the query's <c>WithId</c> pin. Returns a populated <see cref=\"global::Disruptor.Surface.Runtime.SurrealSession\"/>; concurrent commits surface as <c>SurrealConflictException</c> from the SDK.</summary>");
-                using (writer.Block($"public static async {TaskFqn}<{SessionFqn}> LoadAsync(this {QueryFqn}<{entityFqn}> query, {paramTypeFqn} {paramName}, {CtFqn} ct = default)"))
+                using (writer.Block($"public static async {Namespaces.TaskFqn}<{Namespaces.SessionFqn}> LoadAsync(this {Namespaces.QueryFqn}<{entityFqn}> query, {paramTypeFqn} {paramName}, {Namespaces.CtFqn} ct = default)"))
                 {
                     using (writer.Block("if (query.PinnedId is null)"))
                     {
@@ -94,10 +84,8 @@ internal static class LoadEntryEmitter
                         }
                     }
 
-                    writer.Line();
-                    writer.Line($"var session = new {SessionFqn}({refRegistryFqn});");
-                    writer.Line();
-
+                    writer.Line($"var session = new {Namespaces.SessionFqn}({refRegistryFqn});");
+                    
                     using (writer.Block("if (query.Includes.Count > 0)"))
                     {
                         writer.Line($"await query.ExecuteIntoSessionAsync(session, {paramName}, ct);");
@@ -110,7 +98,6 @@ internal static class LoadEntryEmitter
                         writer.Line($"await {loaderFqn}.PopulateAsync(session, {paramName}, rootId, ct);");
                     }
 
-                    writer.Line();
                     writer.Line("return session;");
                 }
             }

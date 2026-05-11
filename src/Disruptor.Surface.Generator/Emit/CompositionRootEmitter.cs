@@ -13,9 +13,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class CompositionRootEmitter
 {
-    private const string SessionFqn   = "global::Disruptor.Surface.Runtime.SurrealSession";
-    private const string CtFqn        = "global::System.Threading.CancellationToken";
-    private const string TaskFqn      = "global::System.Threading.Tasks.Task";
 
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
     {
@@ -48,29 +45,21 @@ internal static class CompositionRootEmitter
             {
                 for (var i = 0; i < aggregateRoots.Count; i++)
                 {
-                    if (i > 0)
-                    {
-                        writer.Line();
-                    }
-
                     var aggRoot = aggregateRoots[i];
                     var idType = $"global::{aggRoot.FullName}Id";
                     var rootName = aggRoot.Name;
                     var loaderFqn = $"global::Disruptor.Surface.Runtime.{rootName}AggregateLoader";
 
-                    writer.Line($"/// <summary>Hydrates a snapshot of the {rootName} aggregate rooted at <paramref name=\"rootId\"/>. Read-only — for write-mode, use the <c>Transaction</c> overload and pass the same txn into <c>SaveAsync</c>.</summary>");
-                    using (writer.Block($"public async {TaskFqn}<{SessionFqn}> Load{rootName}Async(global::Disruptor.Surreal.SurrealClient db, {idType} rootId, {CtFqn} ct = default)"))
+                    using (writer.Block($"public async {Namespaces.TaskFqn}<{Namespaces.SessionFqn}> Load{rootName}Async(global::Disruptor.Surreal.SurrealClient db, {idType} rootId, {Namespaces.CtFqn} ct = default)"))
                     {
-                        writer.Line($"var ws = new {SessionFqn}(ReferenceRegistry);");
+                        writer.Line($"var ws = new {Namespaces.SessionFqn}(ReferenceRegistry);");
                         writer.Line($"await {loaderFqn}.PopulateAsync(ws, db, rootId, ct);");
                         writer.Line("return ws;");
                     }
 
-                    writer.Line();
-                    writer.Line($"/// <summary>Hydrates a snapshot of the {rootName} aggregate inside <paramref name=\"tx\"/>. Reads see in-txn writes from the same transaction; pass the same <paramref name=\"tx\"/> into <c>SaveAsync</c> for writes that participate in the same atomic unit.</summary>");
-                    using (writer.Block($"public async {TaskFqn}<{SessionFqn}> Load{rootName}Async(global::Disruptor.Surreal.SurrealTransaction tx, {idType} rootId, {CtFqn} ct = default)"))
+                    using (writer.Block($"public async {Namespaces.TaskFqn}<{Namespaces.SessionFqn}> Load{rootName}Async(global::Disruptor.Surreal.SurrealTransaction tx, {idType} rootId, {Namespaces.CtFqn} ct = default)"))
                     {
-                        writer.Line($"var ws = new {SessionFqn}(ReferenceRegistry);");
+                        writer.Line($"var ws = new {Namespaces.SessionFqn}(ReferenceRegistry);");
                         writer.Line($"await {loaderFqn}.PopulateAsync(ws, tx, rootId, ct);");
                         writer.Line("return ws;");
                     }

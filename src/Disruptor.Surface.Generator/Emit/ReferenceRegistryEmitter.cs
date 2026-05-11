@@ -77,17 +77,14 @@ internal static class ReferenceRegistryEmitter
             // Partial fragment of the user's [CompositionRoot] — adds the static accessor.
             using (writer.Block(FormatTypeDeclaration(root.DeclaredAccessibility, root.Name)))
             {
-                writer.Line("/// <summary>The model's reference-field registry. Pass into <see cref=\"global::Disruptor.Surface.Runtime.SurrealSession\"/> to drive [Reject] / [Unset] / [Cascade] resolution at commit time.</summary>");
                 writer.Line($"public static global::Disruptor.Surface.Runtime.IReferenceRegistry ReferenceRegistry => {GeneratedClass}.Instance;");
             }
 
-            writer.Line();
-
+            
             // Impl class — internal to the consumer assembly.
             using (writer.Block($"internal sealed class {GeneratedClass} : global::Disruptor.Surface.Runtime.IReferenceRegistry"))
             {
                 writer.Line($"public static readonly {GeneratedClass} Instance = new {GeneratedClass}();");
-                writer.Line();
                 writer.Line("private static readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.IReadOnlyList<global::Disruptor.Surface.Runtime.ReferenceFieldInfo>> _byReferencedTable = new(System.StringComparer.Ordinal)");
                 writer.Line("{");
                 using (writer.Indent())
@@ -108,7 +105,6 @@ internal static class ReferenceRegistryEmitter
                     }
                 }
                 writer.Line("};");
-                writer.Line();
                 writer.Line("public System.Collections.Generic.IReadOnlyList<global::Disruptor.Surface.Runtime.ReferenceFieldInfo> IncomingReferencesTo(string referencedTable) =>");
                 using (writer.Indent())
                 {

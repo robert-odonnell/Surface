@@ -19,7 +19,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class EdgeQueryRootEmitter
 {
-    private const string EdgeQueryFqn = "global::Disruptor.Surface.Runtime.Query.SurfaceEdgeQuery";
     private const string GeneratedRootClass = "GeneratedQueryRoot";
     private const string GeneratedEdgesClass = "GeneratedEdgeQueryRoot";
 
@@ -53,18 +52,14 @@ internal static class EdgeQueryRootEmitter
             // accessors; this fragment just hangs an Edges entry off the same class.
             using (writer.Block($"public sealed partial class {GeneratedRootClass}"))
             {
-                writer.Line("/// <summary>Edge query roots — one per forward <c>RelationAttribute</c>. Compose with <c>.WhereIn(...)</c> / <c>.WhereOut(...)</c>; terminate with <c>.ExecuteAsync(transport)</c>.</summary>");
                 writer.Line($"public {GeneratedEdgesClass} Edges => {GeneratedEdgesClass}.Instance;");
             }
-
-            writer.Line();
-
+            
             // Sibling singleton holding the per-kind accessors. Stateless, mirrors the table
             // catalogue's shape.
             using (writer.Block($"public sealed class {GeneratedEdgesClass}"))
             {
                 writer.Line($"public static readonly {GeneratedEdgesClass} Instance = new {GeneratedEdgesClass}();");
-                writer.Line();
                 writer.Line($"private {GeneratedEdgesClass}() {{ }}");
 
                 foreach (var kind in forwardKinds)
@@ -82,9 +77,7 @@ internal static class EdgeQueryRootEmitter
                         continue;
                     }
 
-                    writer.Line();
-                    writer.Line($"/// <summary>Edge query for the <c>{propertyName}</c> relation kind.</summary>");
-                    writer.Line($"public {EdgeQueryFqn}<{sourceIdType}, {targetIdType}> {propertyName} => new(\"{edgeTable}\");");
+                    writer.Line($"public {Namespaces.EdgeQueryFqn}<{sourceIdType}, {targetIdType}> {propertyName} => new(\"{edgeTable}\");");
                 }
             }
         }

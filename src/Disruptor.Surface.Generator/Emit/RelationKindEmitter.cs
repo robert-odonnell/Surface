@@ -29,8 +29,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class RelationKindEmitter
 {
-    private const string IRelationKindFqn = "global::Disruptor.Surface.Runtime.IRelationKind";
-
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
     {
         foreach (var kind in graph.RelationKinds)
@@ -52,7 +50,7 @@ internal static class RelationKindEmitter
         var writer = new CodeWriter().Header();
         using (writer.Namespace(kind.Namespace))
         {
-            using (writer.Block($"public sealed class {markerName} : {IRelationKindFqn}"))
+            using (writer.Block($"public sealed class {markerName} : {Namespaces.IRelationKindFqn}"))
             {
                 writer.Line($"public static string EdgeName => \"{edgeName}\";");
                 writer.Line($"private {markerName}() {{ }}");
@@ -64,7 +62,6 @@ internal static class RelationKindEmitter
             // Variant-emitted SaveAsync mints via {KindName}Id.New(); the id flows as the edge
             // row's primary key. Per-variant ids would all carry Table => "restricts"
             // redundantly, so we emit one per kind, not one per variant.
-            writer.Line();
             IdEmitter.WriteIdType(writer, $"{markerName}Id", edgeName, []);
         }
 

@@ -74,10 +74,7 @@ internal static class SchemaEmitter
             // convenience ApplySchemaAsync that just iterates and dispatches to transport.
             using (writer.Block(FormatTypeDeclaration(root.DeclaredAccessibility, root.Name)))
             {
-                writer.Line("/// <summary>Ordered, idempotent SurrealDB DDL chunks. Use <see cref=\"ApplySchemaAsync\"/> for the common path, or iterate this directly when you need to filter chunks, run them in custom transactions, or log per-chunk progress.</summary>");
                 writer.Line("public static System.Collections.Generic.IReadOnlyList<string> Schema => DisruptorSurfaceSchema._chunks;");
-                writer.Line();
-                writer.Line("/// <summary>Applies every chunk of <see cref=\"Schema\"/> to <paramref name=\"db\"/> in order. Idempotent — every <c>DEFINE</c> uses <c>IF NOT EXISTS</c>, so re-running this at boot is safe.</summary>");
                 using (writer.Block("public static async global::System.Threading.Tasks.Task ApplySchemaAsync(global::Disruptor.Surreal.SurrealClient db, global::System.Threading.CancellationToken ct = default)"))
                 {
                     using (writer.Block("foreach (var chunk in Schema)"))
@@ -87,8 +84,6 @@ internal static class SchemaEmitter
                     }
                 }
 
-                writer.Line();
-                writer.Line("/// <summary>Applies every chunk of <see cref=\"Schema\"/> inside <paramref name=\"tx\"/> in order. Same idempotency guarantees as the <see cref=\"global::Disruptor.Surreal.SurrealClient\"/> overload; use this when you want the entire schema apply to land atomically with other in-txn work.</summary>");
                 using (writer.Block("public static async global::System.Threading.Tasks.Task ApplySchemaAsync(global::Disruptor.Surreal.SurrealTransaction tx, global::System.Threading.CancellationToken ct = default)"))
                 {
                     using (writer.Block("foreach (var chunk in Schema)"))
@@ -98,8 +93,6 @@ internal static class SchemaEmitter
                     }
                 }
             }
-
-            writer.Line();
 
             // Internal companion class holds the actual chunk array — keeps the user's
             // partial surface uncluttered while still living in the same namespace so the

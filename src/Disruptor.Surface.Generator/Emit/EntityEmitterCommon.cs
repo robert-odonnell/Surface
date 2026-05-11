@@ -11,19 +11,12 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class EntityEmitterCommon
 {
-    public const string SessionType = "global::Disruptor.Surface.Runtime.SurrealSession";
-    public const string EntityInterface = "global::Disruptor.Surface.Runtime.IEntity";
-    public const string HydrationSinkType = "global::Disruptor.Surface.Runtime.IHydrationSink";
-    public const string RelationVariantInterface = "global::Disruptor.Surface.Runtime.IRelationVariant";
-
     public static void WriteSessionPlumbing(CodeWriter writer)
     {
-        writer.Line($"private {SessionType}? _session;");
-        writer.Line();
-
-        writer.Line($"{SessionType}? {EntityInterface}.Session => _session;");
-        writer.Line();
-        using (writer.Block($"void {EntityInterface}.Bind({SessionType} session)"))
+        writer.Line($"private {Namespaces.SessionType}? _session;");
+        
+        writer.Line($"{Namespaces.SessionType}? {Namespaces.EntityInterface}.Session => _session;");
+        using (writer.Block($"void {Namespaces.EntityInterface}.Bind({Namespaces.SessionType} session)"))
         {
             writer.Line("if (_session is not null && !global::System.Object.ReferenceEquals(_session, session))");
             using (writer.Indent())
@@ -34,17 +27,15 @@ internal static class EntityEmitterCommon
             writer.Line("_session = session;");
         }
 
-        writer.Line();
-        writer.Line($"protected {SessionType} Session");
+        writer.Line($"protected {Namespaces.SessionType} Session");
         using (writer.Indent())
         {
             writer.Line("=> _session ?? throw new global::System.InvalidOperationException(\"Entity is not bound to a session — call session.Track(...) or hydrate via Sessions.Load*Async first.\");");
         }
 
-        writer.Line();
         using (writer.Block("private void __EnsureSliceLoaded(string sliceKey, string fetchHint)"))
         {
-            writer.Line($"var __id = (({EntityInterface})this).Id;");
+            writer.Line($"var __id = (({Namespaces.EntityInterface})this).Id;");
             writer.Line("if (!Session.IsSliceLoaded(__id, sliceKey))");
             using (writer.Indent())
             {

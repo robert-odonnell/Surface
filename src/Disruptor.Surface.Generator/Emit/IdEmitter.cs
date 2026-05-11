@@ -16,10 +16,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class IdEmitter
 {
-    private const string IRecordIdType = "global::Disruptor.Surface.Runtime.IRecordId";
-    private const string RecordIdType = "global::Disruptor.Surface.Runtime.RecordId";
-    private const string FormatType = "global::Disruptor.Surface.Runtime.RecordIdFormat";
-
     public static void Emit(SourceProductionContext spc, TableModel table, ModelGraph graph)
     {
         var idTypeName = $"{table.Name}Id";
@@ -55,22 +51,18 @@ internal static class IdEmitter
         string tableName,
         IEnumerable<string> extraBaseInterfaces)
     {
-        var baseInterfaces = new[] { IRecordIdType }.Concat(extraBaseInterfaces);
+        var baseInterfaces = new[] {
+            Namespaces.IRecordIdType }.Concat(extraBaseInterfaces);
         var baseList = string.Join(", ", baseInterfaces);
 
         using (writer.Block($"public readonly record struct {idTypeName}(string Value) : {baseList}"))
         {
-            writer.Line($"public string Value {{ get; }} = {FormatType}.Validate(Value);");
-            writer.Line();
+            writer.Line($"public string Value {{ get; }} = {Namespaces.FormatType}.Validate(Value);");
             writer.Line($"public string Table => \"{tableName}\";");
-            writer.Line();
             writer.Line("public string ToLiteral() => Value;");
-            writer.Line();
             writer.Line($"public static {idTypeName} New() => new(global::System.Ulid.NewUlid().ToString());");
-            writer.Line();
             writer.Line("public override string ToString() => Table + \":\" + Value;");
-            writer.Line();
-            writer.Line($"public static implicit operator {RecordIdType}({idTypeName} id) => new(id.Table, id.Value);");
+            writer.Line($"public static implicit operator {Namespaces.RecordIdType}({idTypeName} id) => new(id.Table, id.Value);");
         }
     }
 }

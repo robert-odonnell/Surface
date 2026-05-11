@@ -23,7 +23,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class QueryRootEmitter
 {
-    private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.SurfaceQuery";
     private const string GeneratedClass = "GeneratedQueryRoot";
 
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
@@ -52,12 +51,10 @@ internal static class QueryRootEmitter
             // Partial fragment of [CompositionRoot] — adds the static Query accessor.
             using (writer.Block(FormatTypeDeclaration(root.DeclaredAccessibility, root.Name)))
             {
-                writer.Line("/// <summary>Read-mode query roots — one per <c>[Table]</c>. Compose with <c>.Where(predicate)</c> / <c>.WithId(id)</c>; terminate with <c>.ExecuteAsync(transport)</c>.</summary>");
                 writer.Line($"public static {GeneratedClass} Query => {GeneratedClass}.Instance;");
             }
 
-            writer.Line();
-
+            
             // Internal companion — keeps the {CompositionRoot} surface clean. Singleton: query
             // factories are stateless, so a per-process instance is fine. Marked partial so
             // sibling emitters (EdgeQueryRootEmitter) can graft their own accessors onto the
@@ -65,7 +62,6 @@ internal static class QueryRootEmitter
             using (writer.Block($"public sealed partial class {GeneratedClass}"))
             {
                 writer.Line($"public static readonly {GeneratedClass} Instance = new {GeneratedClass}();");
-                writer.Line();
                 writer.Line($"private {GeneratedClass}() {{ }}");
 
                 foreach (var table in ordered)
@@ -76,9 +72,7 @@ internal static class QueryRootEmitter
                         ? $"global::{table.Name}"
                         : $"global::{table.Namespace}.{table.Name}";
 
-                    writer.Line();
-                    writer.Line($"/// <summary>Query root for <see cref=\"{entityFqn["global::".Length..]}\"/>.</summary>");
-                    writer.Line($"public {QueryFqn}<{entityFqn}> {propertyName} => new(\"{tableName}\");");
+                    writer.Line($"public {Namespaces.QueryFqn}<{entityFqn}> {propertyName} => new(\"{tableName}\");");
                 }
             }
         }

@@ -57,8 +57,7 @@ internal static class AggregateLoaderEmitter
         writer.Line("using System.Threading;");
         writer.Line("using System.Threading.Tasks;");
         writer.Line("using Disruptor.Surreal.Values;");
-        writer.Line();
-
+        
         var loaderName = $"{root.Name}AggregateLoader";
         var rootIdType = $"global::{root.FullName}Id";
 
@@ -69,10 +68,8 @@ internal static class AggregateLoaderEmitter
                 // Two PopulateAsync overloads (Surreal db / Transaction tx). Each calls the
                 // appropriate QueryAsync directly — no JSON bridge, no ISurrealTransport.
                 EmitPopulateOverload("global::Disruptor.Surreal.SurrealClient db", "db");
-                writer.Line();
                 EmitPopulateOverload("global::Disruptor.Surreal.SurrealTransaction tx", "tx");
-                writer.Line();
-
+                
                 EmitHelpers(writer);
             }
         }
@@ -97,20 +94,16 @@ internal static class AggregateLoaderEmitter
                     writer.Line(line.TrimEnd('\r'));
                 }
                 writer.Line("\"\"\";");
-                writer.Line();
                 writer.Line($"var __response = await {handleName}.QueryAsync(sql, __bindings, ct);");
                 writer.Line("var rootRow = ExtractFirstResultRow(__response);");
                 writer.Line("if (rootRow is null) return;");
-                writer.Line();
-
+                
                 writer.Line("global::Disruptor.Surface.Runtime.IHydrationSink sink = ws;");
-                writer.Line();
-
+                
                 writer.Line($"var __root = new global::{root.FullName}();");
                 writer.Line("((global::Disruptor.Surface.Runtime.IEntity)__root).Hydrate(rootRow, sink);");
                 writer.Line("((global::Disruptor.Surface.Runtime.IEntity)__root).MarkAllSlicesLoaded(sink);");
-                writer.Line();
-
+                
                 var orderedMembers = OrderedMembers(agg, byFullName, pathToRoot);
                 foreach (var member in orderedMembers)
                 {
@@ -378,7 +371,6 @@ internal static class AggregateLoaderEmitter
 
     private static void EmitHelpers(CodeWriter writer)
     {
-        writer.Line("/// <summary>Pull the first row out of a SurrealQueryResponse, or null when no row matched. Throws SurrealRpcException for any errored statement so DB failures don't masquerade as empty loads.</summary>");
         using (writer.Block("private static SurrealObjectValue? ExtractFirstResultRow(global::Disruptor.Surreal.SurrealQueryResponse response)"))
         {
             writer.Line("response.EnsureSuccess();");
@@ -401,8 +393,6 @@ internal static class AggregateLoaderEmitter
             writer.Line("return null;");
         }
 
-        writer.Line();
-        writer.Line("/// <summary>Walk an array attached to <paramref name=\"key\"/> on <paramref name=\"parent\"/> and Hydrate each element as a <typeparamref name=\"T\"/>.</summary>");
         writer.Line("private static void HydrateChildren<T>(SurrealObjectValue parent, string key, global::Disruptor.Surface.Runtime.IHydrationSink sink)");
         using (writer.Indent())
         {
@@ -420,8 +410,6 @@ internal static class AggregateLoaderEmitter
             }
         }
 
-        writer.Line();
-        writer.Line("/// <summary>Walk an edge array {{id, in, out}} and call <c>sink.Edge(in, edgeName, out)</c> per row.</summary>");
         using (writer.Block("private static void HydrateEdges(SurrealObjectValue parent, string key, string edgeName, global::Disruptor.Surface.Runtime.IHydrationSink sink)"))
         {
             writer.Line("if (!parent.Object.TryGetValue(key, out var v) || v is not SurrealListValue arr) return;");

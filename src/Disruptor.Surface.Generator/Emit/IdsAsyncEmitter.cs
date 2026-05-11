@@ -29,14 +29,6 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class IdsAsyncEmitter
 {
-    private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.SurfaceQuery";
-    private const string SurrealFqn = "global::Disruptor.Surreal.SurrealClient";
-    private const string TransactionFqn = "global::Disruptor.Surreal.SurrealTransaction";
-    private const string CtFqn = "global::System.Threading.CancellationToken";
-    private const string TaskFqn = "global::System.Threading.Tasks.Task";
-    private const string ListFqn = "global::System.Collections.Generic.List";
-    private const string ReadOnlyListFqn = "global::System.Collections.Generic.IReadOnlyList";
-
     public static void Emit(SourceProductionContext spc, TableModel table)
     {
         var entityFqn = string.IsNullOrEmpty(table.Namespace)
@@ -48,27 +40,23 @@ internal static class IdsAsyncEmitter
         var writer = new CodeWriter().Header();
         using (writer.Namespace(table.Namespace))
         {
-            writer.Line($"/// <summary>Id-only selection terminal for <see cref=\"{table.Name}\"/>. Compiles to <c>SELECT id FROM …</c> and returns a typed list of <c>{table.Name}Id</c>; no entity hydration, no session.</summary>");
             using (writer.Block($"public static class {className}"))
             {
                 // Two overloads: Surreal db + Transaction tx. Both call QueryAsync directly
                 // and consume the SDK's SurrealQueryResponse / SurrealValue tree — no JSON bridge.
-                EmitOverload(SurrealFqn, "db");
-                writer.Line();
-                EmitOverload(TransactionFqn, "tx");
+                EmitOverload(Namespaces.SurrealFqn, "db");
+                EmitOverload(Namespaces.TransactionFqn, "tx");
             }
 
             void EmitOverload(string paramTypeFqn, string paramName)
             {
-                writer.Line($"/// <summary>Compile and execute the query as <c>SELECT id FROM {SurrealNaming.ToTableName(table.Name)} …</c> and project each returned id into <c>{table.Name}Id</c>. Throws <see cref=\"global::System.InvalidOperationException\"/> if the query carries any <c>Include*</c> nodes — id-only selection is flat by definition.</summary>");
-                using (writer.Block($"public static async {TaskFqn}<{ReadOnlyListFqn}<{idFqn}>> IdsAsync(this {QueryFqn}<{entityFqn}> query, {paramTypeFqn} {paramName}, {CtFqn} ct = default)"))
+                using (writer.Block($"public static async {Namespaces.TaskFqn}<{Namespaces.ReadOnlyListFqn}<{idFqn}>> IdsAsync(this {Namespaces.QueryFqn}<{entityFqn}> query, {paramTypeFqn} {paramName}, {Namespaces.CtFqn} ct = default)"))
                 {
                     writer.Line("var (sql, __bindings) = query.CompileIdsOnly();");
                     writer.Line($"var __response = await {paramName}.QueryAsync(sql, __bindings, ct);");
                     writer.Line("var rows = __response.Count > 0 ? __response.Take(0) : null;");
-                    writer.Line();
-
-                    writer.Line($"var list = new {ListFqn}<{idFqn}>();");
+                    
+                    writer.Line($"var list = new {Namespaces.ListFqn}<{idFqn}>();");
                     using (writer.Block("if (rows is global::Disruptor.Surreal.Values.SurrealListValue __arr)"))
                     {
                         using (writer.Block("foreach (var __item in __arr.List)"))
