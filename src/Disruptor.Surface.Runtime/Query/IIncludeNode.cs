@@ -1,3 +1,5 @@
+using Disruptor.Surreal.Values;
+
 namespace Disruptor.Surface.Runtime.Query;
 
 /// <summary>
@@ -56,7 +58,7 @@ public sealed record IncludeChildrenNode(
     string ParentField,
     IPredicate? Filter,
     IReadOnlyList<IIncludeNode> Nested,
-    Action<Disruptor.Surreal.Values.SurrealValue, IHydrationSink>? Hydrator = null,
+    Action<SurrealValue, IHydrationSink>? Hydrator = null,
     string? ParentSliceKey = null) : IIncludeNode;
 
 /// <summary>
@@ -104,4 +106,4 @@ public sealed record IncludeRelationNode(
     string? SingleTargetTable,
     IPredicate? Filter,
     IReadOnlyList<IIncludeNode> Nested,
-    Action<Disruptor.Surreal.Values.SurrealValue, IHydrationSink>? Hydrator = null) : IIncludeNode;
+    Action<SurrealValue, IHydrationSink>? Hydrator = null) : IIncludeNode;

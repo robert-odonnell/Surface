@@ -97,7 +97,10 @@ internal static class TableExtractor
     {
         foreach (var attr in attrs)
         {
-            if (AttributeFullName(attr) == fullName) return true;
+            if (AttributeFullName(attr) == fullName)
+            {
+                return true;
+            }
         }
         return false;
     }
@@ -113,14 +116,24 @@ internal static class TableExtractor
     /// </summary>
     private static EquatableArray<InlineMember> ResolveInlineMembers(ITypeSymbol type)
     {
-        if (type is not INamedTypeSymbol named) return [];
-        if (named.Arity != 1) return [];
+        if (type is not INamedTypeSymbol named)
+        {
+            return [];
+        }
+
+        if (named.Arity != 1)
+        {
+            return [];
+        }
 
         var def = named.ConstructedFrom;
         var ns = def.ContainingNamespace?.ToDisplayString() ?? string.Empty;
         var isCollection = ns == "System.Collections.Generic"
             && def.Name is "IReadOnlyList" or "IList" or "List";
-        if (!isCollection) return [];
+        if (!isCollection)
+        {
+            return [];
+        }
 
         var element = named.TypeArguments[0];
         var members = new List<InlineMember>();
@@ -128,10 +141,25 @@ internal static class TableExtractor
         {
             // Public instance properties only — covers both classic class properties
             // and record positional parameters (Roslyn synthesises a property per param).
-            if (member is not IPropertySymbol prop) continue;
-            if (prop.DeclaredAccessibility != Accessibility.Public) continue;
-            if (prop.IsStatic) continue;
-            if (prop.GetMethod is null) continue;
+            if (member is not IPropertySymbol prop)
+            {
+                continue;
+            }
+
+            if (prop.DeclaredAccessibility != Accessibility.Public)
+            {
+                continue;
+            }
+
+            if (prop.IsStatic)
+            {
+                continue;
+            }
+
+            if (prop.GetMethod is null)
+            {
+                continue;
+            }
 
             members.Add(new InlineMember(prop.Name, TypeRefBuilder.Build(prop.Type)));
         }

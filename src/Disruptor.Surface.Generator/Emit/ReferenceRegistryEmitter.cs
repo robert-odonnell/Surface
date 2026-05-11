@@ -31,9 +31,16 @@ internal static class ReferenceRegistryEmitter
 
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
     {
-        if (graph.CompositionRoots.Count != 1) return;
+        if (graph.CompositionRoots.Count != 1)
+        {
+            return;
+        }
+
         var root = graph.CompositionRoots[0];
-        if (!root.IsPartial) return;
+        if (!root.IsPartial)
+        {
+            return;
+        }
 
         var byReferenced = new SortedDictionary<string, List<(string Referencer, string Field, ReferenceDeletePolicy Behavior, bool Nullable)>>(StringComparer.Ordinal);
 
@@ -42,8 +49,15 @@ internal static class ReferenceRegistryEmitter
             var referencerTable = SurrealNaming.ToTableName(table.Name);
             foreach (var p in table.Properties)
             {
-                if (!p.Kinds.HasFlag(PropertyKind.Reference)) continue;
-                if (!p.Type.IsTableType && p.Type.ElementType is null) continue;
+                if (!p.Kinds.HasFlag(PropertyKind.Reference))
+                {
+                    continue;
+                }
+
+                if (!p.Type.IsTableType && p.Type.ElementType is null)
+                {
+                    continue;
+                }
 
                 var targetTypeFqn = StripNullableMarker(UnwrapTask(p.Type.FullyQualifiedName));
                 var simpleTargetName = SurrealNaming.SimpleName(targetTypeFqn);

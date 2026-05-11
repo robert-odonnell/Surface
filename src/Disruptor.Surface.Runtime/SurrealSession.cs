@@ -1,4 +1,5 @@
 using System.Text;
+using Disruptor.Surface.Runtime.Query;
 using Disruptor.Surreal;
 using Disruptor.Surreal.Values;
 
@@ -238,8 +239,16 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         var results = new List<T>();
         foreach (var kv in state.Entities)
         {
-            if (!kv.Key.IsForTable(childTable)) continue;
-            if (kv.Value is not T typed) continue;
+            if (!kv.Key.IsForTable(childTable))
+            {
+                continue;
+            }
+
+            if (kv.Value is not T typed)
+            {
+                continue;
+            }
+
             if (TryGetParentId(typed) is { } pid && pid == owner.Id)
             {
                 results.Add(typed);
@@ -336,12 +345,24 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         var kindName = TKind.EdgeName;
         var ownerId = owner.Id;
         var result = new List<RecordId>();
-        foreach (var key in state.Edges.Keys)
+        foreach (var (source, edge, target) in state.Edges.Keys)
         {
-            if (key.Edge != kindName) continue;
-            if (key.Source != ownerId) continue;
-            if (relationsAtStart.Contains((kindName, key.Source, key.Target))) continue;
-            result.Add(key.Target);
+            if (edge != kindName)
+            {
+                continue;
+            }
+
+            if (source != ownerId)
+            {
+                continue;
+            }
+
+            if (relationsAtStart.Contains((kindName, Source: source, Target: target)))
+            {
+                continue;
+            }
+
+            result.Add(target);
         }
         return result;
     }
@@ -443,17 +464,17 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// want to top up — Fetch never invents new aggregate roots.
     /// </para>
     /// </summary>
-    public Task FetchAsync<T>(Query.Query<T> query, SurrealClient db, CancellationToken ct = default)
+    public Task FetchAsync<T>(SurfaceQuery<T> query, SurrealClient db, CancellationToken ct = default)
         where T : class, IEntity, new()
-        => FetchAsync(query, (sql, bindings, c) => db.QueryAsync(sql, bindings, c), ct);
+        => FetchAsync(query, db.QueryAsync, ct);
 
-    /// <inheritdoc cref="FetchAsync{T}(Query.Query{T}, SurrealClient, CancellationToken)"/>
-    public Task FetchAsync<T>(Query.Query<T> query, SurrealTransaction tx, CancellationToken ct = default)
+    /// <inheritdoc cref="FetchAsync{T}(SurfaceQuery{T}, SurrealClient, CancellationToken)"/>
+    public Task FetchAsync<T>(SurfaceQuery<T> query, SurrealTransaction tx, CancellationToken ct = default)
         where T : class, IEntity, new()
-        => FetchAsync(query, (sql, bindings, c) => tx.QueryAsync(sql, bindings, c), ct);
+        => FetchAsync(query, tx.QueryAsync, ct);
 
     private async Task FetchAsync<T>(
-        Query.Query<T> query,
+        SurfaceQuery<T> query,
         Func<string, SurrealObject?, CancellationToken, Task<SurrealQueryResponse>> queryFn,
         CancellationToken ct)
         where T : class, IEntity, new()
@@ -471,7 +492,9 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
             foreach (var row in arr.List)
             {
                 if (row is SurrealObjectValue obj)
+                {
                     HydrateMergingRoot<T>(obj, sink, query.Includes);
+                }
             }
         }
         else if (rows is SurrealObjectValue single)
@@ -483,12 +506,15 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// <summary>
     /// Hydrate one root row (or re-Hydrate over an existing tracked entity), then recurse
     /// through <paramref name="includes"/>. Re-Hydrate clobbers existing scalar fields —
-    /// the slice-widening contract documented on <see cref="FetchAsync{T}(Query.Query{T}, SurrealClient, CancellationToken)"/>.
+    /// the slice-widening contract documented on <see cref="FetchAsync{T}(SurfaceQuery{T}, SurrealClient, CancellationToken)"/>.
     /// </summary>
-    private void HydrateMergingRoot<T>(SurrealObjectValue row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes)
+    private void HydrateMergingRoot<T>(SurrealObjectValue row, IHydrationSink sink, IReadOnlyList<IIncludeNode> includes)
         where T : class, IEntity, new()
     {
-        if (!HydrationValue.TryReadRecordId(row, "id", out var id)) return;
+        if (!HydrationValue.TryReadRecordId(row, "id", out var id))
+        {
+            return;
+        }
 
         if (state.Entities.TryGetValue(id, out var existing))
         {
@@ -508,7 +534,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// instance (slice-widening; scalar clobber per the FetchAsync contract); brand-new
     /// rows go through the include's generator-emitted hydrator.
     /// </summary>
-    private void HydrateMergingNested(SurrealObjectValue row, IReadOnlyList<Query.IIncludeNode> nodes, IHydrationSink sink)
+    private void HydrateMergingNested(SurrealObjectValue row, IReadOnlyList<IIncludeNode> nodes, IHydrationSink sink)
     {
         var hasOwnerId = HydrationValue.TryReadRecordId(row, "id", out var ownerId);
 
@@ -516,19 +542,37 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         {
             switch (node)
             {
-                case Query.IncludeInlineRefNode inlineRef:
-                    if (hasOwnerId) sink.MarkSliceLoaded(ownerId, inlineRef.Field);
+                case IncludeInlineRefNode inlineRef:
+                    if (hasOwnerId)
+                    {
+                        sink.MarkSliceLoaded(ownerId, inlineRef.Field);
+                    }
+
                     break;
 
-                case Query.IncludeChildrenNode children:
+                case IncludeChildrenNode children:
                     if (hasOwnerId && children.ParentSliceKey is { } sliceKey)
+                    {
                         sink.MarkSliceLoaded(ownerId, sliceKey);
-                    if (!row.Object.TryGetValue(children.ChildTable, out var arrVal)) continue;
-                    if (arrVal is not SurrealListValue arr) continue;
+                    }
+
+                    if (!row.Object.TryGetValue(children.ChildTable, out var arrVal))
+                    {
+                        continue;
+                    }
+
+                    if (arrVal is not SurrealListValue arr)
+                    {
+                        continue;
+                    }
 
                     foreach (var childVal in arr.List)
                     {
-                        if (childVal is not SurrealObjectValue childObj) continue;
+                        if (childVal is not SurrealObjectValue childObj)
+                        {
+                            continue;
+                        }
+
                         if (HydrationValue.TryReadRecordId(childObj, "id", out var childId)
                             && state.Entities.TryGetValue(childId, out var existingChild))
                         {
@@ -542,18 +586,41 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                     }
                     break;
 
-                case Query.IncludeRelationNode relation:
-                    if (hasOwnerId) sink.MarkSliceLoaded(ownerId, relation.ParentSliceKey);
-                    if (!row.Object.TryGetValue(relation.ParentSliceKey, out var relVal)) continue;
-                    if (relVal is not SurrealListValue relArr) continue;
+                case IncludeRelationNode relation:
+                    if (hasOwnerId)
+                    {
+                        sink.MarkSliceLoaded(ownerId, relation.ParentSliceKey);
+                    }
+
+                    if (!row.Object.TryGetValue(relation.ParentSliceKey, out var relVal))
+                    {
+                        continue;
+                    }
+
+                    if (relVal is not SurrealListValue relArr)
+                    {
+                        continue;
+                    }
 
                     if (relation.IdsOnly)
                     {
                         foreach (var edgeVal in relArr.List)
                         {
-                            if (edgeVal is not SurrealObjectValue edgeObj) continue;
-                            if (!HydrationValue.TryReadRecordId(edgeObj, "in", out var src)) continue;
-                            if (!HydrationValue.TryReadRecordId(edgeObj, "out", out var dst)) continue;
+                            if (edgeVal is not SurrealObjectValue edgeObj)
+                            {
+                                continue;
+                            }
+
+                            if (!HydrationValue.TryReadRecordId(edgeObj, "in", out var src))
+                            {
+                                continue;
+                            }
+
+                            if (!HydrationValue.TryReadRecordId(edgeObj, "out", out var dst))
+                            {
+                                continue;
+                            }
+
                             sink.Edge(src, relation.EdgeName, dst);
                         }
                     }
@@ -561,7 +628,11 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                     {
                         foreach (var targetVal in relArr.List)
                         {
-                            if (targetVal is not SurrealObjectValue targetObj) continue;
+                            if (targetVal is not SurrealObjectValue targetObj)
+                            {
+                                continue;
+                            }
+
                             if (HydrationValue.TryReadRecordId(targetObj, "id", out var targetId)
                                 && state.Entities.TryGetValue(targetId, out var existingTarget))
                             {
@@ -571,8 +642,16 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                             {
                                 relation.Hydrator?.Invoke(targetObj, sink);
                             }
-                            if (!hasOwnerId) continue;
-                            if (!HydrationValue.TryReadRecordId(targetObj, "id", out var tgtForEdge)) continue;
+                            if (!hasOwnerId)
+                            {
+                                continue;
+                            }
+
+                            if (!HydrationValue.TryReadRecordId(targetObj, "id", out var tgtForEdge))
+                            {
+                                continue;
+                            }
+
                             var src = relation.IsOutgoing ? ownerId : tgtForEdge;
                             var dst = relation.IsOutgoing ? tgtForEdge : ownerId;
                             sink.Edge(src, relation.EdgeName, dst);
@@ -595,7 +674,11 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     {
         ThrowIfClosed();
         ArgumentNullException.ThrowIfNull(child);
-        if (child.Session is not null) return;
+        if (child.Session is not null)
+        {
+            return;
+        }
+
         Track(child);
     }
 
@@ -664,9 +747,21 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         // bulk form, drop every matching loaded edge so reads stay accurate.
         foreach (var key in state.Edges.Keys.ToList())
         {
-            if (key.Edge != edgeKind) continue;
-            if (src is { } s && key.Source != s) continue;
-            if (tgt is { } t && key.Target != t) continue;
+            if (key.Edge != edgeKind)
+            {
+                continue;
+            }
+
+            if (src is { } s && key.Source != s)
+            {
+                continue;
+            }
+
+            if (tgt is { } t && key.Target != t)
+            {
+                continue;
+            }
+
             state.Edges.Remove(key);
         }
 
@@ -826,7 +921,11 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
             // dispatches exactly once. The generator's per-entity body checks IsTracked
             // for forward refs, but a cycle through new entities would still recur here
             // without the visited set.
-            if (!visited.Add(entity.Id)) return;
+            if (!visited.Add(entity.Id))
+            {
+                return;
+            }
+
             session.EnsureBoundForSave(entity);
             await entity.SaveAsync(this, ct).ConfigureAwait(false);
         }
@@ -916,9 +1015,21 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
             // Drop matching loaded edges from the in-memory snapshot too.
             foreach (var key in state.Edges.Keys.ToList())
             {
-                if (key.Edge != TKind.EdgeName) continue;
-                if (src is { } s && key.Source != s) continue;
-                if (tgt is { } t && key.Target != t) continue;
+                if (key.Edge != TKind.EdgeName)
+                {
+                    continue;
+                }
+
+                if (src is { } s && key.Source != s)
+                {
+                    continue;
+                }
+
+                if (tgt is { } t && key.Target != t)
+                {
+                    continue;
+                }
+
                 state.Edges.Remove(key);
             }
 

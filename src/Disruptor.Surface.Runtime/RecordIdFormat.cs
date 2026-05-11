@@ -109,8 +109,16 @@ public static class RecordIdFormat
         }
         else if (v.Length == PrefixedHashLength)
         {
-            if (v[0] < 'a' || v[0] > 'z') return false;
-            if (v[1] != '_') return false;
+            if (v[0] < 'a' || v[0] > 'z')
+            {
+                return false;
+            }
+
+            if (v[1] != '_')
+            {
+                return false;
+            }
+
             hexStart = 2;
         }
         else

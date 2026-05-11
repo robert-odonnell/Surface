@@ -75,6 +75,6 @@ public readonly record struct Command(
         return new(CommandOp.Unrelate, source ?? default, edgeTable, Value: target);
     }
 
-    private static IReadOnlyDictionary<string, object?>? Freeze(IEnumerable<KeyValuePair<string, object?>>? source) =>
+    private static Dictionary<string, object?>? Freeze(IEnumerable<KeyValuePair<string, object?>>? source) =>
         source is null ? null : new Dictionary<string, object?>(source, StringComparer.Ordinal);
 }

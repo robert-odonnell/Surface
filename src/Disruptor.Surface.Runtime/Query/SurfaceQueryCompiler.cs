@@ -19,7 +19,7 @@ namespace Disruptor.Surface.Runtime.Query;
 /// stay inlined (no escape concern; SurrealQL parses them directly).
 /// </para>
 /// </summary>
-internal static class QueryCompiler
+internal static class SurfaceQueryCompiler
 {
     /// <summary>Build the SurrealQL + bindings for a (possibly nested) <c>SELECT</c>.</summary>
     public static (string Sql, SurrealObject Bindings) Compile(
@@ -63,7 +63,11 @@ internal static class QueryCompiler
         sb.Append("SELECT ");
         for (var i = 0; i < selectFields.Count; i++)
         {
-            if (i > 0) sb.Append(", ");
+            if (i > 0)
+            {
+                sb.Append(", ");
+            }
+
             sb.Append(selectFields[i].Identifier());
         }
         sb.Append(" FROM ").Append(table.Identifier());
@@ -94,12 +98,12 @@ internal static class QueryCompiler
 
     /// <summary>
     /// Per-compile mutable state: the bindings accumulator + a monotonic counter that
-    /// names each placeholder. Keeps the <see cref="QueryCompiler"/> static surface clean
+    /// names each placeholder. Keeps the <see cref="SurfaceQueryCompiler"/> static surface clean
     /// while letting the recursive subselect / predicate walk share the binding stream.
     /// </summary>
     internal sealed class Builder
     {
-        public SurrealObject Bindings { get; } = new();
+        public SurrealObject Bindings { get; } = [];
         private int counter;
 
         /// <summary>
@@ -142,12 +146,19 @@ internal static class QueryCompiler
 
         private static void AppendOrderBy(StringBuilder sb, IReadOnlyList<OrderClause>? clauses)
         {
-            if (clauses is null || clauses.Count == 0) return;
+            if (clauses is null || clauses.Count == 0)
+            {
+                return;
+            }
 
             sb.Append(" ORDER BY ");
             for (var i = 0; i < clauses.Count; i++)
             {
-                if (i > 0) sb.Append(", ");
+                if (i > 0)
+                {
+                    sb.Append(", ");
+                }
+
                 var c = clauses[i];
                 sb.Append(c.Field.Identifier()).Append(c.Direction == OrderDirection.Descending ? " DESC" : " ASC");
             }
@@ -157,12 +168,18 @@ internal static class QueryCompiler
         {
             // LIMIT/START are integer literals — no escape concern, no value typing
             // benefit from binding. Inline directly.
-            if (limit is { } n && n > 0) sb.Append(" LIMIT ").Append(n);
+            if (limit is { } n && n > 0)
+            {
+                sb.Append(" LIMIT ").Append(n);
+            }
         }
 
         private static void AppendStart(StringBuilder sb, int? start)
         {
-            if (start is { } n && n > 0) sb.Append(" START ").Append(n);
+            if (start is { } n && n > 0)
+            {
+                sb.Append(" START ").Append(n);
+            }
         }
 
         /// <summary>
@@ -173,7 +190,10 @@ internal static class QueryCompiler
         /// </summary>
         public string BuildProjection(IReadOnlyList<IIncludeNode> includes)
         {
-            if (includes.Count == 0) return "*";
+            if (includes.Count == 0)
+            {
+                return "*";
+            }
 
             var sb = new StringBuilder("*");
             foreach (var node in includes)

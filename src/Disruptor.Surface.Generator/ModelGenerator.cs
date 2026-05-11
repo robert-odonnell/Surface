@@ -231,11 +231,7 @@ public sealed class ModelGenerator : IIncrementalGenerator
             // [Id] is no longer required: the generator always emits the internal id anchor
             // and the IEntity.Id accessor on every [Table]; [Id] just opts the user into a
             // public partial property that delegates to the anchor.
-            var idCount = 0;
-            foreach (var p in table.Properties)
-            {
-                if (p.Kinds.HasFlag(PropertyKind.Id)) idCount++;
-            }
+            var idCount = table.Properties.Count(p => p.Kinds.HasFlag(PropertyKind.Id));
             if (idCount > 1)
             {
                 spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.TableHasMultipleIds, Location.None, table.FullName, idCount));
@@ -258,7 +254,11 @@ public sealed class ModelGenerator : IIncrementalGenerator
             // confusing CS0103 in a .g.cs file they didn't write.
             foreach (var p in table.Properties)
             {
-                if (p.IsPartial) continue;
+                if (p.IsPartial)
+                {
+                    continue;
+                }
+
                 var attrName = p.Kinds switch
                 {
                     var k when k.HasFlag(PropertyKind.Id)        => "Id",
@@ -268,7 +268,11 @@ public sealed class ModelGenerator : IIncrementalGenerator
                     var k when k.HasFlag(PropertyKind.Reference) => "Reference",
                     _ => p.RelationRole != RelationRole.None ? "Relation" : null,
                 };
-                if (attrName is null) continue;
+                if (attrName is null)
+                {
+                    continue;
+                }
+
                 spc.ReportDiagnostic(Diagnostic.Create(
                     Diagnostics.AnnotatedMemberMustBePartial,
                     Location.None,
@@ -289,12 +293,36 @@ public sealed class ModelGenerator : IIncrementalGenerator
             foreach (var p in table.Properties)
             {
                 var roleNames = new List<string>();
-                if (p.Kinds.HasFlag(PropertyKind.Id))        roleNames.Add("Id");
-                if (p.Kinds.HasFlag(PropertyKind.Property))  roleNames.Add("Property");
-                if (p.Kinds.HasFlag(PropertyKind.Parent))    roleNames.Add("Parent");
-                if (p.Kinds.HasFlag(PropertyKind.Children))  roleNames.Add("Children");
-                if (p.Kinds.HasFlag(PropertyKind.Reference)) roleNames.Add("Reference");
-                if (roleNames.Count <= 1) continue;
+                if (p.Kinds.HasFlag(PropertyKind.Id))
+                {
+                    roleNames.Add("Id");
+                }
+
+                if (p.Kinds.HasFlag(PropertyKind.Property))
+                {
+                    roleNames.Add("Property");
+                }
+
+                if (p.Kinds.HasFlag(PropertyKind.Parent))
+                {
+                    roleNames.Add("Parent");
+                }
+
+                if (p.Kinds.HasFlag(PropertyKind.Children))
+                {
+                    roleNames.Add("Children");
+                }
+
+                if (p.Kinds.HasFlag(PropertyKind.Reference))
+                {
+                    roleNames.Add("Reference");
+                }
+
+                if (roleNames.Count <= 1)
+                {
+                    continue;
+                }
+
                 spc.ReportDiagnostic(Diagnostic.Create(
                     Diagnostics.ConflictingRoleAttributes,
                     Location.None,
@@ -338,24 +366,34 @@ public sealed class ModelGenerator : IIncrementalGenerator
             foreach (var (memberName, memberType) in EnumerateReadSideTypes(table, PropertyKind.Reference))
             {
                 var target = UnwrapTask(memberType);
-                if (!target.IsTableType)
+                if (target.IsTableType)
                 {
-                    spc.ReportDiagnostic(Diagnostic.Create(
-                        Diagnostics.ReferenceMustTargetTable,
-                        Location.None,
-                        table.FullName,
-                        memberName,
-                        memberType.DisplayName));
-                    valid = false;
+                    continue;
                 }
+
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.ReferenceMustTargetTable,
+                    Location.None,
+                    table.FullName,
+                    memberName,
+                    memberType.DisplayName));
+                valid = false;
             }
 
             // CG027 — [Parent] target must be a [Table]. Same family as CG010 / CG026
             // (generic constraint violation in emitted code without the diagnostic).
             foreach (var p in table.Properties)
             {
-                if (!p.Kinds.HasFlag(PropertyKind.Parent)) continue;
-                if (p.Type.IsTableType) continue;
+                if (!p.Kinds.HasFlag(PropertyKind.Parent))
+                {
+                    continue;
+                }
+
+                if (p.Type.IsTableType)
+                {
+                    continue;
+                }
+
                 spc.ReportDiagnostic(Diagnostic.Create(
                     Diagnostics.ParentMustTargetTable,
                     Location.None,
@@ -371,9 +409,17 @@ public sealed class ModelGenerator : IIncrementalGenerator
             // Foo` and the generator's emitted instance backing field wouldn't match.
             foreach (var p in table.Properties)
             {
-                if (!p.IsStatic) continue;
+                if (!p.IsStatic)
+                {
+                    continue;
+                }
+
                 var attrName = AnnotationLabel(p);
-                if (attrName is null) continue;
+                if (attrName is null)
+                {
+                    continue;
+                }
+
                 spc.ReportDiagnostic(Diagnostic.Create(
                     Diagnostics.AnnotatedMemberMustNotBeStatic,
                     Location.None,
@@ -392,12 +438,28 @@ public sealed class ModelGenerator : IIncrementalGenerator
             // (they don't take the scalar-emission code path).
             foreach (var p in table.Properties)
             {
-                if (!p.Kinds.HasFlag(PropertyKind.Property)) continue;
-                if (p.RelationRole != RelationRole.None) continue;
+                if (!p.Kinds.HasFlag(PropertyKind.Property))
+                {
+                    continue;
+                }
+
+                if (p.RelationRole != RelationRole.None)
+                {
+                    continue;
+                }
+
                 if (p.Type.MetadataName is "System.Collections.Generic.IReadOnlyList`1"
-                                        or "System.Collections.Generic.IList`1"
-                                        or "System.Collections.Generic.List`1") continue;
-                if (SchemaEmitter.IsMappableScalar(p.Type)) continue;
+                    or "System.Collections.Generic.IList`1"
+                    or "System.Collections.Generic.List`1")
+                {
+                    continue;
+                }
+
+                if (SchemaEmitter.IsMappableScalar(p.Type))
+                {
+                    continue;
+                }
+
                 spc.ReportDiagnostic(Diagnostic.Create(
                     Diagnostics.PropertyTypeNotMappable,
                     Location.None,
@@ -416,15 +478,9 @@ public sealed class ModelGenerator : IIncrementalGenerator
         }
     }
 
-    private static TypeRef UnwrapTask(TypeRef t)
-    {
-        if (t.FullyQualifiedName.StartsWith("global::System.Threading.Tasks.Task<") && t.TypeArguments.Count > 0)
-        {
-            return t.TypeArguments[0];
-        }
-
-        return t;
-    }
+    private static TypeRef UnwrapTask(TypeRef t) => t.FullyQualifiedName.StartsWith("global::System.Threading.Tasks.Task<") && t.TypeArguments.Count > 0
+        ? t.TypeArguments[0]
+        : t;
 
     /// <summary>
     /// BFS from the aggregate root through <c>[Parent]</c>-pointing tables, collecting
@@ -441,12 +497,23 @@ public sealed class ModelGenerator : IIncrementalGenerator
             added = false;
             foreach (var memberFullName in agg.MemberFullNames)
             {
-                if (reached.Contains(memberFullName)) continue;
-                if (!byFullName.TryGetValue(memberFullName, out var member)) continue;
+                if (reached.Contains(memberFullName))
+                {
+                    continue;
+                }
+
+                if (!byFullName.TryGetValue(memberFullName, out var member))
+                {
+                    continue;
+                }
 
                 foreach (var p in member.Properties)
                 {
-                    if (!p.Kinds.HasFlag(PropertyKind.Parent)) continue;
+                    if (!p.Kinds.HasFlag(PropertyKind.Parent))
+                    {
+                        continue;
+                    }
+
                     var parentFqn = StripGlobalAndNullable(p.Type.FullyQualifiedName);
                     if (reached.Contains(parentFqn))
                     {
@@ -482,16 +549,8 @@ public sealed class ModelGenerator : IIncrementalGenerator
     /// The signature yields <c>(memberName, returnType)</c> so validation errors point at
     /// the actual declaration site.
     /// </summary>
-    private static IEnumerable<(string Name, TypeRef Type)> EnumerateReadSideTypes(TableModel table, PropertyKind kind)
-    {
-        foreach (var prop in table.Properties)
-        {
-            if (prop.Kinds.HasFlag(kind))
-            {
-                yield return (prop.Name, prop.Type);
-            }
-        }
-    }
+    private static IEnumerable<(string Name, TypeRef Type)> EnumerateReadSideTypes(TableModel table, PropertyKind kind) => table.Properties.Where(prop => prop.Kinds.HasFlag(kind))
+        .Select(prop => (prop.Name, prop.Type));
 
     /// <summary>
     /// Best-fit attribute label for diagnostic messages — picks the role attribute the

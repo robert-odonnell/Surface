@@ -24,7 +24,7 @@ public readonly record struct EdgeRow(RecordId Source, RecordId Target);
 /// parameter-binding time.
 /// </para>
 /// </summary>
-public sealed class EdgeQuery<TIn, TOut>
+public sealed class SurfaceEdgeQuery<TIn, TOut>
     where TIn : IRecordId
     where TOut : IRecordId
 {
@@ -37,10 +37,10 @@ public sealed class EdgeQuery<TIn, TOut>
     private readonly int? startAt;
 
     /// <summary>Generator entry point. <paramref name="edgeTable"/> is the snake-cased SurrealDB edge table name.</summary>
-    public EdgeQuery(string edgeTable)
+    public SurfaceEdgeQuery(string edgeTable)
         : this(edgeTable, inFilter: null, outFilter: null, extra: null, orderClauses: [], limitCount: null, startAt: null) { }
 
-    private EdgeQuery(
+    private SurfaceEdgeQuery(
         string edgeTable,
         IReadOnlyList<IRecordId>? inFilter,
         IReadOnlyList<IRecordId>? outFilter,
@@ -62,7 +62,7 @@ public sealed class EdgeQuery<TIn, TOut>
     /// Restricts the source side (<c>in</c>) to a list of ids — emits
     /// <c>in IN $param</c>. Multiple <see cref="WhereIn"/> calls overwrite, not merge.
     /// </summary>
-    public EdgeQuery<TIn, TOut> WhereIn(IEnumerable<TIn> ids)
+    public SurfaceEdgeQuery<TIn, TOut> WhereIn(IEnumerable<TIn> ids)
     {
         var snap = SnapshotIds(ids);
         return new(edgeTable, snap, outFilter, extra, orderClauses, limitCount, startAt);
@@ -72,7 +72,7 @@ public sealed class EdgeQuery<TIn, TOut>
     /// Restricts the target side (<c>out</c>) to a list of ids — emits
     /// <c>out IN $param</c>. Multiple <see cref="WhereOut"/> calls overwrite, not merge.
     /// </summary>
-    public EdgeQuery<TIn, TOut> WhereOut(IEnumerable<TOut> ids)
+    public SurfaceEdgeQuery<TIn, TOut> WhereOut(IEnumerable<TOut> ids)
     {
         var snap = SnapshotIds(ids);
         return new(edgeTable, inFilter, snap, extra, orderClauses, limitCount, startAt);
@@ -84,21 +84,21 @@ public sealed class EdgeQuery<TIn, TOut>
     /// to filter on edge payload fields — e.g.
     /// <c>edges.OutgoingFrom([id]).Where(UsesEdgeQ.Kind.Eq("call"))</c>.
     /// </summary>
-    public EdgeQuery<TIn, TOut> Where(IPredicate predicate)
+    public SurfaceEdgeQuery<TIn, TOut> Where(IPredicate predicate)
     {
         var combined = extra is null ? predicate : Predicate.And(extra, predicate);
         return new(edgeTable, inFilter, outFilter, combined, orderClauses, limitCount, startAt);
     }
 
-    /// <summary>Order edge rows by a payload field. Same shape as <see cref="Query{T}.OrderBy"/>; renders as <c>ORDER BY field ASC|DESC</c>.</summary>
-    public EdgeQuery<TIn, TOut> OrderBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending)
+    /// <summary>Order edge rows by a payload field. Same shape as <see cref="SurfaceQuery{T}.OrderBy"/>; renders as <c>ORDER BY field ASC|DESC</c>.</summary>
+    public SurfaceEdgeQuery<TIn, TOut> OrderBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending)
         => AppendOrder(new OrderClause(property.Field, direction));
 
     /// <summary>Tie-break on a secondary payload field. Equivalent to chaining another <see cref="OrderBy"/>.</summary>
-    public EdgeQuery<TIn, TOut> ThenBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending)
+    public SurfaceEdgeQuery<TIn, TOut> ThenBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending)
         => AppendOrder(new OrderClause(property.Field, direction));
 
-    private EdgeQuery<TIn, TOut> AppendOrder(OrderClause clause)
+    private SurfaceEdgeQuery<TIn, TOut> AppendOrder(OrderClause clause)
     {
         var next = new OrderClause[orderClauses.Count + 1];
         for (var i = 0; i < orderClauses.Count; i++)
@@ -110,11 +110,11 @@ public sealed class EdgeQuery<TIn, TOut>
     }
 
     /// <summary>Caps the result set at <paramref name="count"/> rows server-side. Multiple calls overwrite.</summary>
-    public EdgeQuery<TIn, TOut> Limit(int count)
+    public SurfaceEdgeQuery<TIn, TOut> Limit(int count)
         => new(edgeTable, inFilter, outFilter, extra, orderClauses, count > 0 ? count : null, startAt);
 
     /// <summary>Skips the first <paramref name="count"/> rows server-side. Pair with <see cref="Limit"/> for paged reads.</summary>
-    public EdgeQuery<TIn, TOut> Start(int count)
+    public SurfaceEdgeQuery<TIn, TOut> Start(int count)
         => new(edgeTable, inFilter, outFilter, extra, orderClauses, limitCount, count > 0 ? count : null);
 
     // ─── Direction-clarifying aliases ───
@@ -124,34 +124,34 @@ public sealed class EdgeQuery<TIn, TOut>
     // OutgoingFrom; "edges landing on X" picks IncomingTo. Same wire SQL either way.
 
     /// <summary>Source-side filter — alias for <see cref="WhereIn"/>. Restricts the edge's <c>in</c> column.</summary>
-    public EdgeQuery<TIn, TOut> WhereSource(IEnumerable<TIn> ids) => WhereIn(ids);
+    public SurfaceEdgeQuery<TIn, TOut> WhereSource(IEnumerable<TIn> ids) => WhereIn(ids);
 
     /// <summary>Target-side filter — alias for <see cref="WhereOut"/>. Restricts the edge's <c>out</c> column.</summary>
-    public EdgeQuery<TIn, TOut> WhereTarget(IEnumerable<TOut> ids) => WhereOut(ids);
+    public SurfaceEdgeQuery<TIn, TOut> WhereTarget(IEnumerable<TOut> ids) => WhereOut(ids);
 
     /// <summary>Edges originating from the given sources — filters <c>in</c>. Reads more naturally than <see cref="WhereIn"/> at the call site for outgoing-edge queries.</summary>
-    public EdgeQuery<TIn, TOut> OutgoingFrom(IEnumerable<TIn> sources) => WhereIn(sources);
+    public SurfaceEdgeQuery<TIn, TOut> OutgoingFrom(IEnumerable<TIn> sources) => WhereIn(sources);
 
     /// <summary>Edges landing on the given targets — filters <c>out</c>. Reads more naturally than <see cref="WhereOut"/> at the call site for incoming-edge queries.</summary>
-    public EdgeQuery<TIn, TOut> IncomingTo(IEnumerable<TOut> targets) => WhereOut(targets);
+    public SurfaceEdgeQuery<TIn, TOut> IncomingTo(IEnumerable<TOut> targets) => WhereOut(targets);
 
     /// <summary>
     /// Compiles the AST to SurrealQL, executes via <paramref name="transport"/>, and
     /// projects each row to an <see cref="EdgeRow"/>. Returns an empty list on null /
     /// undefined results.
     /// </summary>
-    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default)
-        => ExecuteAsync((sql, bindings, c) => db.QueryAsync(sql, bindings, c), ct);
+    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Surreal.SurrealClient db, CancellationToken ct = default)
+        => ExecuteAsync(db.QueryAsync, ct);
 
     /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.SurrealClient, CancellationToken)"/>
-    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default)
-        => ExecuteAsync((sql, bindings, c) => tx.QueryAsync(sql, bindings, c), ct);
+    public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Surreal.SurrealTransaction tx, CancellationToken ct = default)
+        => ExecuteAsync(tx.QueryAsync, ct);
 
     private async Task<IReadOnlyList<EdgeRow>> ExecuteAsync(
-        Func<string, global::Disruptor.Surreal.Values.SurrealObject?, CancellationToken, Task<Disruptor.Surreal.SurrealQueryResponse>> queryFn,
+        Func<string, SurrealObject?, CancellationToken, Task<Surreal.SurrealQueryResponse>> queryFn,
         CancellationToken ct)
     {
-        var (sql, bindings) = EdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra, orderClauses, limitCount, startAt);
+        var (sql, bindings) = SurfaceEdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra, orderClauses, limitCount, startAt);
         var response = await queryFn(sql, bindings, ct);
         var rows = response.Count > 0 ? response.Statements[0].Result : null;
 
@@ -160,7 +160,10 @@ public sealed class EdgeQuery<TIn, TOut>
         {
             foreach (var row in arr.List)
             {
-                if (row is SurrealObjectValue obj) list.Add(ReadEdgeRow(obj));
+                if (row is SurrealObjectValue obj)
+                {
+                    list.Add(ReadEdgeRow(obj));
+                }
             }
         }
         else if (rows is SurrealObjectValue single)
@@ -201,15 +204,15 @@ public sealed class EdgeQuery<TIn, TOut>
 }
 
 /// <summary>
-/// Edge-table flavour of <see cref="QueryCompiler"/> — separate because the WHERE shape
+/// Edge-table flavour of <see cref="SurfaceQueryCompiler"/> — separate because the WHERE shape
 /// is built around the fixed <c>in</c> / <c>out</c> columns rather than a free-form
-/// predicate AST. Falls through to <see cref="QueryCompiler"/>'s normalisation hooks for
+/// predicate AST. Falls through to <see cref="SurfaceQueryCompiler"/>'s normalisation hooks for
 /// id collapsing (typed <c>{Name}Id</c> → canonical <see cref="RecordId"/>) so the
 /// transport's parameter renderer formats record literals correctly.
 /// </summary>
-internal static class EdgeQueryCompiler
+internal static class SurfaceEdgeQueryCompiler
 {
-    public static (string Sql, global::Disruptor.Surreal.Values.SurrealObject Bindings) Compile(
+    public static (string Sql, SurrealObject Bindings) Compile(
         string edgeTable,
         IReadOnlyList<IRecordId>? inFilter,
         IReadOnlyList<IRecordId>? outFilter,
@@ -218,7 +221,7 @@ internal static class EdgeQueryCompiler
         int? limit = null,
         int? start = null)
     {
-        var b = new QueryCompiler.Builder();
+        var b = new SurfaceQueryCompiler.Builder();
         var sb = new StringBuilder();
         // SurrealDB requires every ORDER BY field to appear in the SELECT projection
         // ("Missing order idiom <field> in statement selection"). The hydration path
@@ -260,13 +263,20 @@ internal static class EdgeQueryCompiler
 
     private static void AppendOrderProjection(StringBuilder sb, IReadOnlyList<OrderClause>? clauses)
     {
-        if (clauses is null || clauses.Count == 0) return;
+        if (clauses is null || clauses.Count == 0)
+        {
+            return;
+        }
 
         // id/in/out are already projected; only widen for distinct payload fields.
         for (var i = 0; i < clauses.Count; i++)
         {
             var field = clauses[i].Field;
-            if (IsBaseColumn(field) || ContainsField(clauses, field, i)) continue;
+            if (IsBaseColumn(field) || ContainsField(clauses, field, i))
+            {
+                continue;
+            }
+
             sb.Append(", ").Append(field.Identifier());
         }
     }
@@ -278,19 +288,29 @@ internal static class EdgeQueryCompiler
     {
         for (var j = 0; j < upTo; j++)
         {
-            if (clauses[j].Field == field) return true;
+            if (clauses[j].Field == field)
+            {
+                return true;
+            }
         }
         return false;
     }
 
     private static void AppendOrderBy(StringBuilder sb, IReadOnlyList<OrderClause>? clauses)
     {
-        if (clauses is null || clauses.Count == 0) return;
+        if (clauses is null || clauses.Count == 0)
+        {
+            return;
+        }
 
         sb.Append(" ORDER BY ");
         for (var i = 0; i < clauses.Count; i++)
         {
-            if (i > 0) sb.Append(", ");
+            if (i > 0)
+            {
+                sb.Append(", ");
+            }
+
             var c = clauses[i];
             sb.Append(c.Field.Identifier()).Append(c.Direction == OrderDirection.Descending ? " DESC" : " ASC");
         }
@@ -298,12 +318,18 @@ internal static class EdgeQueryCompiler
 
     private static void AppendLimit(StringBuilder sb, int? limit)
     {
-        if (limit is { } n && n > 0) sb.Append(" LIMIT ").Append(n);
+        if (limit is { } n && n > 0)
+        {
+            sb.Append(" LIMIT ").Append(n);
+        }
     }
 
     private static void AppendStart(StringBuilder sb, int? start)
     {
-        if (start is { } n && n > 0) sb.Append(" START ").Append(n);
+        if (start is { } n && n > 0)
+        {
+            sb.Append(" START ").Append(n);
+        }
     }
 
     private static IPredicate AddClause(IPredicate? existing, IPredicate next)

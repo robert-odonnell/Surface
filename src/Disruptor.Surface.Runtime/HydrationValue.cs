@@ -42,8 +42,16 @@ public static class HydrationValue
     public static bool TryReadRecordId(SurrealObjectValue parent, string field, out RecordId result)
     {
         result = default;
-        if (!parent.Object.TryGetValue(field, out var v)) return false;
-        if (v is SurrealNullValue or SurrealNoneValue) return false;
+        if (!parent.Object.TryGetValue(field, out var v))
+        {
+            return false;
+        }
+
+        if (v is SurrealNullValue or SurrealNoneValue)
+        {
+            return false;
+        }
+
         try { result = ReadRecordId(v); return true; }
         catch { return false; }
     }
@@ -52,7 +60,10 @@ public static class HydrationValue
     public static string ReadString(SurrealObjectValue parent, string field, string fallback = "")
     {
         if (parent.Object.TryGetValue(field, out var v) && v is StringSurrealValue s)
+        {
             return s.Value;
+        }
+
         return fallback;
     }
 
@@ -65,7 +76,10 @@ public static class HydrationValue
     public static T ReadOrDefault<T>(SurrealObjectValue parent, string field)
     {
         if (!parent.Object.TryGetValue(field, out var v) || v is SurrealNullValue or SurrealNoneValue)
+        {
             return default!;
+        }
+
         return (T)ConvertValue(v, typeof(T))!;
     }
 
@@ -78,8 +92,16 @@ public static class HydrationValue
     /// </summary>
     public static RecordId? TryReadReferenceId(SurrealObjectValue parent, string field)
     {
-        if (!parent.Object.TryGetValue(field, out var v)) return null;
-        if (v is SurrealNullValue or SurrealNoneValue) return null;
+        if (!parent.Object.TryGetValue(field, out var v))
+        {
+            return null;
+        }
+
+        if (v is SurrealNullValue or SurrealNoneValue)
+        {
+            return null;
+        }
+
         try { return ReadRecordId(v); }
         catch { return null; }
     }
@@ -96,9 +118,20 @@ public static class HydrationValue
     public static T? HydrateInlineReference<T>(SurrealObjectValue parent, string field, IHydrationSink sink)
         where T : class, IEntity, new()
     {
-        if (!parent.Object.TryGetValue(field, out var v)) return null;
-        if (v is SurrealNullValue or SurrealNoneValue) return null;
-        if (v is not SurrealObjectValue inline || !inline.Object.ContainsKey("id")) return null;
+        if (!parent.Object.TryGetValue(field, out var v))
+        {
+            return null;
+        }
+
+        if (v is SurrealNullValue or SurrealNoneValue)
+        {
+            return null;
+        }
+
+        if (v is not SurrealObjectValue inline || !inline.Object.ContainsKey("id"))
+        {
+            return null;
+        }
 
         var refId = ReadRecordId(inline);
         if (sink.IsTracked(refId))
@@ -153,23 +186,67 @@ public static class HydrationValue
             case SurrealBoolValue bv when underlying == typeof(bool): return bv.Value;
 
             case SurrealNumberValue nv:
-                if (underlying == typeof(long)) return nv.SurrealNumber.AsInt();
-                if (underlying == typeof(int)) return (int)nv.SurrealNumber.AsInt();
-                if (underlying == typeof(short)) return (short)nv.SurrealNumber.AsInt();
-                if (underlying == typeof(byte)) return (byte)nv.SurrealNumber.AsInt();
-                if (underlying == typeof(double)) return nv.SurrealNumber.AsFloat();
-                if (underlying == typeof(float)) return (float)nv.SurrealNumber.AsFloat();
-                if (underlying == typeof(decimal)) return nv.SurrealNumber.AsDecimal();
+                if (underlying == typeof(long))
+                {
+                    return nv.SurrealNumber.AsInt();
+                }
+
+                if (underlying == typeof(int))
+                {
+                    return (int)nv.SurrealNumber.AsInt();
+                }
+
+                if (underlying == typeof(short))
+                {
+                    return (short)nv.SurrealNumber.AsInt();
+                }
+
+                if (underlying == typeof(byte))
+                {
+                    return (byte)nv.SurrealNumber.AsInt();
+                }
+
+                if (underlying == typeof(double))
+                {
+                    return nv.SurrealNumber.AsFloat();
+                }
+
+                if (underlying == typeof(float))
+                {
+                    return (float)nv.SurrealNumber.AsFloat();
+                }
+
+                if (underlying == typeof(decimal))
+                {
+                    return nv.SurrealNumber.AsDecimal();
+                }
+
                 break;
 
             case SurrealDateTimeValue dv:
-                if (underlying == typeof(DateTimeOffset)) return dv.SurrealDateTime.ToDateTimeOffset();
-                if (underlying == typeof(DateTime)) return dv.SurrealDateTime.ToDateTimeOffset().UtcDateTime;
+                if (underlying == typeof(DateTimeOffset))
+                {
+                    return dv.SurrealDateTime.ToDateTimeOffset();
+                }
+
+                if (underlying == typeof(DateTime))
+                {
+                    return dv.SurrealDateTime.ToDateTimeOffset().UtcDateTime;
+                }
+
                 break;
 
             case SurrealUuidValue uv:
-                if (underlying == typeof(Guid)) return uv.Value;
-                if (underlying == typeof(string)) return uv.Value.ToString("D");
+                if (underlying == typeof(Guid))
+                {
+                    return uv.Value;
+                }
+
+                if (underlying == typeof(string))
+                {
+                    return uv.Value.ToString("D");
+                }
+
                 break;
 
             case SurrealListValue av:

@@ -331,7 +331,7 @@ public sealed class EmissionShapeTests
         // Sibling extension class anchors on Query<Design> with the same surface so
         // root-level and nested-level Include calls read identically at the call site.
         Assert.Contains("public static class DesignQueryIncludes", src);
-        Assert.Contains("this global::Disruptor.Surface.Runtime.Query.Query<global::M.Design> query", src);
+        Assert.Contains("this global::Disruptor.Surface.Runtime.Query.SurfaceQuery<global::M.Design> query", src);
         Assert.Contains("query.WithInclude(new global::Disruptor.Surface.Runtime.Query.IncludeChildrenNode(\"constraints\", \"design\"", src);
     }
 
@@ -389,7 +389,7 @@ public sealed class EmissionShapeTests
         var allSrc = GeneratorHarness.AllGeneratedSource(result);
 
         Assert.Contains("public static class DesignQueryLoad", allSrc);
-        Assert.Contains("LoadAsync(this global::Disruptor.Surface.Runtime.Query.Query<global::M.Design>", allSrc);
+        Assert.Contains("LoadAsync(this global::Disruptor.Surface.Runtime.Query.SurfaceQuery<global::M.Design>", allSrc);
         Assert.DoesNotContain("ConstraintQueryLoad", allSrc);
     }
 
@@ -631,7 +631,7 @@ public sealed class EmissionShapeTests
 
         Assert.Contains("public static class DesignQueryIds", allSrc);
         Assert.Contains("public static class ConstraintQueryIds", allSrc);
-        Assert.Contains("IdsAsync(this global::Disruptor.Surface.Runtime.Query.Query<global::M.Design>", allSrc);
+        Assert.Contains("IdsAsync(this global::Disruptor.Surface.Runtime.Query.SurfaceQuery<global::M.Design>", allSrc);
         Assert.Contains("IReadOnlyList<global::M.DesignId>", allSrc);
         Assert.Contains("IReadOnlyList<global::M.ConstraintId>", allSrc);
         Assert.Contains("var (sql, __bindings) = query.CompileIdsOnly();", allSrc);

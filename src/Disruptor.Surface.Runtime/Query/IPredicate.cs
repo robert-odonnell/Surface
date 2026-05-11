@@ -1,7 +1,7 @@
 namespace Disruptor.Surface.Runtime.Query;
 
 /// <summary>
-/// Marker for a node in the predicate AST. Compiled by <see cref="QueryCompiler"/> into a
+/// Marker for a node in the predicate AST. Compiled by <see cref="SurfaceQueryCompiler"/> into a
 /// SurrealQL <c>WHERE</c> fragment plus a parameter map. Strings (field names) are baked
 /// in at the factory layer (<see cref="PropertyExpr{T}"/>) — this surface is intentionally
 /// untyped so the compiler stays narrow and the same AST shape can serve every operator

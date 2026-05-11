@@ -31,7 +31,7 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class IdsAsyncEmitter
 {
-    private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.Query";
+    private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.SurfaceQuery";
     private const string SurrealFqn = "global::Disruptor.Surreal.SurrealClient";
     private const string TransactionFqn = "global::Disruptor.Surreal.SurrealTransaction";
     private const string CtFqn = "global::System.Threading.CancellationToken";

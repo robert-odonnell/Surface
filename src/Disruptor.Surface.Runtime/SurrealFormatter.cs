@@ -12,8 +12,6 @@ namespace Disruptor.Surface.Runtime;
 /// </summary>
 public static partial class SurrealFormatter
 {
-    private static readonly Regex IdentifierPattern = IdentifierPatternRegex();
-
     /// <summary>
     /// Validates a generator-emitted identifier (table name, field name, edge name) and
     /// returns it. Throws if the identifier doesn't match the strict regex — the emitter
@@ -21,14 +19,14 @@ public static partial class SurrealFormatter
     /// </summary>
     public static string Identifier(this string name)
     {
-        if (string.IsNullOrEmpty(name) || !IdentifierPattern.IsMatch(name))
+        if (string.IsNullOrEmpty(name) || !IdentifierPattern().IsMatch(name))
         {
-            throw new SurrealFormatException($"Invalid SurrealQL identifier: '{name}'. Identifiers must match {IdentifierPattern}.");
+            throw new SurrealFormatException($"Invalid SurrealQL identifier: '{name}'. Identifiers must match {IdentifierPattern()}.");
         }
         return name;
     }
 
-    [GeneratedRegex("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled)] private static partial Regex IdentifierPatternRegex();
+    [GeneratedRegex("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled)] private static partial Regex IdentifierPattern();
 }
 
 public sealed class SurrealFormatException(string message) : Exception(message);

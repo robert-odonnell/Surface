@@ -14,7 +14,7 @@ namespace Disruptor.Surface.Runtime.Query;
 /// name="TRow"/> shape and the lambda that builds it.
 /// </para>
 /// </summary>
-public interface ISurfaceProjection<TRow>
+public interface ISurfaceProjection<out TRow>
 {
     /// <summary>Snake-cased SurrealDB field names captured during discovery; ordered by first read.</summary>
     IReadOnlyList<string> SelectFields { get; }

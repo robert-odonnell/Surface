@@ -25,7 +25,7 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class LoadEntryEmitter
 {
-    private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.Query";
+    private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.SurfaceQuery";
     private const string SurrealFqn = "global::Disruptor.Surreal.SurrealClient";
     private const string TransactionFqn = "global::Disruptor.Surreal.SurrealTransaction";
     private const string SessionFqn = "global::Disruptor.Surface.Runtime.SurrealSession";
@@ -34,12 +34,22 @@ internal static class LoadEntryEmitter
 
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
     {
-        if (graph.CompositionRoots.Count != 1) return;
+        if (graph.CompositionRoots.Count != 1)
+        {
+            return;
+        }
+
         var root = graph.CompositionRoots[0];
-        if (!root.IsPartial) return;
+        if (!root.IsPartial)
+        {
+            return;
+        }
 
         var aggregateRoots = graph.Tables.Where(t => t.IsAggregateRoot).ToList();
-        if (aggregateRoots.Count == 0) return;
+        if (aggregateRoots.Count == 0)
+        {
+            return;
+        }
 
         foreach (var aggRoot in aggregateRoots)
         {

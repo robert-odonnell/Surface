@@ -11,7 +11,7 @@ namespace Disruptor.Surface.Tests.Runtime.Query;
 /// These tests pin the SQL shape; binding values get verified separately via the
 /// helper-extracted SQL plus per-test bindings inspection where it matters.
 /// </summary>
-public sealed class QueryCompilerTests
+public sealed class SurfaceQueryCompilerTests
 {
     [Fact]
     public void Compile_NoFilter_NoPin_EmitsBareSelect()
@@ -624,13 +624,13 @@ public sealed class QueryCompilerTests
     [Fact]
     public void Compile_WithLimit_AppendsLimitClauseAtTheEnd()
     {
-        var (sql, bindings) = new Query<TestTable>("symbols")
+        var (sql, bindings) = new SurfaceQuery<TestTable>("symbols")
             .Where(new EqPredicate("kind", "method"))
             .Limit(10)
             .Compile();
 
         Assert.Equal("SELECT * FROM symbols WHERE kind = $_p0 LIMIT 10;", sql);
-        Assert.Equal(new global::Disruptor.Surreal.Values.StringSurrealValue("method"), bindings["_p0"]);
+        Assert.Equal(new Surreal.Values.StringSurrealValue("method"), bindings["_p0"]);
     }
 
     [Fact]
@@ -638,7 +638,7 @@ public sealed class QueryCompilerTests
     {
         // SurrealQL clause order is fixed: ORDER BY → LIMIT → START. Pinning the
         // emit order so paged reads (Limit + Start) don't drift into a syntax error.
-        var (sql, _) = new Query<TestTable>("symbols").Limit(20).Start(40).Compile();
+        var (sql, _) = new SurfaceQuery<TestTable>("symbols").Limit(20).Start(40).Compile();
 
         Assert.Equal("SELECT * FROM symbols LIMIT 20 START 40;", sql);
     }
@@ -646,8 +646,8 @@ public sealed class QueryCompilerTests
     [Fact]
     public void Compile_OrderBy_EmitsAscByDefault_AndDescWhenAsked()
     {
-        var (ascSql, _) = new Query<TestTable>("symbols").OrderBy(new PropertyExpr<string>("name")).Compile();
-        var (descSql, _) = new Query<TestTable>("symbols")
+        var (ascSql, _) = new SurfaceQuery<TestTable>("symbols").OrderBy(new PropertyExpr<string>("name")).Compile();
+        var (descSql, _) = new SurfaceQuery<TestTable>("symbols")
             .OrderBy(new PropertyExpr<int>("line"), OrderDirection.Descending)
             .Compile();
 
@@ -658,7 +658,7 @@ public sealed class QueryCompilerTests
     [Fact]
     public void Compile_OrderByThenBy_ChainsCommaSeparated()
     {
-        var (sql, _) = new Query<TestTable>("symbols")
+        var (sql, _) = new SurfaceQuery<TestTable>("symbols")
             .OrderBy(new PropertyExpr<string>("kind"))
             .ThenBy(new PropertyExpr<string>("name"), OrderDirection.Descending)
             .Compile();
@@ -670,7 +670,7 @@ public sealed class QueryCompilerTests
     public void Compile_FullClauseStack_RendersInCanonicalOrder()
     {
         // WHERE → ORDER BY → LIMIT → START — same shape SurrealQL parses.
-        var (sql, bindings) = new Query<TestTable>("symbols")
+        var (sql, bindings) = new SurfaceQuery<TestTable>("symbols")
             .Where(PropertyExprStringExtensions.Contains(new PropertyExpr<string>("name"), "Foo"))
             .OrderBy(new PropertyExpr<string>("name"))
             .Limit(5)
@@ -680,7 +680,7 @@ public sealed class QueryCompilerTests
         Assert.Equal(
             "SELECT * FROM symbols WHERE string::contains(name, $_p0) ORDER BY name ASC LIMIT 5 START 10;",
             sql);
-        Assert.Equal(new global::Disruptor.Surreal.Values.StringSurrealValue("Foo"), bindings["_p0"]);
+        Assert.Equal(new Surreal.Values.StringSurrealValue("Foo"), bindings["_p0"]);
     }
 
     [Fact]
@@ -689,7 +689,7 @@ public sealed class QueryCompilerTests
         // Defensive: passing zero or a negative number should be a "no-op no cap"
         // signal rather than silently emitting `LIMIT 0` (which Surreal honours and
         // returns nothing).
-        var (sql, _) = new Query<TestTable>("symbols").Limit(10).Limit(0).Compile();
+        var (sql, _) = new SurfaceQuery<TestTable>("symbols").Limit(10).Limit(0).Compile();
 
         Assert.Equal("SELECT * FROM symbols;", sql);
     }
@@ -697,7 +697,7 @@ public sealed class QueryCompilerTests
     [Fact]
     public void CompileIdsOnly_NoFilter_NoPin_EmitsBareIdSelect()
     {
-        var (sql, _) = new Query<TestTable>("symbols").CompileIdsOnly();
+        var (sql, _) = new SurfaceQuery<TestTable>("symbols").CompileIdsOnly();
 
         Assert.Equal("SELECT id FROM symbols;", sql);
     }
@@ -705,7 +705,7 @@ public sealed class QueryCompilerTests
     [Fact]
     public void CompileIdsOnly_WithWhereOrderLimitStart_RendersCanonicalClauseOrder()
     {
-        var (sql, bindings) = new Query<TestTable>("symbols")
+        var (sql, bindings) = new SurfaceQuery<TestTable>("symbols")
             .Where(new PropertyExpr<string>("kind").Eq("method"))
             .OrderBy(new PropertyExpr<string>("name"))
             .Limit(20)
@@ -715,7 +715,7 @@ public sealed class QueryCompilerTests
         Assert.Equal(
             "SELECT id FROM symbols WHERE kind = $_p0 ORDER BY name ASC LIMIT 20 START 40;",
             sql);
-        Assert.Equal(new global::Disruptor.Surreal.Values.StringSurrealValue("method"), bindings["_p0"]);
+        Assert.Equal(new Surreal.Values.StringSurrealValue("method"), bindings["_p0"]);
     }
 
     [Fact]
@@ -723,10 +723,10 @@ public sealed class QueryCompilerTests
     {
         var pin = new RecordId("constraints", "01HX7AF5");
 
-        var (sql, bindings) = new Query<TestTable>("constraints").WithId(pin).CompileIdsOnly();
+        var (sql, bindings) = new SurfaceQuery<TestTable>("constraints").WithId(pin).CompileIdsOnly();
 
         Assert.Equal("SELECT id FROM constraints WHERE id = $_p0;", sql);
-        var bound = Assert.IsType<global::Disruptor.Surreal.Values.SurrealRecordIdValue>(bindings["_p0"]);
+        var bound = Assert.IsType<Surreal.Values.SurrealRecordIdValue>(bindings["_p0"]);
         Assert.Equal("constraints", bound.SurrealRecordId.Table.Name);
     }
 
@@ -740,7 +740,7 @@ public sealed class QueryCompilerTests
             ParentField: "design",
             Filter: null,
             Nested: []);
-        var query = new Query<TestTable>("designs").WithInclude(include);
+        var query = new SurfaceQuery<TestTable>("designs").WithInclude(include);
 
         Assert.Throws<InvalidOperationException>(() => query.CompileIdsOnly());
     }
@@ -760,7 +760,7 @@ public sealed class QueryCompilerTests
         string table, IPredicate? filter, RecordId? pinnedId, IReadOnlyList<IIncludeNode> includes)
     {
         var method = typeof(IPredicate).Assembly
-            .GetType("Disruptor.Surface.Runtime.Query.QueryCompiler", throwOnError: true)!
+            .GetType("Disruptor.Surface.Runtime.Query.SurfaceQueryCompiler", throwOnError: true)!
             .GetMethod(
                 "Compile",
                 System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic,

@@ -32,10 +32,21 @@ internal static class HydrateRootEmitter
 
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
     {
-        if (graph.CompositionRoots.Count != 1) return;
+        if (graph.CompositionRoots.Count != 1)
+        {
+            return;
+        }
+
         var root = graph.CompositionRoots[0];
-        if (!root.IsPartial) return;
-        if (graph.Tables.Count == 0) return;
+        if (!root.IsPartial)
+        {
+            return;
+        }
+
+        if (graph.Tables.Count == 0)
+        {
+            return;
+        }
 
         var ordered = graph.Tables.OrderBy(t => t.Name, StringComparer.Ordinal).ToList();
         var refRegistryFqn = string.IsNullOrEmpty(root.Namespace)
@@ -85,7 +96,7 @@ internal static class HydrateRootEmitter
 
             sb.AppendLine();
             sb.Append(memberIndent)
-              .Append("/// <summary>Hydrate the matching <see cref=\"").Append(entityFqn.Substring("global::".Length))
+              .Append("/// <summary>Hydrate the matching <see cref=\"").Append(entityFqn["global::".Length..])
               .AppendLine("\"/> rows into a fresh tracked session. Typed-id overload — preferred call site shape.</summary>");
             sb.Append(memberIndent)
               .Append("public ").Append(HydrationQueryFqn).Append('<').Append(entityFqn).Append("> ")

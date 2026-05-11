@@ -7,13 +7,13 @@ namespace Disruptor.Surface.Runtime.Query;
 public enum OrderDirection
 {
     Ascending,
-    Descending,
+    Descending
 }
 
 /// <summary>
 /// One sort specification on a query — a field name plus a direction. Built from a
-/// generator-emitted <see cref="PropertyExpr{T}"/> via <see cref="Query{T}.OrderBy"/>
-/// / <see cref="Query{T}.ThenBy"/>; the QueryCompiler emits each entry as
+/// generator-emitted <see cref="PropertyExpr{T}"/> via <see cref="SurfaceQuery{T}.OrderBy"/>
+/// / <see cref="SurfaceQuery{T}.ThenBy"/>; the QueryCompiler emits each entry as
 /// <c>field ASC|DESC</c> joined with commas.
 /// </summary>
 /// <param name="Field">Snake-cased SurrealDB field name to order on.</param>

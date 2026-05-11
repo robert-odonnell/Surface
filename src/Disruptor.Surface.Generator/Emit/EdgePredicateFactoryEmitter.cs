@@ -30,8 +30,15 @@ internal static class EdgePredicateFactoryEmitter
 
     public static void Emit(SourceProductionContext spc, RelationKindModel kind)
     {
-        if (kind.Direction != RelationDirection.Forward) return;
-        if (kind.PayloadFields.Count == 0) return;
+        if (kind.Direction != RelationDirection.Forward)
+        {
+            return;
+        }
+
+        if (kind.PayloadFields.Count == 0)
+        {
+            return;
+        }
 
         // Mirror RelationKindEmitter's naming so the EdgeQ class lives next to the
         // marker class and uses the same suffix-stripped form (e.g. UsesAttribute →
@@ -64,7 +71,10 @@ internal static class EdgePredicateFactoryEmitter
             // Skip un-mappable types — schema emission already drops them, so a
             // PropertyExpr<Uri> would refer to a non-existent column. Same gate
             // PredicateFactoryEmitter applies to entity properties.
-            if (!SchemaEmitter.IsMappableScalar(field.Type)) continue;
+            if (!SchemaEmitter.IsMappableScalar(field.Type))
+            {
+                continue;
+            }
 
             sb.Append(memberIndent)
               .Append("public static readonly ")

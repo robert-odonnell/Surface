@@ -25,15 +25,26 @@ namespace Disruptor.Surface.Generator.Emit;
 /// </summary>
 internal static class QueryRootEmitter
 {
-    private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.Query";
+    private const string QueryFqn = "global::Disruptor.Surface.Runtime.Query.SurfaceQuery";
     private const string GeneratedClass = "GeneratedQueryRoot";
 
     public static void Emit(SourceProductionContext spc, ModelGraph graph)
     {
-        if (graph.CompositionRoots.Count != 1) return;
+        if (graph.CompositionRoots.Count != 1)
+        {
+            return;
+        }
+
         var root = graph.CompositionRoots[0];
-        if (!root.IsPartial) return;
-        if (graph.Tables.Count == 0) return;
+        if (!root.IsPartial)
+        {
+            return;
+        }
+
+        if (graph.Tables.Count == 0)
+        {
+            return;
+        }
 
         var ordered = graph.Tables.OrderBy(t => t.Name, StringComparer.Ordinal).ToList();
 
@@ -83,7 +94,7 @@ internal static class QueryRootEmitter
 
             sb.AppendLine();
             sb.Append(memberIndent)
-              .Append("/// <summary>Query root for <see cref=\"").Append(entityFqn.Substring("global::".Length)).AppendLine("\"/>.</summary>");
+              .Append("/// <summary>Query root for <see cref=\"").Append(entityFqn["global::".Length..]).AppendLine("\"/>.</summary>");
             sb.Append(memberIndent)
               .Append("public ").Append(QueryFqn).Append('<').Append(entityFqn).Append("> ")
               .Append(propertyName)

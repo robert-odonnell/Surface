@@ -77,10 +77,25 @@ internal static class RelationKindExtractor
     {
         for (var current = cls.BaseType; current is not null; current = current.BaseType)
         {
-            if (!current.IsGenericType) continue;
-            if (TableExtractor.NormaliseFullName(current.ConstructedFrom) != AnnotationsMetadata.ForwardRelationOfT) continue;
-            if (current.TypeArguments.Length == 0) return EquatableArray<EdgePayloadFieldModel>.Empty;
-            if (current.TypeArguments[0] is not INamedTypeSymbol payload) return EquatableArray<EdgePayloadFieldModel>.Empty;
+            if (!current.IsGenericType)
+            {
+                continue;
+            }
+
+            if (TableExtractor.NormaliseFullName(current.ConstructedFrom) != AnnotationsMetadata.ForwardRelationOfT)
+            {
+                continue;
+            }
+
+            if (current.TypeArguments.Length == 0)
+            {
+                return EquatableArray<EdgePayloadFieldModel>.Empty;
+            }
+
+            if (current.TypeArguments[0] is not INamedTypeSymbol payload)
+            {
+                return EquatableArray<EdgePayloadFieldModel>.Empty;
+            }
 
             return HarvestPayloadFields(payload);
         }
@@ -106,12 +121,35 @@ internal static class RelationKindExtractor
         {
             foreach (var member in current.GetMembers())
             {
-                if (member is not IPropertySymbol prop) continue;
-                if (prop.IsStatic) continue;
-                if (prop.IsIndexer) continue;
-                if (prop.DeclaredAccessibility != Accessibility.Public) continue;
-                if (prop.GetMethod is null) continue;
-                if (!seen.Add(prop.Name)) continue;
+                if (member is not IPropertySymbol prop)
+                {
+                    continue;
+                }
+
+                if (prop.IsStatic)
+                {
+                    continue;
+                }
+
+                if (prop.IsIndexer)
+                {
+                    continue;
+                }
+
+                if (prop.DeclaredAccessibility != Accessibility.Public)
+                {
+                    continue;
+                }
+
+                if (prop.GetMethod is null)
+                {
+                    continue;
+                }
+
+                if (!seen.Add(prop.Name))
+                {
+                    continue;
+                }
 
                 fields.Add(new EdgePayloadFieldModel(
                     Name: prop.Name,

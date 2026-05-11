@@ -38,23 +38,17 @@ public readonly record struct PropertyExpr<T>(string Field)
 
     private static object?[] ToObjectArray(IEnumerable<T> values)
     {
-        if (values is ICollection<T> col)
+        if (values is not ICollection<T> col)
         {
-            var arr = new object?[col.Count];
-            var i = 0;
-            foreach (var v in col)
-            {
-                arr[i++] = v;
-            }
-            return arr;
+            return [..values.Cast<object?>()];
         }
-
-        var list = new List<object?>();
-        foreach (var v in values)
+        var arr = new object?[col.Count];
+        var i = 0;
+        foreach (var v in col)
         {
-            list.Add(v);
+            arr[i++] = v;
         }
-        return list.ToArray();
+        return arr;
     }
 }
 

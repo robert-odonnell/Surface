@@ -948,8 +948,16 @@ internal static class PartialEmitter
         foreach (var p in table.Properties)
         {
             // Skip [Id] (the entity itself) and scalar [Property] (no slice check).
-            if (p.Kinds.HasFlag(PropertyKind.Id)) continue;
-            if (p.Kinds.HasFlag(PropertyKind.Property) && p.RelationRole == RelationRole.None) continue;
+            if (p.Kinds.HasFlag(PropertyKind.Id))
+            {
+                continue;
+            }
+
+            if (p.Kinds.HasFlag(PropertyKind.Property) && p.RelationRole == RelationRole.None)
+            {
+                continue;
+            }
+
             // [Parent] / [Reference] / [Children] / forward+inverse relation kinds — all
             // get a slice mark keyed on the snake-cased property name.
             var sliceKey = SurrealNaming.ToFieldName(p.Name);
@@ -1015,7 +1023,11 @@ internal static class PartialEmitter
         {
             var isFwdDep = (p.Kinds.HasFlag(PropertyKind.Reference) || p.Kinds.HasFlag(PropertyKind.Parent))
                 && p.RelationRole == RelationRole.None;
-            if (!isFwdDep) continue;
+            if (!isFwdDep)
+            {
+                continue;
+            }
+
             hasForwardDeps = true;
             var backing = $"_{ToCamel(p.Name)}";
             builder
@@ -1023,7 +1035,10 @@ internal static class PartialEmitter
                 .Append(EntityInterface).Append(')').Append(backing).AppendLine(").Id))")
                 .Append(indent).Append("        await ctx.SaveAsync(").Append(backing).AppendLine(", ct);");
         }
-        if (hasForwardDeps) builder.AppendLine();
+        if (hasForwardDeps)
+        {
+            builder.AppendLine();
+        }
 
         // Typed CBOR content — SurrealObject built via ContentValue.Set helpers (the
         // mirror of HydrationValue's read side). Each scalar wraps into the right
@@ -1033,9 +1048,20 @@ internal static class PartialEmitter
         builder.Append(indent).AppendLine("    var __content = new global::Disruptor.Surreal.Values.SurrealObject();");
         foreach (var p in table.Properties)
         {
-            if (p.Kinds.HasFlag(PropertyKind.Id)) continue;
-            if (p.Kinds.HasFlag(PropertyKind.Children)) continue;
-            if (p.RelationRole != RelationRole.None) continue;
+            if (p.Kinds.HasFlag(PropertyKind.Id))
+            {
+                continue;
+            }
+
+            if (p.Kinds.HasFlag(PropertyKind.Children))
+            {
+                continue;
+            }
+
+            if (p.RelationRole != RelationRole.None)
+            {
+                continue;
+            }
 
             var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
 
@@ -1104,7 +1130,11 @@ internal static class PartialEmitter
         // iterate via the property accessor; recurse into any not-yet-saved entries.
         foreach (var p in table.Properties)
         {
-            if (!p.Kinds.HasFlag(PropertyKind.Children)) continue;
+            if (!p.Kinds.HasFlag(PropertyKind.Children))
+            {
+                continue;
+            }
+
             var elemLocal = $"__child_{ToCamel(p.Name)}";
             builder
                 .AppendLine()
@@ -1121,8 +1151,16 @@ internal static class PartialEmitter
         // (Idempotent edge id with CBOR-bound endpoints, no string formatting).
         foreach (var p in table.Properties)
         {
-            if (p.RelationRole != RelationRole.ForwardRelation) continue;
-            if (string.IsNullOrEmpty(p.RelationKindFullName)) continue;
+            if (p.RelationRole != RelationRole.ForwardRelation)
+            {
+                continue;
+            }
+
+            if (string.IsNullOrEmpty(p.RelationKindFullName))
+            {
+                continue;
+            }
+
             var attrFqn = p.RelationKindFullName!;
             var lastDot = attrFqn.LastIndexOf('.');
             var attrNs = lastDot >= 0 ? attrFqn[..lastDot] : "";

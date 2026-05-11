@@ -105,7 +105,10 @@ internal static class PredicateFactoryEmitter
 
         foreach (var p in table.Properties)
         {
-            if (p.RelationRole != RelationRole.None) continue;
+            if (p.RelationRole != RelationRole.None)
+            {
+                continue;
+            }
 
             if (p.Kinds.HasFlag(PropertyKind.Id))
             {
@@ -113,17 +116,26 @@ internal static class PredicateFactoryEmitter
                 continue;
             }
 
-            if (!p.Kinds.HasFlag(PropertyKind.Property)) continue;
+            if (!p.Kinds.HasFlag(PropertyKind.Property))
+            {
+                continue;
+            }
 
             // Element-collection [Property] stores as array<object> — equality predicates
             // against the whole array don't have a sensible SurrealQL shape yet. Skip
             // until we have a collection-aware predicate (Contains-element, Length, …).
-            if (IsElementCollection(p.Type)) continue;
+            if (IsElementCollection(p.Type))
+            {
+                continue;
+            }
 
             // Unmapped scalar types are flagged at validation time (CG025); skip them
             // here too so a `PropertyExpr<Uri>` doesn't show up in IntelliSense even
             // when the user has temporarily suppressed the diagnostic.
-            if (!SchemaEmitter.IsMappableScalar(p.Type)) continue;
+            if (!SchemaEmitter.IsMappableScalar(p.Type))
+            {
+                continue;
+            }
 
             result.Add((p.Name, SurrealNaming.ToFieldName(p.Name), p.Type.FullyQualifiedName));
         }

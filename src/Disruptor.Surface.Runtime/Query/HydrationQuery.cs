@@ -3,7 +3,7 @@ namespace Disruptor.Surface.Runtime.Query;
 /// <summary>
 /// The "Hydrate" terminal: takes a list of record ids and a slice shape, materialises
 /// them into a tracked <see cref="SurrealSession"/>. Pairs with the
-/// <see cref="Query{T}.IdsAsync"/> selection terminal to support the
+/// <see cref="SurfaceQuery{T}.IdsAsync"/> selection terminal to support the
 /// <c>Load → Hydrate → Mutate → Commit</c> flow:
 /// <code>
 /// var ids = await workspace.Query.CodeSymbols
@@ -20,16 +20,13 @@ namespace Disruptor.Surface.Runtime.Query;
 /// includes describe which neighbouring slices to pull alongside. The library does
 /// not generate the per-table <c>{Hydration}.{Table}(ids)</c> entry point's body
 /// directly — that's <c>HydrateRootEmitter</c>'s job — but the runtime constructs
-/// reuse <see cref="Query{T}"/>'s compiler + sink machinery, so the wire SQL stays
+/// reuse <see cref="SurfaceQuery{T}"/>'s compiler + sink machinery, so the wire SQL stays
 /// identical to today's read-mode query for the same shape.
 /// </para>
 /// </summary>
 public sealed class HydrationQuery<T>
     where T : class, IEntity, new()
 {
-    private readonly string table;
-    private readonly IReadOnlyList<RecordId> ids;
-    private readonly IReadOnlyList<IIncludeNode> includes;
     private readonly IReferenceRegistry referenceRegistry;
 
     /// <summary>Generator entry point. <paramref name="ids"/> may be empty — terminal then returns an empty session.</summary>
@@ -42,35 +39,35 @@ public sealed class HydrationQuery<T>
         IReadOnlyList<IIncludeNode> includes,
         IReferenceRegistry referenceRegistry)
     {
-        this.table = table;
-        this.ids = ids;
-        this.includes = includes;
+        Table = table;
+        Ids = ids;
+        Includes = includes;
         this.referenceRegistry = referenceRegistry;
     }
 
     /// <summary>Snake-cased SurrealDB table name this hydration targets.</summary>
-    public string Table => table;
+    public string Table { get; }
 
     /// <summary>The ids the terminal will materialise.</summary>
-    public IReadOnlyList<RecordId> Ids => ids;
+    public IReadOnlyList<RecordId> Ids { get; }
 
     /// <summary>Traversal nodes added via <see cref="WithInclude"/>. Empty when the slice is just the root rows.</summary>
-    public IReadOnlyList<IIncludeNode> Includes => includes;
+    public IReadOnlyList<IIncludeNode> Includes { get; }
 
     /// <summary>
-    /// Append a traversal node to the slice shape. Mirrors <see cref="Query{T}.WithInclude"/> —
+    /// Append a traversal node to the slice shape. Mirrors <see cref="SurfaceQuery{T}.WithInclude"/> —
     /// the underlying AST is shared, so any <see cref="IIncludeNode"/> a read-mode query
     /// would accept also slots into the hydration plan.
     /// </summary>
     public HydrationQuery<T> WithInclude(IIncludeNode node)
     {
-        var next = new IIncludeNode[includes.Count + 1];
-        for (var i = 0; i < includes.Count; i++)
+        var next = new IIncludeNode[Includes.Count + 1];
+        for (var i = 0; i < Includes.Count; i++)
         {
-            next[i] = includes[i];
+            next[i] = Includes[i];
         }
-        next[includes.Count] = node;
-        return new HydrationQuery<T>(table, ids, next, referenceRegistry);
+        next[Includes.Count] = node;
+        return new HydrationQuery<T>(Table, Ids, next, referenceRegistry);
     }
 
     /// <summary>
@@ -79,31 +76,39 @@ public sealed class HydrationQuery<T>
     /// <see cref="SurrealSession.SaveAsync(IEntity, Disruptor.Surreal.SurrealTransaction, CancellationToken)"/>;
     /// concurrent commits surface as <c>SurrealConflictException</c> from the SDK.
     /// </summary>
-    public async Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default)
+    public async Task<SurrealSession> ExecuteAsync(Surreal.SurrealClient db, CancellationToken ct = default)
     {
         var session = new SurrealSession(referenceRegistry);
-        if (ids.Count == 0) return session;
+        if (Ids.Count == 0)
+        {
+            return session;
+        }
+
         var query = BuildQuery();
         await query.ExecuteIntoSessionAsync(session, db, ct);
         return session;
     }
 
     /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.SurrealClient, CancellationToken)"/>
-    public async Task<SurrealSession> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default)
+    public async Task<SurrealSession> ExecuteAsync(Surreal.SurrealTransaction tx, CancellationToken ct = default)
     {
         var session = new SurrealSession(referenceRegistry);
-        if (ids.Count == 0) return session;
+        if (Ids.Count == 0)
+        {
+            return session;
+        }
+
         var query = BuildQuery();
         await query.ExecuteIntoSessionAsync(session, tx, ct);
         return session;
     }
 
-    private Query<T> BuildQuery()
+    private SurfaceQuery<T> BuildQuery()
     {
-        var idValues = new object?[ids.Count];
-        for (var i = 0; i < ids.Count; i++) idValues[i] = ids[i];
-        var query = new Query<T>(table).Where(new InPredicate("id", idValues));
-        for (var i = 0; i < includes.Count; i++) query = query.WithInclude(includes[i]);
+        var idValues = new object?[Ids.Count];
+        for (var i = 0; i < Ids.Count; i++) idValues[i] = Ids[i];
+        var query = new SurfaceQuery<T>(Table).Where(new InPredicate("id", idValues));
+        for (var i = 0; i < Includes.Count; i++) query = query.WithInclude(Includes[i]);
         return query;
     }
 }

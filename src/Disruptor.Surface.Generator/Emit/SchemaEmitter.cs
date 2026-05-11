@@ -55,9 +55,16 @@ internal static class SchemaEmitter
         {
             return;
         }
-        if (graph.CompositionRoots.Count != 1) return;
+        if (graph.CompositionRoots.Count != 1)
+        {
+            return;
+        }
+
         var root = graph.CompositionRoots[0];
-        if (!root.IsPartial) return;
+        if (!root.IsPartial)
+        {
+            return;
+        }
 
         var chunks = BuildChunks(graph);
 
@@ -205,8 +212,15 @@ internal static class SchemaEmitter
         {
             // [Id] is implicit on every Surreal record. Relation properties (forward/
             // inverse collections) are edge-table reads, not entity columns.
-            if (p.Kinds.HasFlag(PropertyKind.Id)) continue;
-            if (p.RelationRole != RelationRole.None) continue;
+            if (p.Kinds.HasFlag(PropertyKind.Id))
+            {
+                continue;
+            }
+
+            if (p.RelationRole != RelationRole.None)
+            {
+                continue;
+            }
 
             if (!any)
             {
@@ -356,7 +370,10 @@ internal static class SchemaEmitter
     internal static (string? Type, string? Default) MapScalarType(TypeRef type)
     {
         var fqn = StripGlobal(type.FullyQualifiedName);
-        if (fqn.EndsWith("?")) fqn = fqn[..^1];
+        if (fqn.EndsWith("?"))
+        {
+            fqn = fqn[..^1];
+        }
 
         var (raw, def) = fqn switch
         {
@@ -396,7 +413,11 @@ internal static class SchemaEmitter
     {
         foreach (var cp in child.Properties)
         {
-            if (!cp.Kinds.HasFlag(PropertyKind.Parent)) continue;
+            if (!cp.Kinds.HasFlag(PropertyKind.Parent))
+            {
+                continue;
+            }
+
             var parentTypeName = SurrealNaming.SimpleName(cp.Type.FullyQualifiedName);
             if (parentTypeName == parent.Name)
             {
@@ -445,7 +466,10 @@ internal static class SchemaEmitter
         foreach (var field in fwdKind.PayloadFields)
         {
             var (fieldType, fieldDefault) = MapScalarType(field.Type);
-            if (fieldType is null) continue;
+            if (fieldType is null)
+            {
+                continue;
+            }
 
             sb.Append("DEFINE FIELD IF NOT EXISTS ").Append(field.FieldName)
               .Append(" ON ").Append(edgeName)
@@ -481,7 +505,10 @@ internal static class SchemaEmitter
     {
         var inverseKind = graph.RelationKinds.FirstOrDefault(k =>
             k.Direction == RelationDirection.Inverse && k.PairedForwardFullName == fwdKindFullName);
-        if (inverseKind is null) return [];
+        if (inverseKind is null)
+        {
+            return [];
+        }
 
         var result = new List<TableModel>();
         foreach (var t in graph.Tables)

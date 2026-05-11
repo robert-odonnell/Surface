@@ -148,7 +148,7 @@ internal static class TraversalBuilderEmitter
         var entityFqn = string.IsNullOrEmpty(table.Namespace)
             ? $"global::{table.Name}"
             : $"global::{table.Namespace}.{table.Name}";
-        var queryFqn = $"global::Disruptor.Surface.Runtime.Query.Query<{entityFqn}>";
+        var queryFqn = $"global::Disruptor.Surface.Runtime.Query.SurfaceQuery<{entityFqn}>";
         var extName = $"{table.Name}QueryIncludes";
 
         sb.AppendLine();
@@ -160,7 +160,11 @@ internal static class TraversalBuilderEmitter
         var first = true;
         foreach (var inline in inlineRefs)
         {
-            if (!first) sb.AppendLine();
+            if (!first)
+            {
+                sb.AppendLine();
+            }
+
             first = false;
             sb.Append(memberIndent)
               .AppendLine($"/// <summary>Pulls the inline <c>[Reference, Inline]</c> record at <c>{inline.Field}</c> into the projection (<c>{inline.Field}.*</c>).</summary>");
@@ -175,7 +179,11 @@ internal static class TraversalBuilderEmitter
 
         foreach (var child in children)
         {
-            if (!first) sb.AppendLine();
+            if (!first)
+            {
+                sb.AppendLine();
+            }
+
             first = false;
 
             var childBuilderFqn = string.IsNullOrEmpty(child.ChildNamespace)
@@ -200,7 +208,11 @@ internal static class TraversalBuilderEmitter
 
         foreach (var rel in relations)
         {
-            if (!first) sb.AppendLine();
+            if (!first)
+            {
+                sb.AppendLine();
+            }
+
             first = false;
             EmitRelationIncludeExtension(sb, memberIndent, bodyIndent, queryFqn, rel);
         }
@@ -255,8 +267,16 @@ internal static class TraversalBuilderEmitter
         var result = new List<InlineRefMember>();
         foreach (var p in table.Properties)
         {
-            if (!p.Kinds.HasFlag(PropertyKind.Reference)) continue;
-            if (!p.IsInline) continue;
+            if (!p.Kinds.HasFlag(PropertyKind.Reference))
+            {
+                continue;
+            }
+
+            if (!p.IsInline)
+            {
+                continue;
+            }
+
             result.Add(new InlineRefMember(p.Name, SurrealNaming.ToFieldName(p.Name)));
         }
         return result;
@@ -274,15 +294,24 @@ internal static class TraversalBuilderEmitter
         var result = new List<ChildrenMember>();
         foreach (var p in parent.Properties)
         {
-            if (!p.Kinds.HasFlag(PropertyKind.Children)) continue;
+            if (!p.Kinds.HasFlag(PropertyKind.Children))
+            {
+                continue;
+            }
 
             var elementType = p.Type.ElementType ?? p.Type;
             var childTypeName = SurrealNaming.SimpleName(elementType.FullyQualifiedName);
             var childTable = graph.Tables.FirstOrDefault(t => t.Name == childTypeName);
-            if (childTable is null) continue;
+            if (childTable is null)
+            {
+                continue;
+            }
 
             var parentField = FindParentFieldName(parent, childTable);
-            if (parentField is null) continue;
+            if (parentField is null)
+            {
+                continue;
+            }
 
             var childEntityFqn = string.IsNullOrEmpty(childTable.Namespace)
                 ? $"global::{childTable.Name}"
@@ -415,15 +444,29 @@ internal static class TraversalBuilderEmitter
         var result = new List<RelationMember>();
         foreach (var p in table.Properties)
         {
-            if (p.RelationRole == RelationRole.None) continue;
-            if (p.RelationKindFullName is null) continue;
+            if (p.RelationRole == RelationRole.None)
+            {
+                continue;
+            }
+
+            if (p.RelationKindFullName is null)
+            {
+                continue;
+            }
 
             var memberKind = graph.FindKind(p.RelationKindFullName);
-            if (memberKind is null) continue;
+            if (memberKind is null)
+            {
+                continue;
+            }
+
             var forward = memberKind.Direction == RelationDirection.Forward
                 ? memberKind
                 : graph.FindKind(memberKind.PairedForwardFullName);
-            if (forward is null) continue;
+            if (forward is null)
+            {
+                continue;
+            }
 
             var isOutgoing = p.RelationRole == RelationRole.ForwardRelation;
             var isCross = graph.IsCrossAggregate(forward.FullName);
@@ -471,7 +514,10 @@ internal static class TraversalBuilderEmitter
 
             // Single-target (no union → exactly one member on the traversed side).
             var single = FindSingleTraversedMember(forward.FullName, traversedDirection, graph);
-            if (single is null) continue; // No participants; skip silently.
+            if (single is null)
+            {
+                continue; // No participants; skip silently.
+            }
 
             var entityFqn = string.IsNullOrEmpty(single.Namespace)
                 ? $"global::{single.Name}"
@@ -501,8 +547,16 @@ internal static class TraversalBuilderEmitter
         TableModel? sole = null;
         foreach (var t in graph.Tables)
         {
-            if (!HasRelationProperty(t, forwardKindFullName, traversed, graph)) continue;
-            if (sole is not null) return null; // ambiguous — should be a multi-member union
+            if (!HasRelationProperty(t, forwardKindFullName, traversed, graph))
+            {
+                continue;
+            }
+
+            if (sole is not null)
+            {
+                return null; // ambiguous — should be a multi-member union
+            }
+
             sole = t;
         }
         return sole;
@@ -524,10 +578,17 @@ internal static class TraversalBuilderEmitter
                 k.Direction == RelationDirection.Inverse && k.PairedForwardFullName == forwardKindFullName);
             wanted = inverse?.FullName;
         }
-        if (wanted is null) return false;
+        if (wanted is null)
+        {
+            return false;
+        }
+
         foreach (var p in table.Properties)
         {
-            if (p.RelationRole == role && p.RelationKindFullName == wanted) return true;
+            if (p.RelationRole == role && p.RelationKindFullName == wanted)
+            {
+                return true;
+            }
         }
         return false;
     }
@@ -548,7 +609,11 @@ internal static class TraversalBuilderEmitter
         foreach (var fqn in union.MemberFullNames)
         {
             var member = graph.Tables.FirstOrDefault(t => t.FullName == fqn);
-            if (member is null) continue;
+            if (member is null)
+            {
+                continue;
+            }
+
             var entityFqn = string.IsNullOrEmpty(member.Namespace)
                 ? $"global::{member.Name}"
                 : $"global::{member.Namespace}.{member.Name}";
@@ -563,7 +628,11 @@ internal static class TraversalBuilderEmitter
     {
         foreach (var cp in child.Properties)
         {
-            if (!cp.Kinds.HasFlag(PropertyKind.Parent)) continue;
+            if (!cp.Kinds.HasFlag(PropertyKind.Parent))
+            {
+                continue;
+            }
+
             var parentTypeName = SurrealNaming.SimpleName(cp.Type.FullyQualifiedName);
             if (parentTypeName == parent.Name)
             {

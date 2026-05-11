@@ -113,7 +113,11 @@ internal static class AggregateLoaderEmitter
             var orderedMembers = OrderedMembers(agg, byFullName, pathToRoot);
             foreach (var member in orderedMembers)
             {
-                if (member.FullName == root.FullName) continue;
+                if (member.FullName == root.FullName)
+                {
+                    continue;
+                }
+
                 var tableName = SurrealNaming.ToTableName(member.Name);
                 sb.Append("            HydrateChildren<global::").Append(member.FullName)
                   .Append(">(rootRow, \"").Append(tableName).AppendLine("\", sink);");
@@ -122,7 +126,11 @@ internal static class AggregateLoaderEmitter
             foreach (var fwdKind in graph.RelationKinds.Where(k => k.Direction == RelationDirection.Forward).OrderBy(k => k.Name, StringComparer.Ordinal))
             {
                 var whereClause = BuildEdgeWhere(graph, agg, fwdKind, pathToRoot);
-                if (whereClause is null) continue;
+                if (whereClause is null)
+                {
+                    continue;
+                }
+
                 var edgeName = SurrealNaming.ToEdgeName(fwdKind.Name);
                 sb.Append("            HydrateEdges(rootRow, \"_").Append(edgeName)
                   .Append("\", \"").Append(edgeName).AppendLine("\", sink);");
@@ -157,7 +165,11 @@ internal static class AggregateLoaderEmitter
         var orderedMembers = OrderedMembers(agg, byFullName, pathToRoot);
         foreach (var member in orderedMembers)
         {
-            if (member.FullName == root.FullName) continue;
+            if (member.FullName == root.FullName)
+            {
+                continue;
+            }
+
             var memberTable = SurrealNaming.ToTableName(member.Name);
             var path = pathToRoot[member.FullName];
 
@@ -176,7 +188,11 @@ internal static class AggregateLoaderEmitter
         foreach (var fwdKind in graph.RelationKinds.Where(k => k.Direction == RelationDirection.Forward).OrderBy(k => k.Name, StringComparer.Ordinal))
         {
             var whereClause = BuildEdgeWhere(graph, agg, fwdKind, pathToRoot);
-            if (whereClause is null) continue;
+            if (whereClause is null)
+            {
+                continue;
+            }
+
             var edgeName = SurrealNaming.ToEdgeName(fwdKind.Name);
             sb.AppendLine(",");
             sb.Append("    (SELECT id, in, out FROM ").Append(edgeName)
@@ -224,17 +240,26 @@ internal static class AggregateLoaderEmitter
 
         // No source in this aggregate — only relevant if the kind is cross-aggregate AND
         // we hold the target side.
-        if (!graph.IsCrossAggregate(fwdKind.FullName)) return null;
+        if (!graph.IsCrossAggregate(fwdKind.FullName))
+        {
+            return null;
+        }
 
         var inverseKind = graph.RelationKinds.FirstOrDefault(k =>
             k.Direction == RelationDirection.Inverse && k.PairedForwardFullName == fwdKind.FullName);
-        if (inverseKind is null) return null;
+        if (inverseKind is null)
+        {
+            return null;
+        }
 
         var targetTablesInAgg = graph.Tables
             .Where(t => agg.MemberFullNames.Contains(t.FullName))
             .Where(t => HasInverseAttribute(t, inverseKind.FullName))
             .ToList();
-        if (targetTablesInAgg.Count == 0) return null;
+        if (targetTablesInAgg.Count == 0)
+        {
+            return null;
+        }
 
         // Dedupe by dotted path — different tables can share an ancestry to the root
         // (constraints, epics → "design"). Sort for deterministic emission.
@@ -274,11 +299,21 @@ internal static class AggregateLoaderEmitter
 
             foreach (var memberFullName in agg.MemberFullNames)
             {
-                if (paths.ContainsKey(memberFullName)) continue;
-                if (!byFullName.TryGetValue(memberFullName, out var member)) continue;
+                if (paths.ContainsKey(memberFullName))
+                {
+                    continue;
+                }
+
+                if (!byFullName.TryGetValue(memberFullName, out var member))
+                {
+                    continue;
+                }
 
                 var parentLink = FindParentLink(member, current.FullName);
-                if (parentLink is null) continue;
+                if (parentLink is null)
+                {
+                    continue;
+                }
 
                 var parentField = SurrealNaming.ToFieldName(parentLink);
                 var dottedPath = string.IsNullOrEmpty(currentPath)
@@ -302,9 +337,17 @@ internal static class AggregateLoaderEmitter
 
     private static int HopCount(string path)
     {
-        if (string.IsNullOrEmpty(path)) return 0;
+        if (string.IsNullOrEmpty(path))
+        {
+            return 0;
+        }
+
         var dots = 0;
-        foreach (var c in path) if (c == '.') dots++;
+        foreach (var c in path) if (c == '.')
+        {
+            dots++;
+        }
+
         return dots + 1;
     }
 
@@ -319,9 +362,21 @@ internal static class AggregateLoaderEmitter
     {
         foreach (var p in table.Properties)
         {
-            if (!p.Kinds.HasFlag(PropertyKind.Reference)) continue;
-            if (!p.Type.IsTableType) continue;
-            if (!p.IsInline) continue;
+            if (!p.Kinds.HasFlag(PropertyKind.Reference))
+            {
+                continue;
+            }
+
+            if (!p.Type.IsTableType)
+            {
+                continue;
+            }
+
+            if (!p.IsInline)
+            {
+                continue;
+            }
+
             yield return SurrealNaming.ToFieldName(p.Name);
         }
     }
@@ -384,7 +439,11 @@ internal static class AggregateLoaderEmitter
     {
         foreach (var p in child.Properties)
         {
-            if (!p.Kinds.HasFlag(PropertyKind.Parent)) continue;
+            if (!p.Kinds.HasFlag(PropertyKind.Parent))
+            {
+                continue;
+            }
+
             var typeFqn = StripGlobalAndNullable(p.Type.FullyQualifiedName);
             if (typeFqn == parentFullName)
             {
@@ -398,7 +457,10 @@ internal static class AggregateLoaderEmitter
     {
         foreach (var p in table.Properties)
         {
-            if (p.RelationRole == RelationRole.ForwardRelation && p.RelationKindFullName == forwardKindFullName) return true;
+            if (p.RelationRole == RelationRole.ForwardRelation && p.RelationKindFullName == forwardKindFullName)
+            {
+                return true;
+            }
         }
         return false;
     }
@@ -407,7 +469,10 @@ internal static class AggregateLoaderEmitter
     {
         foreach (var p in table.Properties)
         {
-            if (p.RelationRole == RelationRole.InverseRelation && p.RelationKindFullName == inverseKindFullName) return true;
+            if (p.RelationRole == RelationRole.InverseRelation && p.RelationKindFullName == inverseKindFullName)
+            {
+                return true;
+            }
         }
         return false;
     }
@@ -415,8 +480,16 @@ internal static class AggregateLoaderEmitter
     private static string StripGlobalAndNullable(string fqn)
     {
         const string prefix = "global::";
-        if (fqn.StartsWith(prefix)) fqn = fqn[prefix.Length..];
-        if (fqn.EndsWith("?")) fqn = fqn[..^1];
+        if (fqn.StartsWith(prefix))
+        {
+            fqn = fqn[prefix.Length..];
+        }
+
+        if (fqn.EndsWith("?"))
+        {
+            fqn = fqn[..^1];
+        }
+
         return fqn;
     }
 }
