@@ -38,19 +38,11 @@ internal static class RelationVariantExtractor
         => node is ClassDeclarationSyntax cls && cls.AttributeLists.Count > 0;
 
     public static RelationVariantModel? TryExtract(GeneratorSyntaxContext ctx, CancellationToken ct)
-    {
-        if (ctx.Node is not ClassDeclarationSyntax decl)
-        {
-            return null;
-        }
-
-        if (ctx.SemanticModel.GetDeclaredSymbol(decl, ct) is not INamedTypeSymbol cls)
-        {
-            return null;
-        }
-
-        return TryExtractFromSymbol(cls, ct);
-    }
+        => ctx.Node is ClassDeclarationSyntax decl
+            ? ctx.SemanticModel.GetDeclaredSymbol(decl, ct) is INamedTypeSymbol cls
+                ? TryExtractFromSymbol(cls, ct)
+                : null
+            : null;
 
     /// <summary>
     /// Symbol-only entry point. Same logic as <see cref="TryExtract"/> but skips the

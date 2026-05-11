@@ -35,14 +35,14 @@ public static class SurfaceProjection
     /// <see cref="ProjectionDiscoveryException"/> with hints on how to make the
     /// constructor probe-safe.
     /// </summary>
-    public static ISurfaceProjection<TRow> For<TRow>(Func<IProjectionRow, TRow> materialise)
+    public static ISurfaceProjection<TRow> For<TRow>(Func<IProjectionRow, TRow> materialize)
     {
-        ArgumentNullException.ThrowIfNull(materialise);
+        ArgumentNullException.ThrowIfNull(materialize);
 
         var discovery = new DiscoveryProjectionRow();
         try
         {
-            _ = materialise(discovery);
+            _ = materialize(discovery);
         }
         catch (Exception ex)
         {
@@ -61,7 +61,7 @@ public static class SurfaceProjection
                 "must call IProjectionRow.Read at least once.");
         }
 
-        return new SurfaceProjection<TRow>(discovery.Fields, materialise);
+        return new SurfaceProjection<TRow>(discovery.Fields, materialize);
     }
 }
 

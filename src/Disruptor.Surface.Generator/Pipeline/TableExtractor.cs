@@ -116,20 +116,14 @@ internal static class TableExtractor
     /// </summary>
     private static EquatableArray<InlineMember> ResolveInlineMembers(ITypeSymbol type)
     {
-        if (type is not INamedTypeSymbol named)
-        {
-            return [];
-        }
-
-        if (named.Arity != 1)
+        if (type is not INamedTypeSymbol { Arity: 1 } named)
         {
             return [];
         }
 
         var def = named.ConstructedFrom;
         var ns = def.ContainingNamespace?.ToDisplayString() ?? string.Empty;
-        var isCollection = ns == "System.Collections.Generic"
-            && def.Name is "IReadOnlyList" or "IList" or "List";
+        var isCollection = ns == "System.Collections.Generic" && def.Name is "IReadOnlyList" or "IList" or "List";
         if (!isCollection)
         {
             return [];
@@ -172,29 +166,13 @@ internal static class TableExtractor
         foreach (var attr in attrs)
         {
             var fqn = AttributeFullName(attr);
-            if (fqn is null)
+            switch (fqn)
             {
-                continue;
-            }
-
-            if (fqn == AnnotationsMetadata.Reject)
-            {
-                found.Add(ReferenceDeletePolicy.Reject);
-            }
-
-            if (fqn == AnnotationsMetadata.Unset)
-            {
-                found.Add(ReferenceDeletePolicy.Unset);
-            }
-
-            if (fqn == AnnotationsMetadata.Cascade)
-            {
-                found.Add(ReferenceDeletePolicy.Cascade);
-            }
-
-            if (fqn == AnnotationsMetadata.Ignore)
-            {
-                found.Add(ReferenceDeletePolicy.Ignore);
+                case null: continue;
+                case AnnotationsMetadata.Reject: found.Add(ReferenceDeletePolicy.Reject); break;
+                case AnnotationsMetadata.Unset: found.Add(ReferenceDeletePolicy.Unset); break;
+                case AnnotationsMetadata.Cascade: found.Add(ReferenceDeletePolicy.Cascade); break;
+                case AnnotationsMetadata.Ignore: found.Add(ReferenceDeletePolicy.Ignore); break;
             }
         }
         var policy = found.Count > 0 ? found[0] : ReferenceDeletePolicy.Reject;
@@ -280,11 +258,7 @@ internal static class TableExtractor
         return false;
     }
 
-    internal static string? AttributeFullName(AttributeData attr)
-    {
-        var cls = attr.AttributeClass;
-        return cls is null ? null : NormaliseFullName(cls);
-    }
+    internal static string? AttributeFullName(AttributeData attr) => attr.AttributeClass is null ? null : NormaliseFullName(attr.AttributeClass);
 
     internal static string NormaliseFullName(INamedTypeSymbol symbol)
     {
@@ -315,14 +289,16 @@ internal static class TableExtractor
         foreach (var r in type.DeclaringSyntaxReferences)
         {
             ct.ThrowIfCancellationRequested();
-            if (r.GetSyntax(ct) is TypeDeclarationSyntax tds)
+            if (r.GetSyntax(ct) is not TypeDeclarationSyntax tds)
             {
-                foreach (var modifier in tds.Modifiers)
+                continue;
+            }
+
+            foreach (var modifier in tds.Modifiers)
+            {
+                if (modifier.ValueText == "partial")
                 {
-                    if (modifier.ValueText == "partial")
-                    {
-                        return true;
-                    }
+                    return true;
                 }
             }
         }

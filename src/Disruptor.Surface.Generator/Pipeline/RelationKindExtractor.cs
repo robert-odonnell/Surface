@@ -1,5 +1,4 @@
 using Disruptor.Surface.Generator.Annotations;
-using Disruptor.Surface.Generator.Emit;
 using Disruptor.Surface.Generator.Model;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
