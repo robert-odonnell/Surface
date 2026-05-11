@@ -70,10 +70,9 @@ public sealed class SurrealSessionTests
         var id = new RecordId("t", "1");
 
         Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(id)));
-        Assert.Throws<InvalidOperationException>(() => session.Relate(id, id, RecordId.Idempotent("edge")));
-        Assert.Throws<InvalidOperationException>(() => session.Unrelate(id, id, "edge"));
-        Assert.Throws<InvalidOperationException>(() => session.Unrelate(id, null, "edge"));
-        Assert.Throws<InvalidOperationException>(() => session.Unrelate(null, id, "edge"));
+        // Relate/Unrelate now require a SurrealTransaction so the closed-check is
+        // exercised by the dispatch path (RelateAsyncCore / UnrelateAsync) — no
+        // sync overload to test from this angle anymore.
     }
 
     [Fact]
@@ -225,109 +224,11 @@ public sealed class SurrealSessionTests
         Assert.Null(resolved);
     }
 
-    [Fact]
-    public void Relate_TypedKind_UsesTKindEdgeName()
-    {
-        var session = new SurrealSession();
-        var src = new RecordId("constraints", "c");
-        var tgt = new RecordId("user_stories", "u");
-
-        session.Relate<StubKind>(src, tgt);
-
-        var relate = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
-        Assert.Equal("stub_edge", relate.Key);
-        Assert.Equal(src, relate.Target);
-        Assert.Equal(tgt, (RecordId)relate.Value!);
-    }
-
-    [Fact]
-    public void Relate_WithPayload_AttachesEdgeContent()
-    {
-        // Edges in SurrealDB can carry their own properties (confidence scores, run id,
-        // resolution method, …). The payload-aware overload threads the dict through
-        // Command.Relate's EdgeContent so the diagnostic log entry preserves the
-        // payload alongside the edge.
-        var session = new SurrealSession();
-        var src = new RecordId("findings", "f");
-        var tgt = new RecordId("observations", "o");
-        var payload = new Dictionary<string, object?>
-        {
-            ["confidence"] = 0.92,
-            ["method"] = "static-analysis",
-        };
-
-        session.Relate<StubKind>(src, tgt, payload);
-
-        var relate = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
-        Assert.Equal("stub_edge", relate.Key);
-        Assert.NotNull(relate.EdgeContent);
-        Assert.Equal(0.92, relate.EdgeContent!["confidence"]);
-        Assert.Equal("static-analysis", relate.EdgeContent["method"]);
-    }
-
-    [Fact]
-    public void TypedRelate_DefaultsToIdempotent_DeterministicAcrossSessions()
-    {
-        // The typed-kind shorthand `Relate<TKind>(src, tgt)` defaults to the Idempotent
-        // edge strategy: same triple → same edge id, every run. Re-running the same
-        // Relate after commit/reload lands on the same row instead of erroring against
-        // the schema-level UNIQUE INDEX on (in, out). Verified by resolving the captured
-        // Idempotent sentinel against the same triple twice and asserting equality.
-        var src = new RecordId("findings", "f");
-        var tgt = new RecordId("issues", "i");
-
-        var session = new SurrealSession();
-        session.Relate<StubKind>(src, tgt);
-        var entry = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
-
-        Assert.True(entry.Edge.IsIdempotent);
-        Assert.Equal(entry.Edge.Resolve(src, tgt), entry.Edge.Resolve(src, tgt));
-        Assert.Equal("stub_edge", entry.Edge.Table);
-    }
-
-    [Fact]
-    public void TypedRelate_WithExplicitSlugEdge_PreservesSlugInLogEntry()
-    {
-        var session = new SurrealSession();
-        session.Relate<StubKind>(
-            new RecordId("findings", "f"),
-            new RecordId("issues", "i"),
-            edge: new RecordId("stub_edge", "main_link"));
-
-        var entry = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
-        Assert.Equal("stub_edge", entry.Edge.Table);
-        Assert.Equal("main_link", entry.Edge.Value);
-    }
-
-    [Fact]
-    public void TypedRelate_WithRandomUlidEdge_PreservesClientMintedValueInLogEntry()
-    {
-        var session = new SurrealSession();
-        var edge = RecordId.New("stub_edge");   // pre-minted Ulid
-        session.Relate<StubKind>(
-            new RecordId("findings", "f"),
-            new RecordId("issues", "i"),
-            edge);
-
-        var entry = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
-        Assert.Equal(edge.Value, entry.Edge.Value);
-    }
-
-    [Fact]
-    public void Relate_WithoutPayload_LeavesEdgeContentNull()
-    {
-        // Regression: the legacy zero-payload overload must not start populating an empty
-        // EdgeContent dict. EdgeContent stays null on the log entry so downstream
-        // consumers can distinguish "no payload" from "empty payload".
-        var session = new SurrealSession();
-        var src = new RecordId("a", "1");
-        var tgt = new RecordId("b", "2");
-
-        session.Relate<StubKind>(src, tgt);
-
-        var relate = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
-        Assert.Null(relate.EdgeContent);
-    }
+    // Sync Relate / typed-kind Relate behaviour tests (TypedRelate_*, Relate_With*) were
+    // removed in preview.45 along with the sync surface itself. Edge-id strategy and
+    // payload preservation are now exercised through RelateAsync's dispatch path; a fake
+    // SurrealTransaction would be needed to assert at the unit level (deferred — same
+    // fixture gap as the Finding 1 error-path tests).
 
     [Fact]
     public void QueryOutgoing_Returns_Targets_OnlyWhenOwnerIsSource()
@@ -403,34 +304,9 @@ public sealed class SurrealSessionTests
     }
 
     // Delete-related tests removed alongside the legacy sync Delete. DeleteAsync covers
-    // entity removal now (without cascade — re-anchor lands in preview.35).
-
-    [Fact]
-    public void Unrelate_SourceOnly_EmitsSingleBulkCommand()
-    {
-        var session = new SurrealSession();
-        var src = new RecordId("constraints", "c");
-        var t1  = new RecordId("user_stories", "u1");
-        var t2  = new RecordId("user_stories", "u2");
-
-        session.Relate<StubKind>(src, t1);
-        session.Relate<StubKind>(src, t2);
-        session.Unrelate<StubKind>(src, target: null);
-
-        // The bulk-clear is a single Unrelate command (target encoded as null). It
-        // renders as `DELETE edge WHERE in = source` at commit time so persisted
-        // edges (not just loaded ones) get cleared.
-        var bulkOnly = session.Log.Entries.Single(e =>
-            e.Op == CommandOp.Unrelate && e.Value is null);
-        Assert.Equal("stub_edge", bulkOnly.Key);
-    }
-
-    [Fact]
-    public void Unrelate_BothNull_Throws()
-    {
-        var session = new SurrealSession();
-        Assert.Throws<ArgumentException>(() => session.Unrelate((IRecordId?)null, (IRecordId?)null, "edge"));
-    }
+    // entity removal now (without cascade — re-anchor lands in preview.35). Sync Unrelate
+    // tests removed in preview.45 alongside the sync surface; UnrelateAsync still does
+    // the both-null guard but exercising it requires a fake SurrealTransaction.
 
     [Fact]
     public void HydrationSinkTrack_DuplicateInstance_DedupsSilently_AndReturns()
@@ -461,73 +337,10 @@ public sealed class SurrealSessionTests
         Assert.Null(second.BoundSession);
     }
 
-    [Fact]
-    public void GetNewOutgoingEdges_ReturnsExplicitEdgeId_NotIdempotentDefault()
-    {
-        // Regression: earlier previews stored only (src, edge_table, tgt) → bool in the
-        // snapshot, so the explicit slug edge id passed to Relate<TKind>(...) was discarded
-        // before SaveAsync could dispatch. The generator's emitted RELATE then always
-        // resolved to an Idempotent edge id, silently overriding the user's intent.
-        var session = new SurrealSession();
-        var owner = new StubEntity(new RecordId("findings", "f"));
-        ((IHydrationSink)session).Track(owner);
-        var tgt = new RecordId("issues", "i");
-        var slug = new RecordId("stub_edge", "primary_call");
-
-        session.Relate<StubKind>(owner.Id, tgt, slug);
-
-        var pending = session.GetNewOutgoingEdges<StubKind>(owner).Single();
-        Assert.Equal(tgt, pending.Target);
-        Assert.Equal("stub_edge", pending.Edge.Table);
-        Assert.Equal("primary_call", pending.Edge.Value);
-        Assert.Null(pending.Payload);
-    }
-
-    [Fact]
-    public void GetNewOutgoingEdges_ReturnsPayload_AlongsideEdgeId()
-    {
-        // Regression: the payload-aware Relate overload buffered the payload only in the
-        // diagnostic CommandLog (explicitly documented as "not consumed by the per-entity
-        // Save dispatch path"). The generator's RELATE then went out without CONTENT,
-        // dropping the user's edge data on the floor.
-        var session = new SurrealSession();
-        var owner = new StubEntity(new RecordId("findings", "f"));
-        ((IHydrationSink)session).Track(owner);
-        var tgt = new RecordId("observations", "o");
-        var payload = new Dictionary<string, object?>
-        {
-            ["confidence"] = 0.92,
-            ["method"] = "static-analysis",
-        };
-
-        session.Relate<StubKind>(owner.Id, tgt, payload);
-
-        var pending = session.GetNewOutgoingEdges<StubKind>(owner).Single();
-        Assert.Equal(tgt, pending.Target);
-        Assert.NotNull(pending.Payload);
-        Assert.Equal(0.92, pending.Payload!["confidence"]);
-        Assert.Equal("static-analysis", pending.Payload["method"]);
-    }
-
-    [Fact]
-    public void GetNewOutgoingEdges_OmitsLoadedEdges_OnlyReturnsPostLoadAdditions()
-    {
-        // Snapshot diff: edges that were already on disk at load time are recorded in
-        // relationsAtStart (via IHydrationSink.Edge). They must NOT appear in the
-        // GetNewOutgoingEdges result, which only feeds the SaveAsync dispatcher's
-        // RELATE-this-new-edge loop.
-        var session = new SurrealSession();
-        var owner = new StubEntity(new RecordId("findings", "f"));
-        ((IHydrationSink)session).Track(owner);
-        var loadedTgt = new RecordId("issues", "old");
-        var newTgt = new RecordId("issues", "new");
-
-        ((IHydrationSink)session).Edge(owner.Id, "stub_edge", loadedTgt);
-        session.Relate<StubKind>(owner.Id, newTgt);
-
-        var pending = session.GetNewOutgoingEdges<StubKind>(owner);
-        Assert.Equal(newTgt, pending.Single().Target);
-    }
+    // GetNewOutgoingEdges_* tests added in preview.44 went away with the snapshot-diff
+    // chain itself. The buffer they exercised (state.Edges as write store, PendingEdge
+    // as the dispatch payload) no longer exists — RelateAsync ships each edge straight
+    // through the user's transaction, so the post-load diff has nothing to compute.
 
     /// <summary>Test-only entity that records the order of session-side hook calls.</summary>
     private sealed class StubEntity(RecordId id) : IEntity

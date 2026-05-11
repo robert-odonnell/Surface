@@ -157,12 +157,13 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     {
         public readonly Dictionary<RecordId, IEntity> Entities = [];
 
-        // The Edges value carries the buffered RELATE intent — the explicit edge id
-        // (so user-supplied Random/Slug/Idempotent strategies survive to dispatch) and
-        // the optional CONTENT payload. The triple key keeps the unique-edge invariant.
-        // Loaded edges synthesise an Idempotent edge (we don't read the persisted edge
-        // id at hydration time) and carry no payload.
-        public readonly Dictionary<(RecordId Source, string Edge, RecordId Target), EdgeIntent> Edges = [];
+        // Read-side index of edges visible in this session. Populated by IHydrationSink.Edge
+        // at load time and by RelateAsync after dispatch. Pure presence — Query{Outgoing,
+        // Incoming,RelatedIds,InverseRelatedIds} only ask "is this edge in the snapshot?".
+        // No write buffering: with sync Relate gone, every edge mutation goes straight
+        // through the user's transaction via RelateAsync / UnrelateAsync, and the index
+        // updates as those calls complete.
+        public readonly HashSet<(RecordId Source, string Edge, RecordId Target)> Edges = [];
 
         // Per-entity load-shape tracking. Each set lists the field names on that entity
         // whose slice has been hydrated (or freshly authored via Track<T>). Generator-emitted
@@ -171,8 +172,6 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         // extends.
         public readonly Dictionary<RecordId, HashSet<string>> LoadedSlices = [];
     }
-
-    private sealed record EdgeIntent(RecordId Edge, IReadOnlyDictionary<string, object?>? Payload);
 
     private readonly MaterializedSessionState state = new();
 
@@ -195,11 +194,12 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// <summary>True after <see cref="CommitAsync"/> or <see cref="Abandon"/> has run; further reads or writes throw.</summary>
     public bool IsClosed => closed;
 
-    // Filled by the loader's IHydrationSink.Track / .Edge calls. ISaveContext.IsTracked
-    // checks loadedAtStart to distinguish "in DB" from "constructed in this session";
-    // GetNewOutgoingEdges diff against relationsAtStart to find new edges to RELATE.
+    // Filled by the loader's IHydrationSink.Track. ISaveContext.IsTracked checks
+    // loadedAtStart to distinguish "in DB" from "constructed in this session" so the
+    // emitted SaveAsync can pick CREATE vs UPSERT semantics. Edges no longer need a
+    // start-time set — there's no snapshot-diff dispatch anymore; RelateAsync ships
+    // each edge straight through the user's transaction.
     private readonly HashSet<RecordId> loadedAtStart = [];
-    private readonly HashSet<(string Kind, RecordId Source, RecordId Target)> relationsAtStart = [];
 
     /// <summary>Chronological history of recorded model commands. Diagnostic-only.</summary>
     public CommandLog Log { get; } = new();
@@ -278,13 +278,13 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     {
         ThrowIfClosed();
         var results = new List<T>();
-        foreach (var kv in state.Edges)
+        foreach (var key in state.Edges)
         {
-            if (kv.Key.Edge != edgeKind || kv.Key.Source != owner.Id)
+            if (key.Edge != edgeKind || key.Source != owner.Id)
             {
                 continue;
             }
-            if (state.Entities.TryGetValue(kv.Key.Target, out var other) && other is T typed)
+            if (state.Entities.TryGetValue(key.Target, out var other) && other is T typed)
             {
                 results.Add(typed);
             }
@@ -301,13 +301,13 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     {
         ThrowIfClosed();
         var results = new List<T>();
-        foreach (var kv in state.Edges)
+        foreach (var key in state.Edges)
         {
-            if (kv.Key.Edge != edgeKind || kv.Key.Target != owner.Id)
+            if (key.Edge != edgeKind || key.Target != owner.Id)
             {
                 continue;
             }
-            if (state.Entities.TryGetValue(kv.Key.Source, out var other) && other is T typed)
+            if (state.Entities.TryGetValue(key.Source, out var other) && other is T typed)
             {
                 results.Add(typed);
             }
@@ -325,61 +325,19 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     {
         ThrowIfClosed();
         var results = new List<IRecordId>();
-        foreach (var kv in state.Edges)
+        foreach (var key in state.Edges)
         {
-            if (kv.Key.Edge != edgeKind)
+            if (key.Edge != edgeKind)
             {
                 continue;
             }
 
-            if (kv.Key.Source == owner.Id)
+            if (key.Source == owner.Id)
             {
-                results.Add(kv.Key.Target);
+                results.Add(key.Target);
             }
         }
         return results;
-    }
-
-    /// <summary>
-    /// Returns the buffered <see cref="PendingEdge"/>s of kind <typeparamref name="TKind"/>
-    /// that originate at <paramref name="owner"/> and were <b>not</b> present at load time.
-    /// Used by generator-emitted <see cref="IEntity.SaveAsync"/> to dispatch RELATE for new
-    /// outgoing relations after the entity itself is saved. Snapshot diff: current
-    /// in-memory edges minus the loaded-at-start set.
-    /// <para>
-    /// Each <see cref="PendingEdge"/> carries the explicit edge id supplied to
-    /// <c>Session.Relate&lt;TKind&gt;(...)</c> (or the deferred Idempotent sentinel when
-    /// the caller did not specify one), plus any payload attached for
-    /// <c>RELATE … CONTENT { … }</c>. The save dispatcher must round-trip both — earlier
-    /// previews returned bare target ids, which silently dropped both fields.
-    /// </para>
-    /// </summary>
-    public IReadOnlyCollection<PendingEdge> GetNewOutgoingEdges<TKind>(IEntity owner) where TKind : IRelationKind
-    {
-        ThrowIfClosed();
-        var kindName = TKind.EdgeName;
-        var ownerId = owner.Id;
-        var result = new List<PendingEdge>();
-        foreach (var (key, intent) in state.Edges)
-        {
-            if (key.Edge != kindName)
-            {
-                continue;
-            }
-
-            if (key.Source != ownerId)
-            {
-                continue;
-            }
-
-            if (relationsAtStart.Contains((kindName, Source: key.Source, Target: key.Target)))
-            {
-                continue;
-            }
-
-            result.Add(new PendingEdge(key.Target, intent.Edge, intent.Payload));
-        }
-        return result;
     }
 
     /// <summary>Cross-aggregate inverse-side read: edges that land on <paramref name="owner"/>.</summary>
@@ -387,16 +345,16 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     {
         ThrowIfClosed();
         var results = new List<IRecordId>();
-        foreach (var kv in state.Edges)
+        foreach (var key in state.Edges)
         {
-            if (kv.Key.Edge != edgeKind)
+            if (key.Edge != edgeKind)
             {
                 continue;
             }
 
-            if (kv.Key.Target == owner.Id)
+            if (key.Target == owner.Id)
             {
-                results.Add(kv.Key.Source);
+                results.Add(key.Source);
             }
         }
         return results;
@@ -697,127 +655,12 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         Track(child);
     }
 
-    /// <summary>
-    /// Adds an edge between <paramref name="source"/> and <paramref name="target"/>.
-    /// The <paramref name="edge"/> RecordId carries both the table name (always
-    /// required) and the id strategy: a Random Ulid (<see cref="RecordId.New"/>), a
-    /// user-supplied Slug (<c>new RecordId(table, slug)</c>), or the deferred
-    /// <see cref="RecordId.Idempotent"/> sentinel that resolves to a deterministic
-    /// hash of the linkage triple at emit time. Endpoints are id-typed so the same
-    /// call covers within-aggregate (both endpoints loaded as entities) and
-    /// cross-aggregate (one or both endpoints live elsewhere).
-    /// </summary>
-    public void Relate(IRecordId source, IRecordId target, RecordId edge)
-    {
-        ThrowIfClosed();
-        var src = RecordId.From(source);
-        var tgt = RecordId.From(target);
-        state.Edges[(src, edge.Table, tgt)] = new EdgeIntent(edge, null);
-        Record(Command.Relate(src, edge, tgt));
-    }
-
-    /// <summary>
-    /// Relate variant that attaches a payload to the edge: <c>RELATE src-&gt;edge-&gt;tgt CONTENT { … }</c>.
-    /// Use when the relation itself carries data — confidence scores, resolution method,
-    /// run id, anything the schema declares as a field on the edge table. Each value
-    /// renders through <c>SurrealFormatter</c> just like a property write, so record ids,
-    /// strings, numbers, booleans, datetimes, and arrays all serialise correctly. Unlike
-    /// scalar field writes, no diffing is performed — every call produces a fresh
-    /// <c>RELATE</c> command with the supplied content. Pair with <c>Session.Relate&lt;TKind&gt;(src, tgt)</c>
-    /// when no payload is needed.
-    /// </summary>
-    public void Relate(
-        IRecordId source,
-        IRecordId target,
-        RecordId edge,
-        IReadOnlyDictionary<string, object?> payload)
-    {
-        ArgumentNullException.ThrowIfNull(payload);
-        ThrowIfClosed();
-        var src = RecordId.From(source);
-        var tgt = RecordId.From(target);
-        state.Edges[(src, edge.Table, tgt)] = new EdgeIntent(edge, payload);
-        Record(Command.Relate(src, edge, tgt, payload));
-    }
-
-    /// <summary>
-    /// Removes edges. At least one of <paramref name="source"/> / <paramref name="target"/>
-    /// must be non-null. Both non-null targets a single edge; one-side-null is the
-    /// bulk form (every matching edge of <paramref name="edgeKind"/>, persisted-or-not)
-    /// and renders as <c>DELETE edgeKind WHERE in = source</c> or
-    /// <c>… WHERE out = target</c> at commit time.
-    /// </summary>
-    public void Unrelate(IRecordId? source, IRecordId? target, string edgeKind)
-    {
-        if (source is null && target is null)
-        {
-            throw new ArgumentException(
-                "Unrelate requires at least one of source or target to be non-null.");
-        }
-        ThrowIfClosed();
-        var src = source is null ? (RecordId?)null : RecordId.From(source);
-        var tgt = target is null ? (RecordId?)null : RecordId.From(target);
-
-        // In-memory snapshot — for both-non-null, drop the specific edge; for either
-        // bulk form, drop every matching loaded edge so reads stay accurate.
-        foreach (var key in state.Edges.Keys.ToList())
-        {
-            if (key.Edge != edgeKind)
-            {
-                continue;
-            }
-
-            if (src is { } s && key.Source != s)
-            {
-                continue;
-            }
-
-            if (tgt is { } t && key.Target != t)
-            {
-                continue;
-            }
-
-            state.Edges.Remove(key);
-        }
-
-        Record(Command.Unrelate(src, edgeKind, tgt));
-    }
-
-    // Entity-typed convenience overloads — generator-emitted within-aggregate code calls
-    // these so it can pass entity references straight through without an explicit .Id
-    // accessor. Cross-aggregate emission keeps using the IRecordId surface.
-    public void Relate(IEntity source, IEntity target, RecordId edge) => Relate(source.Id, target.Id, edge);
-    public void Relate(IEntity source, IEntity target, RecordId edge, IReadOnlyDictionary<string, object?> payload)
-        => Relate(source.Id, target.Id, edge, payload);
-    public void Unrelate(IEntity source, IEntity target, string edgeKind) => Unrelate(source.Id, target.Id, edgeKind);
-
-    // Typed-kind overloads — domain code calls Relate<Restricts>(c, u) and TKind.EdgeName
-    // names the table; the edge id strategy defaults to <see cref="RecordId.Idempotent"/>
-    // (deterministic hash from the linkage triple) so re-running Relate with the same
-    // (src, tgt) lands on the same row. Pass an explicit edge to override:
-    //   Relate<Restricts>(s, t, RecordId.New(Restricts.EdgeName))                  — Random Ulid
-    //   Relate<Restricts>(s, t, new RecordId(Restricts.EdgeName, "main_link"))     — Slug
-    //   Relate<Restricts>(s, t, RecordId.Idempotent(Restricts.EdgeName))           — explicit Idempotent
-    public void Relate<TKind>(IRecordId source, IRecordId target) where TKind : IRelationKind
-        => Relate(source, target, RecordId.Idempotent(TKind.EdgeName));
-    public void Relate<TKind>(IEntity source, IEntity target) where TKind : IRelationKind
-        => Relate(source.Id, target.Id, RecordId.Idempotent(TKind.EdgeName));
-    public void Relate<TKind>(IRecordId source, IRecordId target, RecordId edge) where TKind : IRelationKind
-        => Relate(source, target, edge);
-    public void Relate<TKind>(IEntity source, IEntity target, RecordId edge) where TKind : IRelationKind
-        => Relate(source.Id, target.Id, edge);
-    public void Relate<TKind>(IRecordId source, IRecordId target, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
-        => Relate(source, target, RecordId.Idempotent(TKind.EdgeName), payload);
-    public void Relate<TKind>(IEntity source, IEntity target, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
-        => Relate(source.Id, target.Id, RecordId.Idempotent(TKind.EdgeName), payload);
-    public void Relate<TKind>(IRecordId source, IRecordId target, RecordId edge, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
-        => Relate(source, target, edge, payload);
-    public void Relate<TKind>(IEntity source, IEntity target, RecordId edge, IReadOnlyDictionary<string, object?> payload) where TKind : IRelationKind
-        => Relate(source.Id, target.Id, edge, payload);
-    public void Unrelate<TKind>(IRecordId? source, IRecordId? target) where TKind : IRelationKind
-        => Unrelate(source, target, TKind.EdgeName);
-    public void Unrelate<TKind>(IEntity source, IEntity target) where TKind : IRelationKind
-        => Unrelate(source.Id, target.Id, TKind.EdgeName);
+    // Sync Relate / Unrelate were removed — they buffered edge intent into state.Edges
+    // for the emitted SaveAsync to drain via a snapshot-diff dispatch, which is the
+    // exact write-buffering pattern the per-entity-Save pivot ripped out for property
+    // writes. Edge mutations now go through RelateAsync<TKind> / UnrelateAsync<TKind>
+    // which dispatch immediately against the user's transaction; no buffer to drain,
+    // no snapshot to diff, no payload/edge-id silently dropped at save time.
 
     public IReadOnlyCollection<TElement> QueryOutgoing<TKind, TElement>(IEntity owner) where TKind : IRelationKind where TElement : class
         => QueryOutgoing<TElement>(owner, TKind.EdgeName);
@@ -1024,7 +867,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
             var src = RecordId.From(source);
             var tgt = RecordId.From(target);
             var edge = (explicitEdge ?? RecordId.Idempotent(TKind.EdgeName)).Resolve(src, tgt);
-            state.Edges[(src, TKind.EdgeName, tgt)] = new EdgeIntent(edge, payload);
+            state.Edges.Add((src, TKind.EdgeName, tgt));
 
             // Typed dispatch via the SDK's QueryAsync with CBOR-encoded bindings — the
             // SDK's RelateAsync(src, edgeTable, tgt) auto-mints the edge id, so we
@@ -1091,8 +934,9 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         {
             var src = source is null ? (RecordId?)null : RecordId.From(source);
             var tgt = target is null ? (RecordId?)null : RecordId.From(target);
-            // Drop matching loaded edges from the in-memory snapshot too.
-            foreach (var key in state.Edges.Keys.ToList())
+            // Drop matching edges from the in-memory read index too so subsequent
+            // QueryOutgoing/Incoming/RelatedIds calls in this session don't see ghosts.
+            foreach (var key in state.Edges.ToList())
             {
                 if (key.Edge != TKind.EdgeName)
                 {
@@ -1224,12 +1068,11 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     void IHydrationSink.Edge(RecordId source, string edgeKind, RecordId target)
     {
         ThrowIfClosed();
-        // Loaded edges synthesise an Idempotent edge id — we don't read the persisted
-        // edge id at hydration time, and the buffered intent is only consumed for
-        // *new* edges (gated by relationsAtStart). The synthesised value is therefore
-        // never dispatched for loaded entries.
-        state.Edges[(source, edgeKind, target)] = new EdgeIntent(RecordId.Idempotent(edgeKind), null);
-        relationsAtStart.Add((edgeKind, source, target));
+        // Read-side index only — Query{Outgoing,Incoming,RelatedIds,InverseRelatedIds}
+        // consult this set so loaded edges show up at .Constraints / .Relations / etc.
+        // No "loaded vs new" diff anymore (sync Relate is gone), so no second set is
+        // needed to track what was on disk at start.
+        state.Edges.Add((source, edgeKind, target));
     }
 
     void IHydrationSink.MarkSliceLoaded(RecordId ownerId, string fieldName)
@@ -1247,8 +1090,9 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
 
     /// <summary>
     /// Append-to-log chokepoint for diagnostic-grade tracing of model commands. Track
-    /// records a Create command here; Relate / Unrelate record their own. Property
-    /// setters do not go through this path under the explicit-Save model.
+    /// records a Create command here; RelateAsync / UnrelateAsync / DeleteAsync record
+    /// their own. Property setters do not go through this path under the explicit-Save
+    /// model.
     /// </summary>
     private void Record(Command c)
     {
@@ -1266,7 +1110,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     {
         state.Entities.Remove(id);
 
-        foreach (var k in state.Edges.Keys.Where(k => k.Source == id || k.Target == id).ToList())
+        foreach (var k in state.Edges.Where(k => k.Source == id || k.Target == id).ToList())
         {
             state.Edges.Remove(k);
         }

@@ -21,9 +21,4 @@ public partial class Constraint
     [ReferencedBy] public partial IReadOnlyCollection<IRecordId> References { get; }
     [ConcernedBy] public partial IReadOnlyCollection<IRecordId> Concerns { get; }
     [RevisedBy] public partial IReadOnlyCollection<IRecordId> Revisions { get; }
-    
-    public void Restricts(IRestrictedBy entity)
-    {
-        Session.Relate<Restricts>(this, entity);
-    }
 }

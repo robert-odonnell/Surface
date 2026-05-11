@@ -59,6 +59,8 @@ async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
     Console.WriteLine($"--- Seeding design '{text}' ---");
 
     var session = new SurrealSession(Workspace.ReferenceRegistry);
+    var restricts = new List<(IEntity Source, IEntity Target)>();
+    var validates = new List<(IEntity Source, IEntity Target)>();
     var design = session.Track(new Design
     {
         RepositoryRoot = $"design.repository_root: {text}",
@@ -124,14 +126,14 @@ async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
                         Details = MintDetails($"design.epic.{i}.feature.{j}.user_story.{k}.test.{l}"),
                     });
 
-                    constraint.Restricts(userStory);
-                    constraint.Restricts(ac);
-                    constraint.Restricts(test);
-
-                    // Within-aggregate `validates` edge: each Test validates its sibling
-                    // AcceptanceCriteria. Exercised so the harness covers more than just
-                    // `restricts` for the within-aggregate edge surface.
-                    session.Relate<Validates>(test, ac);
+                    // Within-aggregate edges. Sync Relate is gone — buffer each pair into
+                    // a small intent list and dispatch RELATE through the transaction
+                    // after SaveAsync lands the entities themselves. Substrate owns the
+                    // atomicity (everything inside the same tx); we just stream commands.
+                    restricts.Add((constraint, userStory));
+                    restricts.Add((constraint, ac));
+                    restricts.Add((constraint, test));
+                    validates.Add((test, ac));
 
                     for (var m = 0; m < 3; m++)
                     {
@@ -149,13 +151,21 @@ async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
         }
     }
 
-    Console.WriteLine($"  tracked: {session.Log.Count} Track/Relate intents captured in the log");
+    Console.WriteLine($"  tracked: {session.Log.Count} Track intents captured in the log");
     await using var tx = await db.BeginTransactionAsync();
     // Per-entity Save: design's emitted SaveAsync auto-recurses through forward refs
-    // (Details), then walks Tracked children (Constraints, Epics, …) recursively, then
-    // dispatches new outgoing relations (Restricts, Validates, …) via the snapshot diff
-    // on state.Edges. App owns Commit.
+    // (Details), then walks Tracked children (Constraints, Epics, …) recursively. App
+    // owns Commit. Edge dispatch happens in the same tx via RelateAsync — substrate
+    // sees the entities first, then the edges, all under one BEGIN/COMMIT.
     await session.SaveAsync(design, tx);
+    foreach (var (src, tgt) in restricts)
+    {
+        await session.RelateAsync<Restricts>(src, tgt, tx);
+    }
+    foreach (var (src, tgt) in validates)
+    {
+        await session.RelateAsync<Validates>(src, tgt, tx);
+    }
     await tx.CommitAsync();
     Console.WriteLine($"  committed; design id = {design.Id}\n");
     return design.Id;
@@ -223,23 +233,26 @@ async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SdkSurreal db)
         Details = new Details { Header = "change header", Summary = "change summary", Text = "change text" }
     });
 
+    Console.WriteLine($"  tracked: {session.Log.Count} Track intents captured in the log");
+    await using var tx = await db.BeginTransactionAsync();
+    // Per-entity Save: review root recurses through children. Edge dispatch follows in
+    // the same tx via RelateAsync — within-aggregate (Finding→Issue, etc.) and
+    // cross-aggregate (Review→Design, etc.) all stream through the same BEGIN/COMMIT.
+    await session.SaveAsync(review, tx);
+
     // Within-aggregate edges: Finding informs Issue, Finding cites Observation,
     // DesignChange resolves Issue.
-    session.Relate<Informs>(finding, issue);
-    session.Relate<Cites>(finding, observation);
-    session.Relate<Resolves>(change, issue);
+    await session.RelateAsync<Informs>(finding, issue, tx);
+    await session.RelateAsync<Cites>(finding, observation, tx);
+    await session.RelateAsync<Resolves>(change, issue, tx);
 
     // Cross-aggregate edges (Review → Design): Review assesses the Design, Observation
     // references it, Issue concerns one of its Constraints, DesignChange revises it.
-    session.Relate<Assesses>(review.Id, targetDesignId);
-    session.Relate<References>(observation.Id, targetDesignId);
-    session.Relate<Concerns>(issue.Id, someConstraintId);
-    session.Relate<Revises>(change.Id, targetDesignId);
+    await session.RelateAsync<Assesses>(review.Id, targetDesignId, tx);
+    await session.RelateAsync<References>(observation.Id, targetDesignId, tx);
+    await session.RelateAsync<Concerns>(issue.Id, someConstraintId, tx);
+    await session.RelateAsync<Revises>(change.Id, targetDesignId, tx);
 
-    Console.WriteLine($"  tracked: {session.Log.Count} Track/Relate intents captured in the log");
-    await using var tx = await db.BeginTransactionAsync();
-    // Per-entity Save: review root recurses through children + new outgoing relations.
-    await session.SaveAsync(review, tx);
     await tx.CommitAsync();
     Console.WriteLine($"  committed; review id = {review.Id}\n");
     return review.Id;

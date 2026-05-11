@@ -204,10 +204,10 @@ Plus aggregate / relation marker attributes:
   The generator emits a sibling marker class without the `Attribute` suffix
   (`Restricts : IRelationKind`) per forward kind. Within-aggregate relations expose
   `IReadOnlyCollection<IEntity>` reads; cross-aggregate relations expose
-  `IReadOnlyCollection<IRecordId>`. Mutations go through `Session.Relate<TKind>(src, tgt)`
-  (sync, in-memory) and dispatch via `SaveAsync`'s snapshot diff, or directly via
-  `Session.RelateAsync<TKind>(src, tgt, tx)` — no auto-emitted `Add{X}` / `Remove{X}` /
-  `Clear{X}` methods; write a one-line domain-verb passthrough if you want one.
+  `IReadOnlyCollection<IRecordId>`. Mutations go through `Session.RelateAsync<TKind>(src, tgt, tx)` —
+  edges dispatch immediately against the user's transaction; no snapshot diff, no
+  buffered intent. No auto-emitted `Add{X}` / `Remove{X}` / `Clear{X}` methods; write
+  a one-line `async` domain-verb passthrough if you want one.
 - For relations that carry edge data, derive from `ForwardRelation<TPayload>` —
   the generator walks `TPayload`'s public scalar properties and emits a
   `DEFINE FIELD` on the relation table for each. Same scalar mapping as `[Property]`
@@ -242,9 +242,10 @@ Plus aggregate / relation marker attributes:
   `session.SaveAsync(entity, tx)` walks the entity's forward dependencies (`[Reference]`
   / `[Inline]` / `[Parent]`) first, then dispatches the entity itself as a single
   `CREATE/UPDATE record:id CONTENT { ... }` (whole-entity, no per-field SET), then
-  walks tracked children, then dispatches new outgoing relations via a snapshot diff
-  (`GetNewOutgoingEdges<TKind>`). The user picks what to save; the library does not
-  do change tracking.
+  walks tracked children. Edges are not part of SaveAsync — they go through
+  `RelateAsync<TKind>` against the same transaction, dispatched at the call site so
+  there's no buffered intent for the library to drain. The user picks what to save;
+  the library does not do change tracking.
 - **Track lifecycle.** `session.Track(new T { … })` does `Bind` (wires the entity's
   `_session`) → `Initialize` (mandatory-ref seeding via `OnCreate{Name}` hooks; idempotent
   so a later `SaveAsync` auto-bind doesn't re-mint). Object-initializer writes land

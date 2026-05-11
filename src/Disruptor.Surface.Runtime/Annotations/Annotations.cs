@@ -71,7 +71,7 @@ public abstract class ForwardRelation : RelationAttribute;
 /// <para>
 /// Derive directly:
 /// <c>public sealed class UsesAttribute : ForwardRelation&lt;UsesPayload&gt;;</c>.
-/// Pass payload data at write time via <c>session.Relate&lt;Uses&gt;(src, tgt, payload)</c>
+/// Pass payload data at write time via <c>session.RelateAsync&lt;Uses&gt;(src, tgt, payload, tx)</c>
 /// (the dictionary overload) — typed-payload runtime overloads can be layered on later
 /// without changing the schema contract.
 /// </para>

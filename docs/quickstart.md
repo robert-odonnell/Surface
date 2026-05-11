@@ -382,9 +382,10 @@ public partial class Constraint
 
     [Restricts] public partial IReadOnlyCollection<UserStory> RestrictedStories { get; }
 
-    // Sync, in-memory passthrough — the new edge buffers into state.Edges and
-    // dispatches as part of the constraint's next SaveAsync via the snapshot diff.
-    public void Restricts(UserStory story) => Session.Relate<Restricts>(this, story);
+    // Domain verb shipped against the user's tx — RelateAsync dispatches the RELATE
+    // immediately; no buffered intent for SaveAsync to drain.
+    public Task RestrictsAsync(UserStory story, SurrealTransaction tx, CancellationToken ct = default)
+        => Session.RelateAsync<Restricts>(this, story, tx, ct);
 }
 
 [Table]
@@ -398,7 +399,7 @@ public partial class UserStory
 }
 ```
 
-The generator emits `Restricts : IRelationKind` (a marker class with a `static abstract string EdgeName`). Use `Session.Relate<Restricts>(...)`, `Session.Unrelate<Restricts>(...)`, `Session.QueryOutgoing<Restricts, T>(...)`, and `Session.QueryIncoming<Restricts, T>(...)` — no string edge names anywhere in user code. Async equivalents are also available when you'd rather dispatch directly without going through a SaveAsync diff: `await Session.RelateAsync<Restricts>(constraint, story, tx)`.
+The generator emits `Restricts : IRelationKind` (a marker class with a `static abstract string EdgeName`). Use `Session.RelateAsync<Restricts>(src, tgt, tx)` / `Session.UnrelateAsync<Restricts>(src?, tgt?, tx)` for mutations, and the sync `Session.QueryOutgoing<Restricts, T>(...)` / `Session.QueryIncoming<Restricts, T>(...)` for reads off the in-session edge index — no string edge names anywhere in user code. Edge writes always carry a transaction; there's no buffered "set up edges, save later" mode.
 
 ## 11. Run The Repository Sample
 

@@ -998,8 +998,10 @@ internal static class PartialEmitter
     /// aren't tracked yet → recurse via <c>ctx.SaveAsync</c>); builds a content dict
     /// from <c>[Property]</c> + <c>[Reference]</c> + <c>[Parent]</c> backing fields;
     /// dispatches <c>CREATE</c> or <c>UPDATE</c> via the SDK's typed methods (CBOR, no SurrealQL); recurses
-    /// into new children via the <c>[Children]</c> property accessor; dispatches new
-    /// outgoing relations via <see cref="SurrealSession.GetNewOutgoingEdges{TKind}"/>.
+    /// into new children via the <c>[Children]</c> property accessor. Edges are out
+    /// of scope — domain code dispatches them through
+    /// <see cref="SurrealSession.RelateAsync{TKind}(IRecordId, IRecordId, Disruptor.Surreal.SurrealTransaction, System.Threading.CancellationToken)"/>
+    /// against the same transaction.
     /// </summary>
     private static void EmitSaveAsync(StringBuilder builder, string indent, TableModel table)
     {
@@ -1145,47 +1147,13 @@ internal static class PartialEmitter
                 .Append(indent).AppendLine("    }");
         }
 
-        // Outgoing relations dispatch: for each [ForwardRelation]-bearing property, ask
-        // the session for new (post-load) outgoing edges of that kind and dispatch a
-        // RELATE per new edge. Each PendingEdge carries Target + Edge + Payload as the
-        // user expressed it on the buffered Relate call — bare or with explicit edge or
-        // with payload — so we route to the matching RelateAsync overload. The payload
-        // branch picks the (src, tgt, edge, payload, tx) overload; the bare branch picks
-        // (src, tgt, edge, tx). Both preserve the user-supplied edge id (Random, Slug, or
-        // explicit/synthesised Idempotent).
-        foreach (var p in table.Properties)
-        {
-            if (p.RelationRole != RelationRole.ForwardRelation)
-            {
-                continue;
-            }
-
-            if (string.IsNullOrEmpty(p.RelationKindFullName))
-            {
-                continue;
-            }
-
-            var attrFqn = p.RelationKindFullName!;
-            var lastDot = attrFqn.LastIndexOf('.');
-            var attrNs = lastDot >= 0 ? attrFqn[..lastDot] : "";
-            var attrName = lastDot >= 0 ? attrFqn[(lastDot + 1)..] : attrFqn;
-            var markerName = SurrealNaming.StripAttributeSuffix(attrName);
-            var markerFqn = string.IsNullOrEmpty(attrNs) ? $"global::{markerName}" : $"global::{attrNs}.{markerName}";
-            var pendingLocal = $"__rel_{ToCamel(p.Name)}";
-            builder
-                .AppendLine()
-                .Append(indent).Append("    foreach (var ").Append(pendingLocal)
-                .Append(" in Session.GetNewOutgoingEdges<").Append(markerFqn).AppendLine(">(this))")
-                .Append(indent).AppendLine("    {")
-                .Append(indent).Append("        if (").Append(pendingLocal).AppendLine(".Payload is null)")
-                .Append(indent).Append("            await Session.RelateAsync<").Append(markerFqn).Append(">(__id, ")
-                .Append(pendingLocal).Append(".Target, ").Append(pendingLocal).AppendLine(".Edge, ctx.Transaction, ct);")
-                .Append(indent).AppendLine("        else")
-                .Append(indent).Append("            await Session.RelateAsync<").Append(markerFqn).Append(">(__id, ")
-                .Append(pendingLocal).Append(".Target, ").Append(pendingLocal).Append(".Edge, ")
-                .Append(pendingLocal).AppendLine(".Payload, ctx.Transaction, ct);")
-                .Append(indent).AppendLine("    }");
-        }
+        // Relations are no longer dispatched from SaveAsync — sync Relate (and the
+        // snapshot-diff that drained it) was deleted in preview.45. Edge mutations now
+        // go through Session.RelateAsync<TKind> / UnrelateAsync<TKind> directly,
+        // dispatched against the user's transaction at the call site. SaveAsync is
+        // entity-only: scalar fields, owned [Reference, Inline] sidecars, [Children]
+        // recursion. Same shape the SurrealDB substrate would expect from any client
+        // that doesn't re-implement a write buffer in front of it.
 
         builder.Append(indent).AppendLine("}");
     }

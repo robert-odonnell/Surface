@@ -56,7 +56,7 @@ For that model, the generator contributes:
 - `Workspace.Query` — a typed query surface with predicate factories (`ConstraintQ.Description.Contains("…")`), traversal builders (`IncludeConstraints(c => c.Where(...))`), edge query roots (`Workspace.Query.Edges.Restricts.WhereIn(...)`), and five terminal verbs sharing one AST: `IdsAsync` (typed id list), `Select(projection).ExecuteAsync` (immutable projection rows), `ExecuteAsync` (hydrated entities), `LoadAsync` (write-mode aggregate session), and `Workspace.Hydrate.{Table}(ids)` for non-aggregate-shaped slices into a tracked session. Every terminal accepts either `Surreal db` (read) or `Transaction tx` (in-txn read with full visibility into pending writes).
 - `Workspace.Schema` and `Workspace.ApplySchemaAsync(db)` / `ApplySchemaAsync(tx)`.
 - `Workspace.ReferenceRegistry`, used by reference metadata at session construction time.
-- A `Restricts : IRelationKind` marker class per forward relation attribute, plus a per-entity `IEntity.SaveAsync` body that walks forward refs, dispatches the entity, walks new children, and dispatches new outgoing relations via a snapshot diff.
+- A `Restricts : IRelationKind` marker class per forward relation attribute, plus a per-entity `IEntity.SaveAsync` body that walks forward refs, dispatches the entity, and walks new children. Edges are dispatched at the call site through `Session.RelateAsync<TKind>` (not buffered).
 - Compile-time diagnostics for invalid model shapes.
 
 The generated code does not require your entities to inherit from a base class. It implements the required runtime interfaces in generated partial fragments and leaves your constructors, dependency injection, caching, and application wiring alone.

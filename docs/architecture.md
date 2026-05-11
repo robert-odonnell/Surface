@@ -214,12 +214,12 @@ Load{Root}Async(db | tx, id)
         +--> mark as loaded-at-start in the identity map
 ```
 
-Reads resolve directly off the entity's backing fields (`[Property]`, `[Reference]`, `[Parent]` — the latter two with a `Session.Get<T>(id)` fall-through when only the id is cached) or via the session for cross-entity navigation (`[Children]`, relations). Sync writes (property setters, `Track`, sync `Relate<TKind>` / `Unrelate<TKind>`) update backing fields and the session's edge index. `CommandLog` records `Track`, `Relate`, `Unrelate`, and `Delete` intents for diagnostics — property setters do **not** record. **No database call happens until you call an async dispatch method:**
+Reads resolve directly off the entity's backing fields (`[Property]`, `[Reference]`, `[Parent]` — the latter two with a `Session.Get<T>(id)` fall-through when only the id is cached) or via the session for cross-entity navigation (`[Children]`, relations). Sync writes are property setters and `Track`. The `CommandLog` records `Track`, `Relate`, `Unrelate`, and `Delete` intents for diagnostics — property setters do **not** record. **No database call happens until you call an async dispatch method:**
 
-- `session.SaveAsync(entity, tx, ct)` — per-entity Save. Auto-binds the entity, walks its forward dependencies (Reference / Parent) recursively, dispatches a whole-entity `CREATE/UPDATE record:id CONTENT { ... }`, walks new children recursively, and dispatches new outgoing relations via the snapshot diff (`GetNewOutgoingEdges<TKind>`).
+- `session.SaveAsync(entity, tx, ct)` — per-entity Save. Auto-binds the entity, walks its forward dependencies (Reference / Parent) recursively, dispatches a whole-entity `CREATE/UPDATE record:id CONTENT { ... }`, then walks new children recursively. Edges are not in SaveAsync's scope — they're dispatched directly via RelateAsync.
 - `session.DeleteAsync(entity, tx, ct)` — runs `OnDeleting`, dispatches a single `DELETE`, removes from the in-memory snapshot.
-- `session.RelateAsync<TKind>(src, tgt, tx, ct)` — async direct edge creation.
-- `session.UnrelateAsync<TKind>(src?, tgt?, tx, ct)` — async direct edge deletion.
+- `session.RelateAsync<TKind>(src, tgt, tx, ct)` — direct edge creation; the only write path for relations. Optional overloads accept an explicit edge id (`RecordId`) and/or a payload (`IReadOnlyDictionary<string, object?>` for `RELATE … CONTENT { … }`).
+- `session.UnrelateAsync<TKind>(src?, tgt?, tx, ct)` — direct edge deletion (one or both endpoints, the bulk forms hit every matching edge).
 
 A session is reusable: the snapshot stays valid after a SaveAsync and you can keep reading or dispatch more writes (against the same or a different transaction). The transaction lifecycle is the app's responsibility — open with `db.BeginTransactionAsync()`, commit with `tx.CommitAsync()`, or cancel with `tx.CancelAsync()` (auto-cancels on `await using` dispose).
 

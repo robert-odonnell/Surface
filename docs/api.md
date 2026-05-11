@@ -61,13 +61,10 @@ Generated property behavior:
 Each generated entity also has a protected `Session` property. Use it from your own partial members to write small domain verbs:
 
 ```csharp
-// Sync, in-memory passthrough — the new edge buffers into the session's snapshot
-// and dispatches as part of the next SaveAsync via the snapshot diff.
-public void Restricts(UserStory story) => Session.Relate<Restricts>(this, story);
-
-// Or async direct dispatch when the caller has a Transaction handy:
-public Task RestrictsAsync(UserStory story, Transaction tx)
-    => Session.RelateAsync<Restricts>(this, story, tx);
+// Domain verb dispatched against the user's open Transaction. The RELATE lands
+// immediately — there is no buffered intent for SaveAsync to drain.
+public Task RestrictsAsync(UserStory story, SurrealTransaction tx, CancellationToken ct = default)
+    => Session.RelateAsync<Restricts>(this, story, tx, ct);
 ```
 
 Optional hooks:
@@ -542,19 +539,14 @@ public sealed class Restricts : IRelationKind
 }
 ```
 
-Runtime calls — sync (in-memory snapshot, dispatched by next `SaveAsync`) and async (direct dispatch through `Transaction`) variants:
+Runtime calls — every edge mutation goes through async dispatch against the user's `SurrealTransaction`. Reads stay sync against the in-memory edge index that the loader populates and `RelateAsync` keeps current.
 
 ```csharp
-// Sync, in-memory. The new edge buffers into the session's snapshot; the next
-// SaveAsync(source) dispatches it via GetNewOutgoingEdges<TKind>.
-session.Relate<Restricts>(source, target);
-session.Unrelate<Restricts>(source, target);
-session.Unrelate<Restricts>(source, target: null);  // bulk: every outgoing edge from source
-session.Unrelate<Restricts>(source: null, target);  // bulk: every incoming edge into target
-
-// Async, direct dispatch into the open Transaction.
+// Mutations — each call dispatches RELATE / DELETE-edge inside the transaction.
 await session.RelateAsync<Restricts>(source, target, tx);
 await session.UnrelateAsync<Restricts>(source, target, tx);
+await session.UnrelateAsync<Restricts>(source, target: null, tx);  // bulk: every outgoing edge from source
+await session.UnrelateAsync<Restricts>(source: null, target, tx);  // bulk: every incoming edge into target
 
 // Reads (sync, against the in-memory snapshot).
 session.QueryOutgoing<Restricts, UserStory>(constraint);
@@ -595,27 +587,27 @@ DEFINE FIELD IF NOT EXISTS line ON uses TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS run_id ON uses TYPE string DEFAULT "";
 ```
 
-Every relation table gets a `DEFINE INDEX … UNIQUE` on `(in, out)` — duplicate edges between the same pair are rejected at the schema layer. That's the sole uniqueness guard: a duplicate `RELATE` errors against the index, so idempotent re-imports require either pre-loading the aggregate (the snapshot diff in `SaveAsync` skips edges that already exist) or using the default `RecordId.Idempotent` edge id strategy (deterministic hash of the linkage triple — same triple lands on the same edge row).
+Every relation table gets a `DEFINE INDEX … UNIQUE` on `(in, out)` — duplicate edges between the same pair are rejected at the schema layer. That's the sole uniqueness guard: a duplicate `RELATE` errors against the index. For idempotent re-imports, use the default `RecordId.Idempotent` edge id strategy (deterministic hash of the linkage triple — same triple lands on the same edge row, so re-running `RelateAsync` is a no-op against the unique index).
 
 The payload class is a plain POCO — no `[Property]` annotations needed; public scalar properties (`string`, `int`/`long`, `bool`, `float`/`double`/`decimal`, `DateTime`/`DateTimeOffset`, `Guid`, `Ulid`) are picked up automatically. Anything else is silently skipped. Static, indexer, write-only, and inherited-already-seen properties are not emitted as fields.
 
-At write time, pass payload data through the dictionary overload of `Relate`. The edge id strategy is carried by an optional `RecordId edge` parameter; when omitted it defaults to `RecordId.Idempotent(TKind.EdgeName)`:
+At write time, pass payload data through the dictionary overload of `RelateAsync`. The edge id strategy is carried by an optional `RecordId edge` parameter; when omitted it defaults to `RecordId.Idempotent(TKind.EdgeName)`:
 
 ```csharp
 // Idempotent (default) — hash from (source, table, target)
-session.Relate<Uses>(source, target, new Dictionary<string, object?>
+await session.RelateAsync<Uses>(source, target, new Dictionary<string, object?>
 {
     ["kind"]      = "call",
     ["file_path"] = "src/Foo.cs",
     ["line"]      = 42,
     ["run_id"]    = currentRunId,
-});
+}, tx);
 
 // Random Ulid — caller mints the edge id up front
-session.Relate<Uses>(source, target, RecordId.New(Uses.EdgeName), payload);
+await session.RelateAsync<Uses>(source, target, RecordId.New(Uses.EdgeName), payload, tx);
 
 // Slug — caller picks a stable name for the edge row
-session.Relate<Uses>(source, target, new RecordId(Uses.EdgeName, "primary_call"), payload);
+await session.RelateAsync<Uses>(source, target, new RecordId(Uses.EdgeName, "primary_call"), payload, tx);
 ```
 
 Field names in the dictionary use the snake-cased SurrealDB form (matching what the schema declared), not the C# property name. The bare `ForwardRelation` (no `<TPayload>`) keeps the pre-feature schema unchanged — no extra fields emitted on the relation table.
@@ -668,7 +660,6 @@ Read methods (sync):
 | `QueryIncoming<TKind, T>(owner)` | Read same-aggregate incoming relation sources. |
 | `QueryRelatedIds<TKind>(owner)` | Read cross-aggregate outgoing ids. |
 | `QueryInverseRelatedIds<TKind>(owner)` | Read cross-aggregate incoming ids. |
-| `GetNewOutgoingEdges<TKind>(owner)` | Snapshot diff: edges added since load. Used by emitted `IEntity.SaveAsync`. |
 | `IsTracked(IRecordId id)` | True iff currently in the identity map. |
 | `IsSliceLoaded(IRecordId owner, string field)` | True iff the slice was hydrated (or the entity was freshly Tracked, which marks every slice). |
 
@@ -678,18 +669,15 @@ Sync write methods (mutate the in-memory snapshot, append to `CommandLog`):
 | --- | --- |
 | `Track<T>(T entity)` | Bind a fresh entity to the session, run `Initialize` (idempotent mandatory-ref seeding via `OnCreate*` hooks), mark every slice loaded. |
 | `AdoptIfUnbound(IEntity child)` | Cascade-track called from emitted `[Parent]` setters: pulls an unbound child into this session via `Track`. No-op when the child is already bound. |
-| `Relate(source, target, edge)` / `Relate<TKind>(source, target)` | Buffer an edge in the snapshot. The next `SaveAsync(source)` dispatches it via the snapshot diff. The typed-kind shorthand defaults to the **Idempotent** strategy — `RecordId.Idempotent(TKind.EdgeName)` resolves to a deterministic hash of `{source}\|{table}\|{target}` at emit time, so re-runs land on the same row. Pass an explicit edge to override (Random Ulid via `RecordId.New(...)`, slug via `new RecordId(...)`). |
-| `Relate<TKind>(source, target, payload)` | Same as above with a typed edge payload — renders as `RELATE source->edge:<id>->target CONTENT { … }`. |
-| `Unrelate<TKind>(source?, target?)` | Buffer an edge deletion. At least one endpoint non-null; one-side-null is bulk delete. |
 
 Async dispatch methods (talk to SurrealDB through an app-owned `Transaction`):
 
 | Method | Purpose |
 | --- | --- |
-| `SaveAsync(IEntity entity, Transaction tx, ct)` | Per-entity Save. Auto-binds the entity, walks forward dependencies (Reference / Parent), dispatches a whole-entity `CREATE/UPDATE record:id CONTENT { ... }`, walks new children, dispatches new outgoing relations via the snapshot diff. The user picks what to save; the library does no change tracking. |
+| `SaveAsync(IEntity entity, Transaction tx, ct)` | Per-entity Save. Auto-binds the entity, walks forward dependencies (Reference / Parent), dispatches a whole-entity `CREATE/UPDATE record:id CONTENT { ... }`, walks new children. **Edges are not in scope** — dispatch them with `RelateAsync` against the same `tx`. The user picks what to save; the library does no change tracking. |
 | `DeleteAsync(IEntity entity, Transaction tx, ct)` | Run `OnDeleting`, dispatch a single `DELETE`, remove from the in-memory snapshot. |
-| `RelateAsync<TKind>(source, target, tx, ct)` | Direct `RELATE` dispatch (in addition to updating the in-memory edge index). |
-| `UnrelateAsync<TKind>(source?, target?, tx, ct)` | Direct `DELETE`-edge dispatch. |
+| `RelateAsync<TKind>(source, target, tx, ct)` | Direct `RELATE` dispatch (also updates the in-memory edge index so subsequent `QueryOutgoing` / `QueryIncoming` reads see the new edge). Edge id defaults to `RecordId.Idempotent(TKind.EdgeName)`; overloads accept an explicit `RecordId edge` and/or a payload `IReadOnlyDictionary<string, object?>` for `RELATE … CONTENT { … }`. |
+| `UnrelateAsync<TKind>(source?, target?, tx, ct)` | Direct `DELETE`-edge dispatch. At least one endpoint non-null; one-side-null is the bulk form (every matching edge of the kind, persisted-or-not). |
 | `FetchAsync<T>(Query<T> query, db | tx, ct)` | Top-up extension query — partial-merge hydrate into the existing session, mark Included slices loaded. Pending writes always win. |
 
 Lifecycle:
