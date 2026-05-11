@@ -33,10 +33,12 @@ public readonly struct EquatableArray<T> : IEquatable<EquatableArray<T>>, IReadO
         }
 
         for (var i = 0; i < a.Length; i++)
+        {
             if (!EqualityComparer<T>.Default.Equals(a[i], b[i]))
             {
                 return false;
             }
+        }
 
         return true;
     }

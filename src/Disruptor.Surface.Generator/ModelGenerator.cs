@@ -34,6 +34,17 @@ public sealed class ModelGenerator : IIncrementalGenerator
         var forwardKinds = allRelationKinds.Where(static k => k.Direction == RelationDirection.Forward);
         var inverseKinds = allRelationKinds.Where(static k => k.Direction == RelationDirection.Inverse);
 
+        // Relation variants — classes carrying a [Restricts] / [RestrictedBy] (etc.) attribute,
+        // each declaring [In] / [Out] endpoints and optional [Property] payload fields. The
+        // same attribute classes appear elsewhere as property-on-entity annotations (handled
+        // by TableExtractor); here we pick up only the on-class usage.
+        var relationVariants = context.SyntaxProvider
+            .CreateSyntaxProvider(
+                predicate: RelationVariantExtractor.IsClassWithAttributeList,
+                transform: static (ctx, ct) => RelationVariantExtractor.TryExtract(ctx, ct))
+            .Where(static v => v is not null)
+            .Select(static (v, _) => v!);
+
         var compositionRoots = context.SyntaxProvider
             .ForAttributeWithMetadataName(
                 AnnotationsMetadata.CompositionRoot,
@@ -46,9 +57,11 @@ public sealed class ModelGenerator : IIncrementalGenerator
             .Combine(forwardKinds.Collect())
             .Combine(inverseKinds.Collect())
             .Combine(compositionRoots.Collect())
+            .Combine(relationVariants.Collect())
             .Select(static (combined, _) =>
                 RelationLinker.Build(
-                    combined.Left.Left.Left,
+                    combined.Left.Left.Left.Left,
+                    combined.Left.Left.Left.Right,
                     combined.Left.Left.Right,
                     combined.Left.Right,
                     combined.Right));
@@ -173,14 +186,6 @@ public sealed class ModelGenerator : IIncrementalGenerator
             CompositionRootEmitter.Emit(spc, graph);
         }
         RelationKindEmitter.Emit(spc, graph);
-
-        // Edge-payload predicate factories — one per forward kind that carries a typed
-        // payload via ForwardRelation<TPayload>. Bare ForwardRelation kinds (no payload)
-        // produce no factory; emitter short-circuits internally.
-        foreach (var kind in graph.RelationKinds)
-        {
-            EdgePredicateFactoryEmitter.Emit(spc, kind);
-        }
 
         // CG020 — every member of an aggregate must be reachable from the root via
         // [Parent] links so the loader's dotted-path WHERE clauses can scope each row
@@ -476,6 +481,11 @@ public sealed class ModelGenerator : IIncrementalGenerator
 
             PartialEmitter.Emit(spc, table, graph);
         }
+
+        // Per-variant relation classes — emits IEntity scaffolding, [In]/[Out]/[Property]
+        // backing fields, Hydrate / SaveAsync. Per-kind sidecars (variant marker interface,
+        // hydration dispatcher) emit alongside.
+        RelationVariantEmitter.Emit(spc, graph);
     }
 
     private static TypeRef UnwrapTask(TypeRef t) => t.FullyQualifiedName.StartsWith("global::System.Threading.Tasks.Task<") && t.TypeArguments.Count > 0

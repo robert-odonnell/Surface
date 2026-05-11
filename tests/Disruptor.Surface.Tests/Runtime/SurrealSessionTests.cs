@@ -1,4 +1,6 @@
+using Disruptor.Surface.Annotations;
 using Disruptor.Surface.Runtime;
+using Disruptor.Surreal.Values;
 using Xunit;
 
 namespace Disruptor.Surface.Tests.Runtime;
@@ -70,8 +72,8 @@ public sealed class SurrealSessionTests
         var id = new RecordId("t", "1");
 
         Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(id)));
-        // Relate/Unrelate now require a SurrealTransaction so the closed-check is
-        // exercised by the dispatch path (RelateAsyncCore / UnrelateAsync) — no
+        // Edge mutations now require a SurrealTransaction so the closed-check is
+        // exercised by the dispatch path (variant SaveAsync / UnrelateAsync) — no
         // sync overload to test from this angle anymore.
     }
 
@@ -225,10 +227,9 @@ public sealed class SurrealSessionTests
     }
 
     // Sync Relate / typed-kind Relate behaviour tests (TypedRelate_*, Relate_With*) were
-    // removed in preview.45 along with the sync surface itself. Edge-id strategy and
-    // payload preservation are now exercised through RelateAsync's dispatch path; a fake
-    // SurrealTransaction would be needed to assert at the unit level (deferred — same
-    // fixture gap as the Finding 1 error-path tests).
+    // removed in preview.45 along with the sync surface itself. Edge dispatch is now
+    // exercised end-to-end through variant SaveAsync — see EmissionShapeTests.Variant_*
+    // for the SQL-shape assertions on the emitted dispatch path.
 
     [Fact]
     public void QueryOutgoing_Returns_Targets_OnlyWhenOwnerIsSource()
@@ -339,8 +340,8 @@ public sealed class SurrealSessionTests
 
     // GetNewOutgoingEdges_* tests added in preview.44 went away with the snapshot-diff
     // chain itself. The buffer they exercised (state.Edges as write store, PendingEdge
-    // as the dispatch payload) no longer exists — RelateAsync ships each edge straight
-    // through the user's transaction, so the post-load diff has nothing to compute.
+    // as the dispatch payload) no longer exists — variant SaveAsync ships each edge
+    // straight through the user's transaction, so the post-load diff has nothing to compute.
 
     [Fact]
     public void Track_CrossSession_Throws_AndDoesNotPolluteIdentityMap()
@@ -363,67 +364,15 @@ public sealed class SurrealSessionTests
         Assert.Null(sessionB.Get<StubEntity>(entity.Id));
 
         // The entity is still bound to sessionA.
-        Assert.Same(sessionA, ((IEntity)entity).Session);
+        Assert.Same(sessionA, entity.Session);
     }
 
-    [Fact]
-    public async Task RelateAsyncReplace_PayloadFields_DispatchInsertRelationWithUpsertSetClause()
-    {
-        // Generator-emitted typed RelateAsync extension goes through this helper. Asserts
-        // the SQL shape: INSERT RELATION INTO {edge} $_content ON DUPLICATE KEY UPDATE …
-        // with one SET assignment per payload key bound to $_p_{key}. That binding shape
-        // is what makes re-call replace every payload field.
-        var session = new SurrealSession();
-        var src = new RecordId("findings", "f");
-        var tgt = new RecordId("issues", "i");
-        var payload = new global::Disruptor.Surreal.Values.SurrealObject
-        {
-            ["confidence"] = 0.92,
-            ["method"] = "static-analysis",
-        };
-
-        var (db, conn) = FakeSurreal.NullWithRecording();
-        await using var tx = await db.BeginTransactionAsync();
-        await session.RelateAsyncReplace<StubKind>(src, tgt, explicitEdge: null, payload, tx);
-
-        var query = conn.Sent.Single(s => s.Method == "query");
-        var sql = ExtractQuerySql(query.Params);
-
-        Assert.Contains("INSERT RELATION INTO stub_edge $_content", sql);
-        Assert.Contains("ON DUPLICATE KEY UPDATE", sql);
-        Assert.Contains("confidence = $_p_confidence", sql);
-        Assert.Contains("method = $_p_method", sql);
-        Assert.DoesNotContain("INSERT RELATION IGNORE", sql);
-    }
-
-    [Fact]
-    public async Task RelateAsyncReplace_EmptyPayload_FallsBackToInsertRelationIgnore()
-    {
-        // No payload fields means there's nothing to UPDATE on duplicate; the helper
-        // collapses to the IGNORE form (idempotent no-op on duplicate id / unique-index
-        // violation), matching the no-payload RelateAsync<TKind> overload.
-        var session = new SurrealSession();
-        var src = new RecordId("a", "1");
-        var tgt = new RecordId("b", "1");
-
-        var (db, conn) = FakeSurreal.NullWithRecording();
-        await using var tx = await db.BeginTransactionAsync();
-        await session.RelateAsyncReplace<StubKind>(src, tgt, explicitEdge: null, new global::Disruptor.Surreal.Values.SurrealObject(), tx);
-
-        var query = conn.Sent.Single(s => s.Method == "query");
-        var sql = ExtractQuerySql(query.Params);
-
-        Assert.Contains("INSERT RELATION IGNORE INTO stub_edge", sql);
-        Assert.DoesNotContain("ON DUPLICATE KEY UPDATE", sql);
-    }
-
-    private static string ExtractQuerySql(global::Disruptor.Surreal.Values.SurrealValue? @params)
-    {
-        // QueryCommand serialises params as SurrealListValue([sql_string, $vars_object]).
-        var list = Assert.IsType<global::Disruptor.Surreal.Values.SurrealListValue>(@params);
-        var sqlValue = Assert.IsType<global::Disruptor.Surreal.Values.StringSurrealValue>(list.List[0]);
-        return sqlValue.Value;
-    }
+    // RelateAsyncReplace_* tests removed in preview.51 phase 6a — the helper they
+    // exercised (Session.RelateAsyncReplace<TKind>) was the dispatch core for the
+    // typed RelateAsync extensions emitted alongside ForwardRelation<TPayload>; the
+    // payload story has moved to per-variant relation classes whose generated
+    // SaveAsync emits the same INSERT RELATION INTO ... ON DUPLICATE KEY UPDATE
+    // shape (covered by EmissionShapeTests.Variant_SaveAsync_*).
 
     [Fact]
     public async Task SaveAsync_CrossSession_Throws_BeforeAnyWireDispatch()
@@ -568,6 +517,393 @@ public sealed class SurrealSessionTests
         Assert.False(session.IsClosed);
     }
 
+    // ──────────────────────────── Phase 4: variant query terminals ─────────
+
+    [Fact]
+    public async Task QueryVariantsOutgoingAsync_DispatchesSelectFromEdgeWhereInEqualsSource()
+    {
+        // Option A wire shape: SELECT * FROM {edge} WHERE in = $_src; with the source id
+        // bound as a typed SurrealRecordIdValue. Edge name resolves via the variant's
+        // [StubKind] attribute → StubKind marker class → static EdgeName "stub_edge".
+        var session = new SurrealSession();
+        var (db, conn) = FakeSurreal.NullWithRecording();
+        await using var tx = await db.BeginTransactionAsync();
+        var src = new RecordId("constraints", "c");
+
+        await session.QueryVariantsOutgoingAsync<StubVariant>(src, tx);
+
+        var query = conn.Sent.Single(s => s.Method == "query");
+        var (sql, bindings) = ExtractQueryParts(query.Params);
+        Assert.Equal("SELECT * FROM stub_edge WHERE in = $_src;", sql);
+        var srcBinding = Assert.IsType<SurrealRecordIdValue>(bindings["_src"]);
+        Assert.Equal("constraints", srcBinding.SurrealRecordId.Table.Name);
+        Assert.Equal("c", ((SurrealStringRecordIdKey)srcBinding.SurrealRecordId.Key).Value);
+    }
+
+    [Fact]
+    public async Task QueryVariantsIncomingAsync_DispatchesSelectFromEdgeWhereOutEqualsTarget()
+    {
+        var session = new SurrealSession();
+        var (db, conn) = FakeSurreal.NullWithRecording();
+        await using var tx = await db.BeginTransactionAsync();
+        var tgt = new RecordId("epics", "e");
+
+        await session.QueryVariantsIncomingAsync<StubVariant>(tgt, tx);
+
+        var query = conn.Sent.Single(s => s.Method == "query");
+        var (sql, bindings) = ExtractQueryParts(query.Params);
+        Assert.Equal("SELECT * FROM stub_edge WHERE out = $_tgt;", sql);
+        var tgtBinding = Assert.IsType<SurrealRecordIdValue>(bindings["_tgt"]);
+        Assert.Equal("epics", tgtBinding.SurrealRecordId.Table.Name);
+        Assert.Equal("e", ((SurrealStringRecordIdKey)tgtBinding.SurrealRecordId.Key).Value);
+    }
+
+    [Fact]
+    public async Task QueryVariantsOutgoingAsync_HydratesEachRow_AsTVariant_AndPopulatesEdgeIndex()
+    {
+        // The full read path: substrate returns two edge rows; the helper hydrates each
+        // as a typed StubVariant (id/in/out backing fields populated) AND adds the edge
+        // tuple to state.Edges so subsequent sync reads off entity-side relation
+        // collections see the new edges. Only the helper does the sink.Edge call —
+        // variant Hydrate emits sink.Track(this) only (no edge mirroring).
+        var srcEntity = new StubEntity(new RecordId("constraints", "c"));
+        var src = srcEntity.Id;
+        var tgt1 = new RecordId("epics", "e1");
+        var tgt2 = new RecordId("epics", "e2");
+        var edgeId1 = new RecordId("stub_edge", "01h00000000000000000000000");
+        var edgeId2 = new RecordId("stub_edge", "01h00000000000000000000001");
+
+        var rows = new SurrealListValue(
+        [
+            BuildEdgeRow(edgeId1, src, tgt1),
+            BuildEdgeRow(edgeId2, src, tgt2),
+        ]);
+
+        var (db, conn) = FakeSurreal.NullWithRecording();
+        conn.Responder = (method, _, _) => method switch
+        {
+            "begin" => new SurrealUuidValue(Guid.NewGuid()),
+            "query" => WrapAsQueryResponse(rows),
+            _ => SurrealValue.None,
+        };
+
+        var session = new SurrealSession();
+        ((IHydrationSink)session).Track(srcEntity);
+        await using var tx = await db.BeginTransactionAsync();
+
+        var variants = await session.QueryVariantsOutgoingAsync<StubVariant>(src, tx);
+
+        Assert.Equal(2, variants.Count);
+        Assert.Equal(edgeId1, variants[0].Id);
+        Assert.Equal(src, variants[0].InId);
+        Assert.Equal(tgt1, variants[0].OutId);
+        Assert.Equal(edgeId2, variants[1].Id);
+        Assert.Equal(tgt2, variants[1].OutId);
+
+        // Variants are tracked in the session (sink.Track from the variant Hydrate body).
+        Assert.Same(variants[0], session.Get<StubVariant>(edgeId1));
+        Assert.Same(variants[1], session.Get<StubVariant>(edgeId2));
+
+        // The edge index was populated by HydrateOneVariant's sink.Edge call — sync
+        // reads off QueryRelatedIds<StubKind> on the source entity see both targets,
+        // which is the load-shape contract that gates entity-side relation collections.
+        var relatedIds = session.QueryRelatedIds<StubKind>(srcEntity);
+        Assert.Equal(2, relatedIds.Count);
+        Assert.Contains(relatedIds, id => RecordId.From(id) == tgt1);
+        Assert.Contains(relatedIds, id => RecordId.From(id) == tgt2);
+    }
+
+    [Fact]
+    public async Task QueryVariantsOutgoingAsync_OnClosedSession_Throws()
+    {
+        var session = new SurrealSession();
+        session.Abandon();
+        var db = FakeSurreal.Null();
+        await using var tx = await db.BeginTransactionAsync();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => session.QueryVariantsOutgoingAsync<StubVariant>(new RecordId("constraints", "c"), tx));
+    }
+
+    [Fact]
+    public async Task QueryVariantsAsync_RawSql_PassesThrough_AndHydratesAsTVariant()
+    {
+        // Option E escape hatch: caller-supplied SQL + bindings flow straight to the
+        // wire; the helper's only contribution is hydrating each returned row as a
+        // typed StubVariant and updating the in-session edge index.
+        var src = new RecordId("constraints", "c");
+        var tgt = new RecordId("epics", "e");
+        var edgeId = new RecordId("stub_edge", "01h00000000000000000000099");
+
+        var rows = new SurrealListValue([BuildEdgeRow(edgeId, src, tgt)]);
+
+        var (db, conn) = FakeSurreal.NullWithRecording();
+        conn.Responder = (method, _, _) => method switch
+        {
+            "begin" => new SurrealUuidValue(Guid.NewGuid()),
+            "query" => WrapAsQueryResponse(rows),
+            _ => SurrealValue.None,
+        };
+
+        var session = new SurrealSession();
+        await using var tx = await db.BeginTransactionAsync();
+
+        var customSql = "SELECT * FROM stub_edge WHERE in = $_src AND out = $_tgt;";
+        var customBindings = new SurrealObject
+        {
+            ["_src"] = new SurrealRecordIdValue(src.ToSdk()),
+            ["_tgt"] = new SurrealRecordIdValue(tgt.ToSdk()),
+        };
+
+        var variants = await session.QueryVariantsAsync<StubVariant>(customSql, customBindings, tx);
+
+        Assert.Single(variants);
+        Assert.Equal(edgeId, variants[0].Id);
+
+        var query = conn.Sent.Single(s => s.Method == "query");
+        var (sql, bindings) = ExtractQueryParts(query.Params);
+        Assert.Equal(customSql, sql);
+        Assert.True(bindings.ContainsKey("_src"));
+        Assert.True(bindings.ContainsKey("_tgt"));
+    }
+
+    [Fact]
+    public async Task QueryOutgoingAsync_KindAndTarget_DispatchesSelectValueOutTraversal()
+    {
+        // Option B wire shape: SELECT VALUE out.* FROM {edge} WHERE in = $_src AND
+        // out.tb = $_outTable. The "out.tb = ..." filter narrows the typed traversal
+        // to one target table (necessary when an edge can land on multiple kinds).
+        var session = new SurrealSession();
+        var (db, conn) = FakeSurreal.NullWithRecording();
+        await using var tx = await db.BeginTransactionAsync();
+        var src = new RecordId("constraints", "c");
+
+        await session.QueryOutgoingAsync<StubKind, StubTarget>(src, tx);
+
+        var query = conn.Sent.Single(s => s.Method == "query");
+        var (sql, _) = ExtractQueryParts(query.Params);
+        Assert.Equal("SELECT VALUE out.* FROM stub_edge WHERE in = $_src AND out.tb = $_outTable;", sql);
+    }
+
+    [Fact]
+    public async Task QueryOutgoingAsync_KindAndTarget_FiltersOutTbToSpecifiedTable()
+    {
+        // The $_outTable binding is the StubTarget's table name (read off a probe
+        // instance's Id.Table). Cached per TTarget type.
+        var session = new SurrealSession();
+        var (db, conn) = FakeSurreal.NullWithRecording();
+        await using var tx = await db.BeginTransactionAsync();
+        var src = new RecordId("constraints", "c");
+
+        await session.QueryOutgoingAsync<StubKind, StubTarget>(src, tx);
+
+        var query = conn.Sent.Single(s => s.Method == "query");
+        var (_, bindings) = ExtractQueryParts(query.Params);
+        var tableBinding = Assert.IsType<StringSurrealValue>(bindings["_outTable"]);
+        Assert.Equal("targets", tableBinding.Value);
+    }
+
+    [Fact]
+    public async Task QueryVariantsOutgoingAsync_PropagatesQueryFailure_AndClosesSession()
+    {
+        // Fail-closed contract — any wire failure marks the session done. Mirrors
+        // SaveAsync / DeleteAsync / UnrelateAsync semantics.
+        var session = new SurrealSession();
+        var db = FakeSurreal.Throwing(new IOException("boom"));
+        await using var tx = await db.BeginTransactionAsync();
+
+        var ex = await Assert.ThrowsAsync<IOException>(
+            () => session.QueryVariantsOutgoingAsync<StubVariant>(new RecordId("constraints", "c"), tx));
+        Assert.Equal("boom", ex.Message);
+        Assert.True(session.IsClosed);
+    }
+
+    [Fact]
+    public async Task QueryVariantsOutgoingAsync_IEntityOverload_DelegatesToIRecordIdCore()
+    {
+        // The IEntity-flavoured overloads collapse to the IRecordId core via .Id;
+        // wire shape and bindings should be identical.
+        var session = new SurrealSession();
+        var entity = new StubEntity(new RecordId("constraints", "c"));
+        ((IHydrationSink)session).Track(entity);
+
+        var (db, conn) = FakeSurreal.NullWithRecording();
+        await using var tx = await db.BeginTransactionAsync();
+
+        await session.QueryVariantsOutgoingAsync<StubVariant>(entity, tx);
+
+        var query = conn.Sent.Single(s => s.Method == "query");
+        var (sql, bindings) = ExtractQueryParts(query.Params);
+        Assert.Equal("SELECT * FROM stub_edge WHERE in = $_src;", sql);
+        var srcBinding = Assert.IsType<SurrealRecordIdValue>(bindings["_src"]);
+        Assert.Equal("constraints", srcBinding.SurrealRecordId.Table.Name);
+        Assert.Equal("c", ((SurrealStringRecordIdKey)srcBinding.SurrealRecordId.Key).Value);
+    }
+
+    // ──────────────────────────── Phase 5: variant Save / Delete edge-index ─
+
+    [Fact]
+    public async Task SaveAsync_VariantInstance_AddsEdgeToReadIndex()
+    {
+        // The phase-5 gap: variant SaveAsync dispatches INSERT RELATION INTO ... but
+        // doesn't itself touch state.Edges — the variant's emitted Hydrate intentionally
+        // calls sink.Track(this) only (no sink.Edge). Without the IRelationVariant
+        // branch in MarkSaved, the edge would only show up after a session reload.
+        // Asserts the sync read off QueryRelatedIds<StubKind> sees the new edge
+        // immediately.
+        var session = new SurrealSession();
+        var srcOwner = new StubEntity(new RecordId("constraints", "c"));
+        ((IHydrationSink)session).Track(srcOwner);
+
+        var tgtId = new RecordId("epics", "e");
+        var variant = new StubVariant();
+        variant.ConfigureForSave(
+            id: new RecordId("stub_edge", "01h00000000000000000000000"),
+            @in: srcOwner.Id,
+            @out: tgtId);
+
+        var db = FakeSurreal.Null();
+        await using var tx = await db.BeginTransactionAsync();
+        await session.SaveAsync(variant, tx);
+
+        var related = session.QueryRelatedIds<StubKind>(srcOwner);
+        Assert.Single(related);
+        Assert.Equal(tgtId, RecordId.From(related.Single()));
+    }
+
+    [Fact]
+    public async Task SaveAsync_VariantInstance_PutsVariantInIdentityMap()
+    {
+        // MarkSaved registers the variant in state.Entities the same way it does for
+        // table entities — Get<TVariant>(id) must return the same instance immediately
+        // after Save (no reload required). Belt-and-braces alongside the edge-index test.
+        var session = new SurrealSession();
+        var src = new RecordId("constraints", "c");
+        var tgt = new RecordId("epics", "e");
+        var variant = new StubVariant();
+        var variantId = new RecordId("stub_edge", "01h00000000000000000000001");
+        variant.ConfigureForSave(variantId, src, tgt);
+
+        var db = FakeSurreal.Null();
+        await using var tx = await db.BeginTransactionAsync();
+        await session.SaveAsync(variant, tx);
+
+        Assert.Same(variant, session.Get<StubVariant>(variantId));
+    }
+
+    [Fact]
+    public async Task SaveAsync_TwoSequentialCalls_PromoteSavedEntityToTrackedAcrossSaveContexts()
+    {
+        // Each top-level Session.SaveAsync(...) builds a fresh SaveContext with its own
+        // savedThisPass set. Without promoting MarkSaved'd entities into the session's
+        // loadedAtStart set, a second top-level SaveAsync — whose entity body's forward-dep
+        // walk reaches an entity that was already saved in the first call — would see
+        // IsTracked=false and re-dispatch CREATE, blowing up at the substrate with
+        // "record already exists". This test pins the post-MarkSaved promotion contract:
+        // the second SaveContext sees the previously-saved entity as IsTracked.
+        var session = new SurrealSession();
+        var aId = new RecordId("designs", "a");
+        var a = new StubSaveableEntity(aId);
+        var b = new StubTrackingObserver(new RecordId("designs", "b"), observedDep: aId);
+
+        var db = FakeSurreal.Null();
+        await using var tx = await db.BeginTransactionAsync();
+
+        await session.SaveAsync(a, tx);   // first SaveContext — A.MarkSaved promotes A into loadedAtStart
+        await session.SaveAsync(b, tx);   // second SaveContext — B's IsTracked(aId) check happens here
+
+        Assert.Single(b.CapturedIsTracked);
+        Assert.True(b.CapturedIsTracked[0],
+            "Second SaveContext must report IsTracked=true for an entity saved in a prior pass; "
+            + "without the loadedAtStart promotion the variant-save forward-dep walk re-CREATEs already-persisted entities.");
+    }
+
+    [Fact]
+    public async Task SaveAsync_NonVariantEntity_DoesNotMutateEdgeIndex()
+    {
+        // Sanity check the IRelationVariant gate: ordinary entities going through
+        // MarkSaved must not call RecordVariantEdge. Uses StubSaveableEntity (a non-
+        // variant whose SaveAsync delegates to ctx.MarkSaved) so the branch is the only
+        // thing under test — no wire dispatch, no other state mutation.
+        var session = new SurrealSession();
+        var entity = new StubSaveableEntity(new RecordId("designs", "d"));
+
+        var db = FakeSurreal.Null();
+        await using var tx = await db.BeginTransactionAsync();
+        await session.SaveAsync(entity, tx);
+
+        // Edge index untouched (entity isn't a variant; EnumerateReferences returns
+        // the default empty enumeration).
+        Assert.Empty(session.QueryRelatedIds(entity, "stub_edge"));
+        // ...but the entity itself is in the identity map as expected.
+        Assert.Same(entity, session.Get<StubSaveableEntity>(entity.Id));
+    }
+
+    [Fact]
+    public async Task DeleteAsync_VariantInstance_RemovesEdgeFromReadIndex()
+    {
+        // The Gap-2 fix: deleting a variant must drop its (in, edge, out) tuple from
+        // state.Edges. Pre-flight: Track the variant and seed the edge via SaveAsync
+        // so the read index is populated; DeleteAsync should clear both the entity
+        // entry AND the specific edge tuple. The endpoint walk in CleanupLocalState
+        // doesn't fire for the variant id itself (it isn't an endpoint), so without
+        // the variant-specific drop the edge would survive in the snapshot.
+        var session = new SurrealSession();
+        var srcOwner = new StubEntity(new RecordId("constraints", "c"));
+        ((IHydrationSink)session).Track(srcOwner);
+
+        var tgtId = new RecordId("epics", "e");
+        var variantId = new RecordId("stub_edge", "01h00000000000000000000002");
+        var variant = new StubVariant();
+        variant.ConfigureForSave(variantId, srcOwner.Id, tgtId);
+
+        var db = FakeSurreal.Null();
+        await using var tx = await db.BeginTransactionAsync();
+        await session.SaveAsync(variant, tx);
+        Assert.Single(session.QueryRelatedIds<StubKind>(srcOwner)); // sanity: the seed worked
+
+        await session.DeleteAsync(variant, tx);
+
+        Assert.Empty(session.QueryRelatedIds<StubKind>(srcOwner));
+        Assert.Null(session.Get<StubVariant>(variantId));
+    }
+
+    // ──────────────────────────── Phase 4 helpers ────────────────────────────
+
+    private static (string Sql, SurrealObject Bindings) ExtractQueryParts(SurrealValue? @params)
+    {
+        // QueryCommand serialises params as SurrealListValue([sql_string, $vars_object]).
+        var list = Assert.IsType<SurrealListValue>(@params);
+        var sql = Assert.IsType<StringSurrealValue>(list.List[0]).Value;
+        var bindings = Assert.IsType<SurrealObjectValue>(list.List[1]).Object;
+        return (sql, bindings);
+    }
+
+    private static SurrealObjectValue BuildEdgeRow(RecordId id, RecordId @in, RecordId @out)
+        => new(new SurrealObject
+        {
+            ["id"] = new SurrealRecordIdValue(id.ToSdk()),
+            ["in"] = new SurrealRecordIdValue(@in.ToSdk()),
+            ["out"] = new SurrealRecordIdValue(@out.ToSdk()),
+        });
+
+    /// <summary>
+    /// Wraps <paramref name="rows"/> as a single-statement <c>query</c> response so
+    /// <see cref="global::Disruptor.Surreal.SurrealQueryResponse.FromValue"/> decodes it
+    /// to one OK statement whose <c>Result</c> is the row list. Mirrors the wire shape
+    /// the SDK's <c>FakeConnectionTests</c> use for the same purpose.
+    /// </summary>
+    private static SurrealValue WrapAsQueryResponse(SurrealValue rows)
+        => new SurrealListValue(
+        [
+            new SurrealObjectValue(new SurrealObject
+            {
+                ["status"] = "OK",
+                ["time"] = "1ms",
+                ["result"] = rows,
+            }),
+        ]);
+
     /// <summary>Test-only IReferenceRegistry. Lets each test declare its own (referencedTable → list of referencer fields) mapping without needing a full generated registry.</summary>
     private sealed class StubReferenceRegistry : IReferenceRegistry
     {
@@ -647,10 +983,200 @@ public sealed class SurrealSessionTests
         public void MarkAllSlicesLoaded(IHydrationSink sink) => Calls.Add("MarkAllSlicesLoaded");
     }
 
-    /// <summary>Test-only relation kind so the typed Relate&lt;TKind&gt; surface can be exercised without the generator.</summary>
-    private sealed class StubKind : IRelationKind
+}
+
+/// <summary>
+/// Test-only attribute mirroring what the generator emits per forward relation kind:
+/// the attribute and the marker class are siblings in the same namespace, suffix-stripped
+/// — <see cref="StubKindAttribute"/> pairs with the existing <c>StubKind</c> marker via
+/// the reflection lookup in <c>SurrealSession.ResolveVariantEdgeName</c>. Top-level (not
+/// nested) so <c>Type.Assembly.GetType(StubKind FQN)</c> resolves cleanly without the
+/// nested-type <c>+</c> separator.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class StubKindAttribute : ForwardRelation { }
+
+/// <summary>
+/// Sibling marker for <see cref="StubKindAttribute"/>. The lookup target the
+/// variant-edge-name reflection resolves to after stripping the <c>Attribute</c> suffix
+/// off <see cref="StubKindAttribute"/>; also the generic argument for the
+/// <c>UnrelateAsync</c> / <c>QueryRelatedIds</c> family in tests.
+/// </summary>
+public sealed class StubKind : IRelationKind
+{
+    public static string EdgeName => "stub_edge";
+}
+
+/// <summary>
+/// Test-only relation variant — minimal IEntity matching the production variant
+/// emitter shape: Hydrate parses <c>id</c> / <c>in</c> / <c>out</c> from the row,
+/// stores them in backing fields, and calls <c>sink.Track(this)</c> (mirroring
+/// <see cref="Disruptor.Surface.Generator.Emit.RelationVariantEmitter"/>'s emitted
+/// body, which does NOT call <c>sink.Edge</c> — that's the helper's job).
+/// Decorated with <see cref="StubKindAttribute"/> so the reflection-based edge-name
+/// lookup resolves to <c>"stub_edge"</c>.
+/// <para>
+/// Implements <see cref="IRelationVariant"/> so <c>SurrealSession.MarkSaved</c> /
+/// <c>CleanupLocalState</c> branch into the variant edge-index path; exposes
+/// <see cref="IEntity.EnumerateReferences"/> the same shape the generator emits
+/// (<c>("in", inId)</c> / <c>("out", outId)</c>) and a SaveAsync that calls
+/// <c>ctx.MarkSaved(this)</c> without going through the wire so phase-5 tests can
+/// exercise the post-dispatch session-state mutation in isolation.
+/// </para>
+/// </summary>
+[StubKind]
+public sealed class StubVariant : IEntity, IRelationVariant
+{
+    private RecordId _id;
+    private RecordId? _inId;
+    private RecordId? _outId;
+
+    public RecordId Id => _id;
+    public SurrealSession? Session { get; private set; }
+    public RecordId? InId => _inId;
+    public RecordId? OutId => _outId;
+
+    public void Bind(SurrealSession session) => Session = session;
+    public void Initialize(SurrealSession session) { }
+    public void OnDeleting() { }
+    public void MarkAllSlicesLoaded(IHydrationSink sink) { }
+
+    /// <summary>
+    /// Programmatic seed of id + endpoints — the parameterless ctor stays for the
+    /// <c>where TVariant : new()</c> constraint on <c>QueryVariantsAsync*</c>; tests
+    /// that need to dispatch a Save against a configured variant call this first to
+    /// stand in for the loader-driven Hydrate path.
+    /// </summary>
+    public void ConfigureForSave(RecordId id, RecordId @in, RecordId @out)
     {
-        public static string EdgeName => "stub_edge";
+        _id = id;
+        _inId = @in;
+        _outId = @out;
     }
 
+    void IEntity.Hydrate(SurrealValue row, IHydrationSink sink)
+    {
+        if (row is not SurrealObjectValue obj)
+        {
+            return;
+        }
+
+        if (HydrationValue.TryReadRecordId(obj, "id", out var id))
+        {
+            _id = id;
+        }
+        _inId = HydrationValue.TryReadReferenceId(obj, "in");
+        _outId = HydrationValue.TryReadReferenceId(obj, "out");
+        sink.Track(this);
+    }
+
+    /// <summary>Mirrors the generator-emitted <c>EnumerateReferences</c>: yields exactly two entries, <c>("in", inId)</c> and <c>("out", outId)</c>.</summary>
+    IEnumerable<(string FieldName, RecordId? Target)> IEntity.EnumerateReferences()
+    {
+        yield return ("in", _inId);
+        yield return ("out", _outId);
+    }
+
+    /// <summary>
+    /// Stand-in for the generator-emitted variant SaveAsync body. Skips the wire
+    /// dispatch (the actual <c>INSERT RELATION INTO ... ON DUPLICATE KEY UPDATE</c>
+    /// is exercised separately at the emission-shape level) and goes straight to
+    /// <see cref="ISaveContext.MarkSaved"/> so the session's edge-index branch is
+    /// the single thing under test.
+    /// </summary>
+    Task IEntity.SaveAsync(ISaveContext ctx, CancellationToken ct)
+    {
+        ctx.MarkSaved(this);
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Test-only non-variant entity that implements <see cref="IEntity.SaveAsync"/> as a
+/// straight pass-through to <see cref="ISaveContext.MarkSaved"/>. Used by the
+/// "MarkSaved branch doesn't fire for non-variant entities" sanity check — ordinary
+/// <see cref="SurrealSessionTests.StubEntity"/> can't play this role because it
+/// inherits the default <see cref="IEntity.SaveAsync"/> which throws.
+/// </summary>
+public sealed class StubSaveableEntity(RecordId id) : IEntity
+{
+    public RecordId Id { get; } = id;
+    public SurrealSession? Session { get; private set; }
+
+    public void Bind(SurrealSession session) => Session = session;
+    public void Initialize(SurrealSession session) { }
+    public void OnDeleting() { }
+    public void MarkAllSlicesLoaded(IHydrationSink sink) { }
+
+    Task IEntity.SaveAsync(ISaveContext ctx, CancellationToken ct)
+    {
+        ctx.MarkSaved(this);
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Test-only entity whose SaveAsync captures <c>ctx.IsTracked(observedDep)</c> into a
+/// public list before calling <c>ctx.MarkSaved(this)</c>. Lets a test assert what the
+/// SaveContext reports about a specified id at SaveAsync time — the moment a real
+/// entity body would decide CREATE vs UPDATE or skip a forward-dep walk.
+/// </summary>
+public sealed class StubTrackingObserver(RecordId id, RecordId observedDep) : IEntity
+{
+    public RecordId Id { get; } = id;
+    public RecordId ObservedDep { get; } = observedDep;
+    public SurrealSession? Session { get; private set; }
+    public List<bool> CapturedIsTracked { get; } = [];
+
+    public void Bind(SurrealSession session) => Session = session;
+    public void Initialize(SurrealSession session) { }
+    public void OnDeleting() { }
+    public void MarkAllSlicesLoaded(IHydrationSink sink) { }
+
+    Task IEntity.SaveAsync(ISaveContext ctx, CancellationToken ct)
+    {
+        CapturedIsTracked.Add(ctx.IsTracked(ObservedDep));
+        ctx.MarkSaved(this);
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Test-only target entity for option-B traversal hydration. Matches the production
+/// entity emitter shape — <c>Id</c> defaults to a stable per-instance ULID so
+/// <c>ResolveTargetTable</c>'s instantiation-probe yields a concrete table name
+/// ("targets"). Real generated entities pre-bake their table via the <c>{Name}Id</c>
+/// struct's <c>Table</c> property, but at the IEntity level we only need a non-empty
+/// id at probe time.
+/// </summary>
+public sealed class StubTarget : IEntity
+{
+    private RecordId _id = new("targets", Ulid.NewUlid().ToString());
+
+    public RecordId Id => _id;
+    public SurrealSession? Session { get; private set; }
+    public string Name { get; private set; } = "";
+
+    public void Bind(SurrealSession session) => Session = session;
+    public void Initialize(SurrealSession session) { }
+    public void OnDeleting() { }
+    public void MarkAllSlicesLoaded(IHydrationSink sink) { }
+
+    void IEntity.Hydrate(SurrealValue row, IHydrationSink sink)
+    {
+        if (row is not SurrealObjectValue obj)
+        {
+            return;
+        }
+
+        if (HydrationValue.TryReadRecordId(obj, "id", out var id))
+        {
+            _id = id;
+        }
+        Name = HydrationValue.ReadString(obj, "name");
+        // Mirrors generator-emitted shape: entity Hydrate calls sink.Track(this).
+        // Option-B traversal routes through a NullHydrationSink so this becomes a
+        // no-op; exercised explicitly by the "does not auto-track" test.
+        sink.Track(this);
+    }
 }

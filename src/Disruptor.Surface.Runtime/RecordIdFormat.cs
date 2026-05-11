@@ -81,7 +81,7 @@ public static class RecordIdFormat
     {
         ArgumentNullException.ThrowIfNull(text);
 
-        if (prefix is { } p && (p < 'a' || p > 'z'))
+        if (prefix is { } p && p is < 'a' or > 'z')
         {
             throw new ArgumentException(
                 $"Prefix '{p}' must be a single ASCII lowercase letter [a-z], or null for the bare hex form.",

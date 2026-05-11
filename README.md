@@ -50,7 +50,7 @@ The generator emits everything needed to make this work end-to-end:
 - A unified query surface with terminal verbs sharing one AST — `…IdsAsync(db|tx)` for id-only selection (`IReadOnlyList<{Table}Id>`), `…Select(projection).ExecuteAsync(db|tx)` for projection rows, `…ExecuteAsync(db|tx)` for hydrated entities, `…WithId(id).IncludeConstraints(c => c.Where(...)).LoadAsync(db|tx)` for filtered write-mode loads of an aggregate root, `Workspace.Hydrate.{Table}(ids).WithInclude(...).ExecuteAsync(db|tx)` to materialise a non-aggregate slice into a tracked session, and `Workspace.Query.Edges.Restricts.WhereIn(...).ExecuteAsync(db|tx)` for flat edge pairs. Strict-with-escape on filtered loads — unloaded slices throw `LoadShapeViolationException`, `session.FetchAsync(...)` extends the slice in place
 - A `SurrealSession` surface with sync reads (`design.Description`, `design.Constraints`) and sync mutations into the in-memory snapshot
 - Per-entity dispatch via `session.SaveAsync(entity, tx, ct)` — auto-recursive on the entity's reference graph (forward refs → entity → new children → new outgoing relations) as a whole-entity `CREATE/UPDATE … CONTENT { ... }`
-- A `Restricts : IRelationKind` marker class per forward relation attribute, so `session.RelateAsync<Restricts>(constraint, userStory, tx)` is type-checked at compile time
+- A `Restricts : IRelationKind` marker class per forward relation attribute, plus per-kind `RestrictsId` typed-id struct. Edges are written by `Save`-ing relation variant classes (`session.SaveAsync(new ConstraintRestrictsUserStory { Source = constraint, Target = userStory }, tx)`); each variant is itself an `IEntity` whose generated `SaveAsync` body dispatches `INSERT RELATION INTO {edge}` and updates the in-session edge index
 - Directional read primitives — within-aggregate (`Session.QueryOutgoing<TKind, T>(this)` / `Session.QueryIncoming<TKind, T>(this)`), cross-aggregate (`Session.QueryRelatedIds<TKind>(this)` / `Session.QueryInverseRelatedIds<TKind>(this)`)
 - `Workspace.Schema` (`IReadOnlyList<string>` of idempotent DDL chunks) plus `Workspace.ApplySchemaAsync(db)` / `ApplySchemaAsync(tx)` — model-scoped, no process globals
 - `Workspace.ReferenceRegistry` carrying the per-model `[Reference]` field metadata (delete behaviour) the runtime reads through
@@ -113,12 +113,13 @@ try
         Description = "no negatives",
         Details = new Details { Header = "rule" },
     });
-    constraint.Restricts(someUserStory); // user-defined one-liner: => Session.Relate<Restricts>(this, x)
 
-    // Auto-recursive: SaveAsync(design) walks forward refs (Details), tracked
-    // children (Constraints, Epics, …), and new outgoing relations (Restricts)
-    // — one call dispatches the whole subgraph.
+    // Auto-recursive: SaveAsync(design) walks forward refs (Details) and
+    // tracked children (Constraints, Epics, …) — one call dispatches the
+    // subgraph. Relation variants are entities too — Save them directly:
     await session.SaveAsync(design, tx);
+    await session.SaveAsync(
+        new ConstraintRestrictsUserStory { Source = constraint, Target = someUserStory }, tx);
     await tx.CommitAsync();
 }
 catch (SurrealConflictException)
@@ -133,7 +134,7 @@ catch (SurrealConflictException)
 src/
   Disruptor.Surface.Generator/   — Roslyn source generator (netstandard2.0, analyzer)
   Disruptor.Surface.Runtime/     — runtime core: SurrealSession, IEntity, IRelationKind,
-                                   RecordId, IReferenceRegistry,
+                                   IRelationVariant, RecordId, IReferenceRegistry,
                                    HydrationValue, ISaveContext, CommandLog. Two package
                                    deps: Disruptor.Surreal (the SurrealDB SDK — CBOR over
                                    WebSocket) and Ulid. No transport layer of its own.
@@ -202,22 +203,28 @@ Plus aggregate / relation marker attributes:
 - Forward / inverse relations are user-declared attribute pairs deriving from
   `ForwardRelation` / `InverseRelation<TForward>` (see `Disruptor.Surface.Sample.Relations`).
   The generator emits a sibling marker class without the `Attribute` suffix
-  (`Restricts : IRelationKind`) per forward kind. Within-aggregate relations expose
-  `IReadOnlyCollection<IEntity>` reads; cross-aggregate relations expose
-  `IReadOnlyCollection<IRecordId>`. Mutations go through `Session.RelateAsync<TKind>(src, tgt, tx)` —
-  edges dispatch immediately against the user's transaction; no snapshot diff, no
-  buffered intent. No auto-emitted `Add{X}` / `Remove{X}` / `Clear{X}` methods; write
-  a one-line `async` domain-verb passthrough if you want one.
-- For relations that carry edge data, derive from `ForwardRelation<TPayload>` —
-  the generator walks `TPayload`'s public scalar properties and emits a
-  `DEFINE FIELD` on the relation table for each. Same scalar mapping as `[Property]`
-  fields on entity tables; pass payload data through `session.RelateAsync<TKind>(src,
-  tgt, payload, tx)`. Every relation table also gets a
-  `DEFINE INDEX … COLUMNS in, out UNIQUE` so duplicate edges are rejected at the
-  schema layer.
+  (`Restricts : IRelationKind`) per forward kind, plus a per-kind `RestrictsId`
+  typed-id struct. Within-aggregate **entity-side** read collections expose
+  `IReadOnlyCollection<IEntity>`; cross-aggregate ones expose `IReadOnlyCollection<IRecordId>`.
+  No auto-emitted `Add{X}` / `Remove{X}` / `Clear{X}` methods; write a one-line
+  `async` domain-verb passthrough if you want one.
+- **Relation variants (preview.51)** are how edges are mutated. Annotate a class
+  with the relation kind (`[Restricts]`), name endpoints with `[In]` / `[Out]`
+  (entity for within-aggregate, typed id for foreign-aggregate), and zero-or-more
+  `[Property]` payload members. The variant **is** an `IEntity` — write an edge
+  with `await session.SaveAsync(new ConstraintRestrictsUserStory { Source = constraint, Target = userStory }, tx)`.
+  Multiple variants per kind (e.g. `EpicRestriction` + `FeatureRestriction` both `[Restricts]`)
+  give `SCHEMALESS` edge tables, discriminated at hydration via `(in.tb, out.tb)`;
+  single-variant kinds keep `SCHEMAFULL`. Every relation table gets a `DEFINE INDEX
+  … COLUMNS in, out UNIQUE`. The variant's emitted `SaveAsync` dispatches `INSERT
+  RELATION INTO {edge} $_content [ON DUPLICATE KEY UPDATE …]` so re-saving the same
+  `(in, out)` pair refreshes payload (or no-ops when payloadless). Edge deletion
+  remains `await session.UnrelateAsync<TKind>(src?, tgt?, tx)` (bulk and pair-wise).
 - `[Reject]`, `[Unset]`, `[Cascade]`, `[Ignore]` on `[Reference]` properties are the
   delete-behavior intent declarations. SurrealDB's schema-level `REFERENCE ON DELETE`
-  emission honors them; the in-library cascade planner is currently parked (see Status).
+  emission honors them; `DeleteAsync` runs an in-library three-phase pre-flight
+  (`PlanDelete`) — Cascade + Unset to fixpoint, then steady-state Reject blockers throw
+  `CascadeRejectException` before any wire dispatch (preview.47).
 
 ## Key concepts
 
@@ -229,9 +236,9 @@ Plus aggregate / relation marker attributes:
   the generator grafts the per-aggregate `Load*Async` overloads onto. The class is
   yours — ctor, SDK connection, caches, telemetry. The library only adds load methods.
 - **`SurrealSession`.** A snapshot-isolated entity store. Reads are sync; sync writes
-  (`Track`, property setters, sync `Relate<TKind>`) mutate the in-memory snapshot;
-  nothing touches Surreal until you call an async dispatch method (`SaveAsync`,
-  `DeleteAsync`, `RelateAsync`, `UnrelateAsync`) against an app-owned `Transaction`.
+  (`Track`, property setters) mutate the in-memory snapshot; nothing touches Surreal
+  until you call an async dispatch method (`SaveAsync`, `DeleteAsync`, `UnrelateAsync`,
+  or one of the `Query*Async` traversal terminals) against an app-owned `Transaction`.
 - **App-owned `Transaction`.** The library never opens or commits transactions. The
   app calls `db.BeginTransactionAsync()` to get a `Disruptor.Surreal.SurrealTransaction`,
   passes the handle into Save/Delete/Relate/Unrelate (and into write-mode loads), and
@@ -242,10 +249,11 @@ Plus aggregate / relation marker attributes:
   `session.SaveAsync(entity, tx)` walks the entity's forward dependencies (`[Reference]`
   / `[Inline]` / `[Parent]`) first, then dispatches the entity itself as a single
   `CREATE/UPDATE record:id CONTENT { ... }` (whole-entity, no per-field SET), then
-  walks tracked children. Edges are not part of SaveAsync — they go through
-  `RelateAsync<TKind>` against the same transaction, dispatched at the call site so
-  there's no buffered intent for the library to drain. The user picks what to save;
-  the library does not do change tracking.
+  walks tracked children. **Relation variants are entities too** — pass a variant
+  instance (`new ConstraintRestrictsUserStory { Source = …, Target = … }`) to
+  `SaveAsync` and the variant's emitted body dispatches `INSERT RELATION INTO {edge}
+  $_content [ON DUPLICATE KEY UPDATE …]`. The user picks what to save; the library
+  does not do change tracking.
 - **Track lifecycle.** `session.Track(new T { … })` does `Bind` (wires the entity's
   `_session`) → `Initialize` (mandatory-ref seeding via `OnCreate{Name}` hooks; idempotent
   so a later `SaveAsync` auto-bind doesn't re-mint). Object-initializer writes land
@@ -254,12 +262,17 @@ Plus aggregate / relation marker attributes:
   `design`'s session and shows up in `design.Constraints` at Save time.
 - **Typed relation kinds + directional reads.** Every forward relation attribute
   (e.g. `RestrictsAttribute`) gets a sibling marker class (`Restricts : IRelationKind`)
-  emitted alongside it. `session.RelateAsync<Restricts>(constraint, userStory, tx)` is
-  the canonical typed mutation; `Session.QueryOutgoing<Restricts, T>(this)` /
-  `Session.QueryIncoming<Restricts, T>(this)` are the explicit-direction reads
-  (within-aggregate). Cross-aggregate uses the id-side variants. The marker carries
-  the SurrealDB edge name as a `static abstract` property — no string literals in
-  user code.
+  emitted alongside it, plus a per-kind `RestrictsId` typed-id struct. Edges are
+  written by `Save`-ing a relation variant — `await session.SaveAsync(new
+  ConstraintRestrictsUserStory { Source = …, Target = … }, tx)`. Sync entity-side
+  reads use `Session.QueryOutgoing<Restricts, T>(this)` / `Session.QueryIncoming<Restricts, T>(this)`
+  (within-aggregate) or the id-side variants (cross-aggregate). Async traversal
+  terminals — `Session.QueryVariantsOutgoingAsync<TVariant>(srcId, tx)` /
+  `QueryVariantsIncomingAsync<TVariant>` (returns hydrated variant entities) and
+  `Session.QueryOutgoingAsync<TKind, TTarget>` / `QueryIncomingAsync<TKind, TTarget>`
+  (skips variant materialisation, returns target entities directly) — round-trip
+  to the substrate. The marker carries the SurrealDB edge name as a `static abstract`
+  property — no string literals in user code.
 - **Owned-sidecar carve-out.** `[Inline]` paired with `[Reference]` marks a reference as
   owned/compositional — the loader inlines the target's payload via `field.*`. Plain
   `[Reference]` is a foreign pointer, hydrated as an id only. Keeps aggregate boundaries
@@ -268,9 +281,11 @@ Plus aggregate / relation marker attributes:
   partial owns the model metadata (`Workspace.Schema`, `Workspace.ReferenceRegistry`),
   and `Load*Async` constructs sessions with that registry. Multiple Disruptor.Surface-generated
   consumers can coexist in one process without trampling each other.
-- **Safe SQL formatting.** All record ids, identifiers, and string literals route through
-  `SurrealFormatter` — bare `table:value` when safe, Surreal's `table:⟨value⟩` escape
-  when not. Especially relevant if you set `[assembly: RecordIdValue<string>]`.
+- **Typed-CBOR end-to-end.** User values flow as typed `SurrealValue` bindings, not
+  formatted SurrealQL text — record ids, payloads, edge endpoints all travel as
+  `SurrealRecordIdValue` / `SurrealObjectValue`. Only identifiers (table / field / edge
+  names) get inlined into the SQL, validated through `SurrealFormatter.Identifier()`. No
+  string-escape rules to get wrong on the user's side.
 - **Native concurrency.** SurrealDB v3's transaction MVCC is the concurrency primitive;
   the library does not run a writer lease. Concurrent writers commit independently,
   collide at COMMIT, and surface as `Disruptor.Surreal.SurrealConflictException`. Catch,
@@ -304,10 +319,24 @@ within-aggregate + cross-aggregate), the unified query surface (predicates, trav
 edges, `IdsAsync`, `Select(projection)`, `Hydrate.{Table}(ids)`, `Fetch` strict-with-escape),
 native `SurrealConflictException` on concurrent commits.
 
-Currently parked: the in-library reference-delete cascade planner (`[Reject]` /
-`[Unset]` / `[Cascade]` semantics for `DeleteAsync`) was lost in preview.34's strip;
-to be re-anchored against the loaded snapshot. Until then, dependent cleanup is the
-caller's responsibility, or you rely on schema-level `REFERENCE ON DELETE` behaviour.
+Cascade re-anchored (preview.47): `DeleteAsync` runs three-phase pre-flight via
+`PlanDelete` — Cascade + Unset to fixpoint, then steady-state Reject blockers throw
+`CascadeRejectException` before any wire dispatch. Library predicts; substrate enforces
+via the schema's `REFERENCE ON DELETE` clauses.
+
+Relation-as-class redesign (preview.51 — landed): the `ForwardRelation<TPayload>`
+typed-payload pattern is gone, replaced by relation-variant classes — annotate a
+class with the relation kind (e.g. `[Restricts]` on `ConstraintRestrictsUserStory`),
+name endpoints with `[In]` / `[Out]` (entity for within-aggregate, typed id for
+foreign-aggregate), and zero-or-more `[Property]` payload members. The variant **is**
+an `IEntity` — write an edge with `await session.SaveAsync(new TVariant { Source = …,
+Target = … }, tx)`. Multi-variant kinds get `SCHEMALESS` edge tables (each
+variant's payload coexists, discriminated at hydration via `(in.tb, out.tb)`);
+single-variant kinds keep `SCHEMAFULL`. Async traversal terminals
+(`QueryVariantsOutgoingAsync<TVariant>`, `QueryOutgoingAsync<TKind, TTarget>`, etc.)
+round-trip to the substrate; sync entity-side `IReadOnlyCollection` reads still
+serve from the in-memory snapshot. `Session.RelateAsync` and `RelateAsyncReplace`
+were both deleted; `Session.UnrelateAsync<TKind>(src?, tgt?, tx)` survives.
 
 Not production-tested. The Disruptor.Surreal SDK (sibling project at
 `../surrealdb-dotnet`), the SurrealQL emission, and the per-entity Save dispatch are

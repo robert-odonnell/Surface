@@ -26,9 +26,10 @@ This is a user-facing API map for the generated surface and the runtime types mo
 | `[Unset]` | with nullable `[Reference]` | Schema-level: SurrealDB clears this reference when the target is deleted. |
 | `[Cascade]` | with `[Reference]` | Schema-level: SurrealDB deletes the referencing record when the target is deleted. |
 | `[Ignore]` | with `[Reference]` | Leaves the reference unchanged when the target is deleted. |
-| `ForwardRelation` | base class | Base for user-defined forward relation attributes (no edge payload). |
-| `ForwardRelation<TPayload>` | base class | Forward relation attribute with a typed edge payload. The generator emits a `DEFINE FIELD` on the relation table for each public scalar property of `TPayload`. |
-| `InverseRelation<TForward>` | base class | Base for user-defined inverse relation attributes. |
+| `ForwardRelation` | base class | Base for user-defined forward relation attributes. The user-declared attribute (e.g. `RestrictsAttribute`) targets either an entity property (typed read collection) or a relation variant class (preview.51). |
+| `InverseRelation<TForward>` | base class | Base for user-defined inverse relation attributes. Entity-property only. |
+| `[In]` | partial property on a relation variant class | Marks the source endpoint of the edge. Property type is the entity (within-aggregate) or the typed id (foreign-aggregate); the generator picks the read-side resolution based on which form was declared. |
+| `[Out]` | partial property on a relation variant class | Marks the target endpoint of the edge. Same type rules as `[In]`. |
 
 ## Generated Entity API
 
@@ -48,7 +49,7 @@ Generated property behavior:
 | Declaration | Generated behavior |
 | --- | --- |
 | `[Id] public partial DesignId Id { get; set; }` | Lazy typed id. Setter is allowed only before the entity is bound to a session. |
-| `[Property] public partial string Title { get; set; }` | Synchronous getter/setter. Setter mutates the in-memory snapshot and appends to `CommandLog`. |
+| `[Property] public partial string Title { get; set; }` | Synchronous getter/setter. Setter mutates the in-memory snapshot directly (pure backing-field write — no `CommandLog` entry). |
 | `[Property] public partial IReadOnlyList<T> Items { get; }` | Inline element collection. Generator emits `List<T>` backing + `AddItem` / `RemoveItem` / `ClearItems` helpers; walks `T`'s public scalar properties at codegen for typed Hydrate / Save (no reflection). `IList<T>` / `List<T>` are also accepted shapes. |
 | `[Reference] public partial T Ref { get; }` | Mandatory reference. Getter throws if the referenced entity is not available in the session. |
 | `[Reference] public partial T? Ref { get; set; }` | Optional reference. Setting `null` clears the field. |
@@ -61,10 +62,11 @@ Generated property behavior:
 Each generated entity also has a protected `Session` property. Use it from your own partial members to write small domain verbs:
 
 ```csharp
-// Domain verb dispatched against the user's open Transaction. The RELATE lands
-// immediately — there is no buffered intent for SaveAsync to drain.
+// Domain verb dispatched against the user's open Transaction. SaveAsync routes
+// through the variant's emitted IEntity.SaveAsync body, which dispatches
+// INSERT RELATION INTO the edge.
 public Task RestrictsAsync(UserStory story, SurrealTransaction tx, CancellationToken ct = default)
-    => Session.RelateAsync<Restricts>(this, story, tx, ct);
+    => Session.SaveAsync(new ConstraintRestrictsUserStory { Source = this, Target = story }, tx, ct);
 ```
 
 Optional hooks:
@@ -414,43 +416,19 @@ public readonly record struct EdgeRow(RecordId Source, RecordId Target);
 
 The aliases exist because `WhereIn` / `WhereOut` are easy to misread as "incoming/outgoing" when they actually name the SurrealDB columns directly (`in` = source, `out` = target). For code-index-style queries that pivot heavily on edge direction, `OutgoingFrom(symbol)` and `IncomingTo(symbol)` make intent unambiguous at the call site.
 
-### Edge payload predicate factory — `{Kind}EdgeQ`
+### Edge payload predicate factory — via the variant `{Variant}Q`
 
-For each forward relation kind declared via `ForwardRelation<TPayload>`, the generator emits a `{Kind}EdgeQ` static class — same shape as the entity-side `{Table}Q` factory, one `PropertyExpr<T>` per public scalar property of the payload type. Bare `ForwardRelation` (no payload) produces no factory.
-
-```csharp
-public sealed class UsesPayload
-{
-    public string Kind { get; set; } = "";
-    public string FilePath { get; set; } = "";
-    public int Line { get; set; }
-    public string RunId { get; set; } = "";
-}
-
-public sealed class UsesAttribute : ForwardRelation<UsesPayload>;
-
-// Generator emits, alongside `Uses : IRelationKind`:
-public static class UsesEdgeQ
-{
-    public static readonly PropertyExpr<string> Kind     = new("kind");
-    public static readonly PropertyExpr<string> FilePath = new("file_path");
-    public static readonly PropertyExpr<int>    Line     = new("line");
-    public static readonly PropertyExpr<string> RunId    = new("run_id");
-}
-```
-
-Compose with `EdgeQuery.Where` / `.OrderBy` to push payload-aware filtering and ordering server-side:
+Variant classes are entities, so payload columns are addressable through the standard per-table `{Variant}Q` factory and the entity query API — no separate edge-specific factory. `EdgePredicateFactoryEmitter` and the legacy `{Kind}EdgeQ` static class were removed in preview.51; payload predicates now flow through `Workspace.Query.{Variant}.Where(...)` the same way every other entity query does. `Workspace.Query.Edges.{Kind}` (the flat `(Source, Target)` row terminal) keeps non-payload `WhereIn` / `WhereOut` filters; for payload-aware queries, query the variant table:
 
 ```csharp
-var calls = await Workspace.Query.Edges.Uses
-    .OutgoingFrom([symbol.Id])
-    .Where(UsesEdgeQ.Kind.Eq("call"))
-    .OrderBy(UsesEdgeQ.Line)
+var calls = await Workspace.Query.CodeSymbolUsesCodeSymbol
+    .Where(CodeSymbolUsesCodeSymbolQ.Kind.Eq("call"))
+    .Where(CodeSymbolUsesCodeSymbolQ.Source.Eq(symbolId))
+    .OrderBy(CodeSymbolUsesCodeSymbolQ.Line)
     .Limit(50)
     .ExecuteAsync(db);
 ```
 
-The compiler renders this as `SELECT id, in, out, line FROM uses WHERE … ORDER BY line ASC LIMIT 50;` — SurrealDB requires every `ORDER BY` field to be projected, so the ordered payload columns are spliced into `SELECT` alongside `id`/`in`/`out`. The hydration path still only reads the endpoint pair into `EdgeRow`, so the extra columns ride the wire but don't leak into the result type.
 
 ### `LoadAsync`
 
@@ -530,49 +508,62 @@ public sealed class RestrictsAttribute : ForwardRelation;
 public sealed class RestrictedByAttribute : InverseRelation<RestrictsAttribute>;
 ```
 
-The generator emits a marker class for the forward kind:
+The generator emits a marker class for the forward kind plus a per-kind typed-id struct shared across all variants:
 
 ```csharp
 public sealed class Restricts : IRelationKind
 {
     public static string EdgeName => "restricts";
 }
-```
 
-Runtime calls — every edge mutation goes through async dispatch against the user's `SurrealTransaction`. Reads stay sync against the in-memory edge index that the loader populates and `RelateAsync` keeps current.
-
-```csharp
-// Mutations — each call dispatches RELATE / DELETE-edge inside the transaction.
-await session.RelateAsync<Restricts>(source, target, tx);
-await session.UnrelateAsync<Restricts>(source, target, tx);
-await session.UnrelateAsync<Restricts>(source, target: null, tx);  // bulk: every outgoing edge from source
-await session.UnrelateAsync<Restricts>(source: null, target, tx);  // bulk: every incoming edge into target
-
-// Reads (sync, against the in-memory snapshot).
-session.QueryOutgoing<Restricts, UserStory>(constraint);
-session.QueryIncoming<Restricts, Constraint>(story);
-session.QueryRelatedIds<Restricts>(sourceEntity);
-session.QueryInverseRelatedIds<Restricts>(targetEntity);
-```
-
-### Typed edge payloads — `ForwardRelation<TPayload>`
-
-When the relation itself carries data (confidence scores, run id, source location, …), declare the forward attribute with a payload type. The generator walks the payload's public scalar properties and emits a `DEFINE FIELD` on the relation table for each, mirroring how `[Property]` fields are emitted on entity tables. Same scalar coverage (`SchemaEmitter.MapScalarType`), same `IF NOT EXISTS` idempotency, same `DEFAULT` seeding so untouched fields don't break SCHEMAFULL inserts.
-
-```csharp
-public sealed class UsesPayload
+public readonly record struct RestrictsId(string Value) : IRecordId
 {
-    public string Kind { get; set; } = "";
-    public string FilePath { get; set; } = "";
-    public int Line { get; set; }
-    public string RunId { get; set; } = "";
+    public string Value { get; } = RecordIdFormat.Validate(Value);
+    public string Table => "restricts";
+    public static RestrictsId New() => new(Ulid.NewUlid().ToString());
+    // … same shape as per-table {Name}Id
+}
+```
+
+### Relation variants — declare a class per `(in, out)` shape
+
+Edges are written by `Save`-ing relation variants. A variant is a class annotated with the relation kind, exposing typed `[In]` / `[Out]` endpoints and (optionally) `[Property]` payload members:
+
+```csharp
+[Restricts]
+public partial class ConstraintRestrictsUserStory
+{
+    [In]  public partial Constraint Source { get; set; }
+    [Out] public partial UserStory  Target { get; set; }
 }
 
-public sealed class UsesAttribute : ForwardRelation<UsesPayload>;
-public sealed class UsedByAttribute : InverseRelation<UsesAttribute>;
+// Foreign-aggregate variant — endpoints are typed ids.
+[Assesses]
+public partial class ReviewAssessesDesign
+{
+    [In]  public partial ReviewId Source { get; set; }
+    [Out] public partial DesignId Target { get; set; }
+}
+
+// Variant with payload columns.
+[Uses]
+public partial class CodeSymbolUsesCodeSymbol
+{
+    [In]  public partial CodeSymbol Source { get; set; }
+    [Out] public partial CodeSymbol Target { get; set; }
+
+    [Property] public partial string Kind { get; set; }
+    [Property] public partial string FilePath { get; set; }
+    [Property] public partial int    Line { get; set; }
+    [Property] public partial string RunId { get; set; }
+}
 ```
 
-Generated schema for the `uses` table:
+`[In]` / `[Out]` property type rules: use the entity type for within-aggregate endpoints (the load path resolves through the in-session identity map), the typed id for foreign-aggregate endpoints (only the id is meaningful when the other side isn't part of the current aggregate snapshot). The variant **is** an `IEntity` — it gets backing-field setters, hydration, `IRelationVariant : IEntity` marker, and a generated `IEntity.SaveAsync` body that dispatches `INSERT RELATION INTO {edge} $_content [ON DUPLICATE KEY UPDATE …]`.
+
+Multiple variants per kind (e.g. `EpicRestriction` + `FeatureRestriction` both `[Restricts]`) get a `SCHEMALESS` edge table with each variant's payload coexisting; hydration discriminates on `(in.tb, out.tb)` via the per-kind `{KindName}Hydration.HydrateVariant` dispatcher. Single-variant kinds keep `SCHEMAFULL` with the variant's payload columns emitted as `DEFINE FIELD` lines.
+
+Generated schema (single-variant `Uses` example):
 
 ```sql
 DEFINE TABLE IF NOT EXISTS uses SCHEMAFULL
@@ -587,34 +578,51 @@ DEFINE FIELD IF NOT EXISTS line ON uses TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS run_id ON uses TYPE string DEFAULT "";
 ```
 
-Every relation table gets a `DEFINE INDEX … UNIQUE` on `(in, out)` and is declared `TYPE RELATION ENFORCED`. `RelateAsync` dispatches `INSERT RELATION IGNORE INTO {edge} { id, in, out, …payload }` — with the default `RecordId.Idempotent` edge id strategy, the id is a deterministic hash of `{source}|{table}|{target}` so re-running the same triple is a substrate-side no-op (IGNORE absorbs both the duplicate id and the UNIQUE INDEX violation). Caller-minted edge ids (Random Ulid via `RecordId.New(...)`, slug via `new RecordId(...)`) get the same IGNORE protection — a different id for the same `(in, out)` pair triggers the unique index, IGNORE absorbs it; if you genuinely need duplicate edges, the schema would have to drop the unique index.
+Every relation table gets `DEFINE INDEX … UNIQUE` on `(in, out)` and is declared `TYPE RELATION ENFORCED`. The variant's `SaveAsync` body uses `INSERT RELATION INTO {edge} $_content ON DUPLICATE KEY UPDATE field = $_p_field, …` so re-saving the same `(in, out)` pair refreshes payload (or no-ops when the variant has no `[Property]` members). The `RELATION` keyword satisfies `TYPE RELATION ENFORCED` (which `UPSERT` does not).
 
-**Payload semantics:** with IGNORE, the FIRST `RelateAsync` call wins. A second call with a different payload is a no-op — payload is not updated. This matches the "Relate is idempotent" contract: re-calling is safe and doesn't surprise-write. If you need to mutate an existing edge's payload, run `UPDATE edge:<id> CONTENT {…}` directly.
-
-The payload class is a plain POCO — no `[Property]` annotations needed; public scalar properties (`string`, `int`/`long`, `bool`, `float`/`double`/`decimal`, `DateTime`/`DateTimeOffset`, `Guid`, `Ulid`) are picked up automatically. Anything else is silently skipped. Static, indexer, write-only, and inherited-already-seen properties are not emitted as fields.
-
-At write time, pass payload data through the dictionary overload of `RelateAsync`. The edge id strategy is carried by an optional `RecordId edge` parameter; when omitted it defaults to `RecordId.Idempotent(TKind.EdgeName)`:
+### Runtime calls
 
 ```csharp
-// Idempotent (default) — hash from (source, table, target)
-await session.RelateAsync<Uses>(source, target, new Dictionary<string, object?>
+// Mutate — Save the variant. Within-aggregate uses entity endpoints; foreign-aggregate uses typed-id endpoints.
+await session.SaveAsync(new ConstraintRestrictsUserStory { Source = constraint, Target = userStory }, tx);
+await session.SaveAsync(new ReviewAssessesDesign       { Source = review.Id,  Target = designId }, tx);
+await session.SaveAsync(new CodeSymbolUsesCodeSymbol
 {
-    ["kind"]      = "call",
-    ["file_path"] = "src/Foo.cs",
-    ["line"]      = 42,
-    ["run_id"]    = currentRunId,
+    Source = caller,
+    Target = callee,
+    Kind = "call",
+    FilePath = "src/Foo.cs",
+    Line = 42,
+    RunId = currentRunId,
 }, tx);
 
-// Random Ulid — caller mints the edge id up front
-await session.RelateAsync<Uses>(source, target, RecordId.New(Uses.EdgeName), payload, tx);
+// Bulk / pair-wise edge deletion.
+await session.UnrelateAsync<Restricts>(source, target, tx);
+await session.UnrelateAsync<Restricts>(source, target: null, tx);  // every outgoing edge from source
+await session.UnrelateAsync<Restricts>(source: null, target, tx);  // every incoming edge into target
 
-// Slug — caller picks a stable name for the edge row
-await session.RelateAsync<Uses>(source, target, new RecordId(Uses.EdgeName, "primary_call"), payload, tx);
+// Sync entity-side reads (in-memory snapshot — populated by the loader and refreshed by SaveAsync(variant)).
+session.QueryOutgoing<Restricts, UserStory>(constraint);
+session.QueryIncoming<Restricts, Constraint>(story);
+session.QueryRelatedIds<Restricts>(sourceEntity);
+session.QueryInverseRelatedIds<Restricts>(targetEntity);
+
+// Async traversal terminals (substrate-fresh round-trip).
+var variantEdges = await session.QueryVariantsOutgoingAsync<ConstraintRestrictsUserStory>(constraintId, db);
+var stories      = await session.QueryOutgoingAsync<Restricts, UserStory>(constraintId, db);
+var rawRows      = await session.QueryVariantsAsync<ConstraintRestrictsUserStory>(
+                          "SELECT * FROM restricts WHERE in = $src LIMIT 10",
+                          new SurrealObject { ["src"] = constraintId.ToSurrealValue() },
+                          db);
 ```
 
-Field names in the dictionary use the snake-cased SurrealDB form (matching what the schema declared), not the C# property name. The bare `ForwardRelation` (no `<TPayload>`) keeps the pre-feature schema unchanged — no extra fields emitted on the relation table.
+Within-aggregate entity-side relation properties hydrate entity instances. Cross-aggregate relation properties expose `IRecordId` endpoints because the other aggregate is not part of the current snapshot.
 
-Within-aggregate relation properties hydrate entity instances. Cross-aggregate relation properties expose `IRecordId` endpoints because the other aggregate is not part of the current snapshot.
+**Variant query endpoint-resolution.** Variants returned from `QueryVariantsOutgoingAsync<TVariant>` / `QueryVariantsIncomingAsync<TVariant>` whose `[In]` / `[Out]` properties are entity-typed resolve the endpoint through the session's identity map at getter time. **If the endpoint entity isn't in the session, the property throws `Endpoint 'X' is not set.`** — variant queries fetch only the edge rows, not their endpoints. To handle: (a) reuse the session that `Workspace.Load{Root}Async(...)` populated so within-aggregate endpoints resolve cleanly; (b) for cross-aggregate edges or unloaded endpoints, call `((IEntity)v).EnumerateReferences()` to read raw `(fieldName, RecordId?)` tuples for `"in"` / `"out"` directly from the variant's hydrated state; (c) variants with typed-id endpoints (`[In] ConstraintId Source`) sidestep the issue entirely — the typed id is returned directly with no resolution.
+
+### Payload predicate factories
+
+Variant classes are entities, so the generator emits a `{Variant}Q` predicate factory the same way it does for tables — payload `[Property]` members are addressable as `PropertyExpr<T>` and compose with the standard `Workspace.Query.{Variant}.Where(...)` query API. The legacy per-kind `{Kind}EdgeQ` factory (and `EdgePredicateFactoryEmitter`) was removed in preview.51; payload predicates now flow through the variant entity's query surface.
 
 ## Runtime Types
 
@@ -676,11 +684,13 @@ Async dispatch methods (talk to SurrealDB through an app-owned `Transaction`):
 
 | Method | Purpose |
 | --- | --- |
-| `SaveAsync(IEntity entity, Transaction tx, ct)` | Per-entity Save. Auto-binds the entity, walks forward dependencies (Reference / Parent), dispatches a whole-entity `CREATE/UPDATE record:id CONTENT { ... }`, walks new children. **Edges are not in scope** — dispatch them with `RelateAsync` against the same `tx`. The user picks what to save; the library does no change tracking. |
+| `SaveAsync(IEntity entity, Transaction tx, ct)` | Per-entity Save. Auto-binds the entity, walks forward dependencies (Reference / Parent), dispatches a whole-entity `CREATE/UPDATE record:id CONTENT { ... }`, walks new children. **Relation variants are entities too** — passing a variant instance (`new ConstraintRestrictsUserStory { Source = …, Target = … }`) routes through the variant's emitted `IEntity.SaveAsync` body, which dispatches `INSERT RELATION INTO {edge} $_content [ON DUPLICATE KEY UPDATE …]` and updates the in-memory edge index so subsequent `QueryOutgoing` / `QueryIncoming` reads see the new edge. The user picks what to save; the library does no change tracking. |
 | `DeleteAsync(IEntity entity, Transaction tx, ct)` | Run `OnDeleting`, dispatch a single `DELETE`, remove from the in-memory snapshot. |
-| `RelateAsync<TKind>(source, target, tx, ct)` | Direct `RELATE` dispatch (also updates the in-memory edge index so subsequent `QueryOutgoing` / `QueryIncoming` reads see the new edge). Edge id defaults to `RecordId.Idempotent(TKind.EdgeName)`; overloads accept an explicit `RecordId edge` and/or a payload `IReadOnlyDictionary<string, object?>` for `RELATE … CONTENT { … }`. |
 | `UnrelateAsync<TKind>(source?, target?, tx, ct)` | Direct `DELETE`-edge dispatch. At least one endpoint non-null; one-side-null is the bulk form (every matching edge of the kind, persisted-or-not). |
-| `FetchAsync<T>(Query<T> query, db | tx, ct)` | Top-up extension query — partial-merge hydrate into the existing session, mark Included slices loaded. Pending writes always win. |
+| `QueryVariantsOutgoingAsync<TVariant>(srcId, tx \| db, ct)` / `QueryVariantsIncomingAsync<TVariant>(tgtId, tx \| db, ct)` | Async traversal returning hydrated variant entities. Tracked in the session, edges mirrored in `state.Edges`. `IEntity` convenience overloads accept a source/target entity directly. |
+| `QueryOutgoingAsync<TKind, TTarget>(srcId, tx \| db, ct)` / `QueryIncomingAsync<TKind, TTarget>(tgtId, tx \| db, ct)` | Async traversal returning target entities directly (skips variant materialisation); not auto-tracked. Same `IEntity` convenience overloads. |
+| `QueryVariantsAsync<TVariant>(sql, bindings, tx \| db, ct)` | Raw-SQL escape hatch for variant traversal that doesn't fit the canonical shape. |
+| `FetchAsync<T>(Query<T> query, db \| tx, ct)` | Top-up extension query — partial-merge hydrate into the existing session, mark Included slices loaded. Pending writes always win. |
 
 Lifecycle:
 
@@ -762,7 +772,7 @@ public sealed record Scenario(string Kind, string Description);
 public partial IReadOnlyList<Scenario> Scenarios { get; }
 ```
 
-The generator walks `Scenario`'s public scalar properties at codegen time (mirrors how `ForwardRelation<TPayload>` walks payload props — no `[Element]`/`[Field]` annotations needed) and emits:
+The generator walks `Scenario`'s public scalar properties at codegen time (no `[Element]`/`[Field]` annotations needed) and emits:
 
 - `private readonly List<Scenario> _scenarios = new();` backing field
 - `public partial IReadOnlyList<Scenario> Scenarios => _scenarios;`
@@ -835,7 +845,7 @@ Not consumed by the per-entity Save dispatch path — that reads the entity's cu
 These are public for diagnostics and tests but most consumers do not call them directly:
 
 - `SurrealFormatter.Identifier(string)`: regex-validates a SurrealQL identifier (table / field / edge name) and returns it. The chokepoint that defends against malformed identifiers reaching emitted SQL.
-- `Command` / `CommandOp` / `CommandLog`: typed records for the diagnostic intent log. Sync `Track` / `Relate` / `Unrelate` and async `DeleteAsync` / `RelateAsync` / `UnrelateAsync` append `Command` entries; tests + telemetry inspect `session.Log.Entries`.
+- `Command` / `CommandOp` / `CommandLog`: typed records for the diagnostic intent log. Sync `Track` and async `SaveAsync` / `DeleteAsync` / `UnrelateAsync` append `Command` entries; tests + telemetry inspect `session.Log.Entries`.
 
 ## Diagnostics
 

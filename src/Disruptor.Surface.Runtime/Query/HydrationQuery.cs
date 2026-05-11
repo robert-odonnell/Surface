@@ -106,9 +106,17 @@ public sealed class HydrationQuery<T>
     private SurfaceQuery<T> BuildQuery()
     {
         var idValues = new object?[Ids.Count];
-        for (var i = 0; i < Ids.Count; i++) idValues[i] = Ids[i];
+        for (var i = 0; i < Ids.Count; i++)
+        {
+            idValues[i] = Ids[i];
+        }
+
         var query = new SurfaceQuery<T>(Table).Where(new InPredicate("id", idValues));
-        for (var i = 0; i < Includes.Count; i++) query = query.WithInclude(Includes[i]);
+        for (var i = 0; i < Includes.Count; i++)
+        {
+            query = query.WithInclude(Includes[i]);
+        }
+
         return query;
     }
 }

@@ -28,8 +28,8 @@ namespace Disruptor.Surface.Generator.Emit;
 ///   <item>Forward/inverse relation property — sync collection from
 ///         <c>Session.QueryOutgoing</c> / <c>QueryIncoming</c> for same-aggregate edges,
 ///         or <c>QueryRelatedIds</c> / <c>QueryInverseRelatedIds</c> for cross-aggregate
-///         edges. Relation writes go through <c>Session.Relate</c> (sync, in-memory) or
-///         <c>Session.RelateAsync</c> (direct dispatch).</item>
+///         edges. Relation writes go through per-variant relation classes dispatched via
+///         <c>Session.SaveAsync(variantInstance, tx)</c>.</item>
 /// </list>
 /// </summary>
 internal static class PartialEmitter
@@ -223,57 +223,11 @@ internal static class PartialEmitter
     /// <c>_session</c>), the protected <c>Session</c> property for entity-body reads
     /// (throws when unbound — reading from an unbound entity is a programmer error), and
     /// the <c>__EnsureSliceLoaded</c> guard the navigable read paths use to enforce
-    /// strict-with-escape.
+    /// strict-with-escape. Delegates to <see cref="EntityEmitterCommon.WriteSessionPlumbing"/>
+    /// so <see cref="RelationVariantEmitter"/> can reuse the same shape without drift.
     /// </summary>
     private static void WriteSessionPlumbing(StringBuilder builder, string indent)
-    {
-        builder
-            .Append(indent)
-            .Append("private ")
-            .Append(SessionType)
-            .AppendLine("? _session;")
-            .AppendLine();
-
-        builder
-            .Append(indent)
-            .Append(SessionType)
-            .Append("? ")
-            .Append(EntityInterface)
-            .AppendLine(".Session => _session;")
-            .AppendLine()
-            .Append(indent)
-            .Append("void ")
-            .Append(EntityInterface)
-            .Append(".Bind(")
-            .Append(SessionType)
-            .AppendLine(" session)")
-            .Append(indent).AppendLine("{")
-            .Append(indent).AppendLine("    if (_session is not null && !global::System.Object.ReferenceEquals(_session, session))")
-            .Append(indent).AppendLine("        throw new global::System.InvalidOperationException(\"Entity is already bound to a different session.\");")
-            .Append(indent).AppendLine("    _session = session;")
-            .Append(indent).AppendLine("}")
-            .AppendLine();
-
-        builder
-            .Append(indent)
-            .Append("protected ")
-            .Append(SessionType)
-            .AppendLine(" Session")
-            .Append(indent)
-            .AppendLine("    => _session ?? throw new global::System.InvalidOperationException(\"Entity is not bound to a session — call session.Track(...) or hydrate via Sessions.Load*Async first.\");")
-            .AppendLine()
-            // Slice guard — called by every navigable read path before walking the in-memory
-            // cache. Reuses the protected Session accessor so unbound entities still get the
-            // existing "not tracked" error; once bound, the slice check throws
-            // LoadShapeViolationException with a hint at FetchAsync.
-            .Append(indent)
-            .AppendLine("private void __EnsureSliceLoaded(string sliceKey, string fetchHint)")
-            .Append(indent).AppendLine("{")
-            .Append(indent).Append("    var __id = ((").Append(EntityInterface).AppendLine(")this).Id;")
-            .Append(indent).AppendLine("    if (!Session.IsSliceLoaded(__id, sliceKey))")
-            .Append(indent).AppendLine("        throw new global::Disruptor.Surface.Runtime.LoadShapeViolationException(__id, sliceKey, fetchHint);")
-            .Append(indent).AppendLine("}");
-    }
+        => EntityEmitterCommon.WriteSessionPlumbing(builder, indent);
 
     // ──────────────────────────── property emission ──────────────────────────
 
@@ -1085,8 +1039,8 @@ internal static class PartialEmitter
     /// from <c>[Property]</c> + <c>[Reference]</c> + <c>[Parent]</c> backing fields;
     /// dispatches <c>CREATE</c> or <c>UPDATE</c> via the SDK's typed methods (CBOR, no SurrealQL); recurses
     /// into new children via the <c>[Children]</c> property accessor. Edges are out
-    /// of scope — domain code dispatches them through
-    /// <see cref="SurrealSession.RelateAsync{TKind}(IRecordId, IRecordId, Disruptor.Surreal.SurrealTransaction, System.Threading.CancellationToken)"/>
+    /// of scope — domain code constructs a relation-variant entity and dispatches it
+    /// through <see cref="SurrealSession.SaveAsync(IEntity, Disruptor.Surreal.SurrealTransaction, System.Threading.CancellationToken)"/>
     /// against the same transaction.
     /// </summary>
     private static void EmitSaveAsync(StringBuilder builder, string indent, TableModel table)
@@ -1234,12 +1188,12 @@ internal static class PartialEmitter
         }
 
         // Relations are no longer dispatched from SaveAsync — sync Relate (and the
-        // snapshot-diff that drained it) was deleted in preview.45. Edge mutations now
-        // go through Session.RelateAsync<TKind> / UnrelateAsync<TKind> directly,
-        // dispatched against the user's transaction at the call site. SaveAsync is
-        // entity-only: scalar fields, owned [Reference, Inline] sidecars, [Children]
-        // recursion. Same shape the SurrealDB substrate would expect from any client
-        // that doesn't re-implement a write buffer in front of it.
+        // snapshot-diff that drained it) was deleted in preview.45. Edge mutations
+        // flow through per-variant relation classes dispatched via
+        // Session.SaveAsync(variantInstance, tx) (or through UnrelateAsync<TKind> for
+        // bulk drops). SaveAsync is entity-only: scalar fields, owned [Reference, Inline]
+        // sidecars, [Children] recursion. Same shape the SurrealDB substrate would
+        // expect from any client that doesn't re-implement a write buffer in front of it.
 
         builder.Append(indent).AppendLine("}");
     }

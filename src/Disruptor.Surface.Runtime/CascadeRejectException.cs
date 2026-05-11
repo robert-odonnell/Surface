@@ -23,16 +23,11 @@ public readonly record struct CascadeRejectBlocker(
 /// blockers count.
 /// </para>
 /// </summary>
-public sealed class CascadeRejectException : Exception
+public sealed class CascadeRejectException(IReadOnlyList<CascadeRejectBlocker> blockers)
+    : Exception(BuildMessage(blockers))
 {
     /// <summary>The list of (referencer, field, blocked target) triples that prevented the delete.</summary>
-    public IReadOnlyList<CascadeRejectBlocker> Blockers { get; }
-
-    public CascadeRejectException(IReadOnlyList<CascadeRejectBlocker> blockers)
-        : base(BuildMessage(blockers))
-    {
-        Blockers = blockers;
-    }
+    public IReadOnlyList<CascadeRejectBlocker> Blockers { get; } = blockers;
 
     private static string BuildMessage(IReadOnlyList<CascadeRejectBlocker> blockers)
     {

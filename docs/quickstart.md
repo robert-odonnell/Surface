@@ -8,8 +8,8 @@ In a consumer project, reference the runtime package normally and the generator 
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Disruptor.Surface.Runtime" Version="0.1.0-preview.37" />
-  <PackageReference Include="Disruptor.Surface.Generator" Version="0.1.0-preview.37" PrivateAssets="all" />
+  <PackageReference Include="Disruptor.Surface.Runtime" Version="0.1.0-preview.51" />
+  <PackageReference Include="Disruptor.Surface.Generator" Version="0.1.0-preview.51" PrivateAssets="all" />
 </ItemGroup>
 ```
 
@@ -382,10 +382,10 @@ public partial class Constraint
 
     [Restricts] public partial IReadOnlyCollection<UserStory> RestrictedStories { get; }
 
-    // Domain verb shipped against the user's tx — RelateAsync dispatches the RELATE
-    // immediately; no buffered intent for SaveAsync to drain.
+    // Domain verb — Save the variant entity. SaveAsync routes through the variant's
+    // emitted IEntity.SaveAsync body, which dispatches INSERT RELATION INTO the edge.
     public Task RestrictsAsync(UserStory story, SurrealTransaction tx, CancellationToken ct = default)
-        => Session.RelateAsync<Restricts>(this, story, tx, ct);
+        => Session.SaveAsync(new ConstraintRestrictsUserStory { Source = this, Target = story }, tx, ct);
 }
 
 [Table]
@@ -399,7 +399,34 @@ public partial class UserStory
 }
 ```
 
-The generator emits `Restricts : IRelationKind` (a marker class with a `static abstract string EdgeName`). Use `Session.RelateAsync<Restricts>(src, tgt, tx)` / `Session.UnrelateAsync<Restricts>(src?, tgt?, tx)` for mutations, and the sync `Session.QueryOutgoing<Restricts, T>(...)` / `Session.QueryIncoming<Restricts, T>(...)` for reads off the in-session edge index — no string edge names anywhere in user code. Edge writes always carry a transaction; there's no buffered "set up edges, save later" mode.
+Declare a relation **variant** for every concrete `(in, out)` shape you want to write — this is what `SaveAsync` consumes:
+
+```csharp
+[Restricts]
+public partial class ConstraintRestrictsUserStory
+{
+    [In] public partial Constraint Source { get; set; }
+    [Out] public partial UserStory Target { get; set; }
+}
+```
+
+`[In]` / `[Out]` properties are typed: use the entity type for within-aggregate endpoints, the typed id (e.g. `DesignId`) for foreign-aggregate endpoints; the generator picks the read-side resolution based on which form you declared. Add `[Property]` members on the variant class to carry payload columns; the generator walks them at codegen and emits typed Hydrate / Save (no reflection). Multiple variants per kind (e.g. `EpicRestriction` + `FeatureRestriction` both `[Restricts]`) get a `SCHEMALESS` edge table discriminated at hydration via `(in.tb, out.tb)`; single-variant kinds keep `SCHEMAFULL`.
+
+The generator emits `Restricts : IRelationKind` (a marker class with a `static abstract string EdgeName`) plus a per-kind `RestrictsId` typed-id struct shared across all variants. Use `await session.SaveAsync(new ConstraintRestrictsUserStory { Source = constraint, Target = userStory }, tx)` to write an edge, and `await session.UnrelateAsync<Restricts>(src?, tgt?, tx)` (bulk and pair-wise) to delete one. Sync entity-side reads use `Session.QueryOutgoing<Restricts, T>(...)` / `Session.QueryIncoming<Restricts, T>(...)` against the in-session edge index — no string edge names anywhere in user code. The variant's emitted `SaveAsync` dispatches `INSERT RELATION INTO {edge} $_content [ON DUPLICATE KEY UPDATE …]`, so re-saving the same `(in, out)` pair refreshes payload (or no-ops when payloadless); the `RELATION` keyword satisfies SurrealDB's `TYPE RELATION ENFORCED` constraint and `DEFINE INDEX … COLUMNS in, out UNIQUE` keeps duplicates out at the schema layer.
+
+For substrate-fresh reads, the async traversal terminals on `SurrealSession` round-trip to the database:
+
+```csharp
+// Hydrated variant entities — tracked in the session, edges mirrored in state.Edges.
+var edges = await session.QueryVariantsOutgoingAsync<ConstraintRestrictsUserStory>(constraintId, db);
+
+// Target entities directly — skips variant materialisation, not auto-tracked.
+var stories = await session.QueryOutgoingAsync<Restricts, UserStory>(constraintId, db);
+```
+
+Both have `tx` (write-mode) and `IEntity` convenience overloads. `QueryVariantsAsync<TVariant>(sql, bindings, tx)` is the raw-SQL escape hatch.
+
+`QueryVariantsOutgoingAsync<TVariant>` returns hydrated variants whose entity-typed `[In]` / `[Out]` properties resolve through the session's identity map. **If the endpoint entities aren't in the session, `v.Source` / `v.Target` throws `Endpoint 'X' is not set.`** — variant queries fetch only the edge rows, not their endpoints. Three handling options: (1) reuse the session that `Workspace.Load{Root}Async(...)` populated so within-aggregate endpoints resolve cleanly; (2) for cross-aggregate edges or unloaded endpoints, use `((IEntity)v).EnumerateReferences()` to read raw `(fieldName, RecordId?)` tuples for `"in"` / `"out"` directly from the variant row; (3) for variants with typed-id endpoints (cross-aggregate — `[In] ConstraintId Source`), `Source` / `Target` return the typed id directly with no resolution risk.
 
 ## 11. Run The Repository Sample
 

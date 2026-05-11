@@ -26,9 +26,14 @@ public enum CommandOp
     Create,
     /// <summary>A record was deleted via <c>SurrealSession.DeleteAsync</c>.</summary>
     Delete,
-    /// <summary>A typed edge was created via <c>SurrealSession.RelateAsync</c> (or sync <c>Relate</c>).</summary>
+    /// <summary>
+    /// Reserved for future use. The library no longer records edge creates here — variant
+    /// SaveAsync dispatches INSERT RELATION through the user's transaction without an
+    /// intermediate session-side log entry; tests asserting "what edges did the session
+    /// dispatch?" should inspect the recorded SDK calls instead.
+    /// </summary>
     Relate,
-    /// <summary>A typed edge was removed via <c>SurrealSession.UnrelateAsync</c> (or sync <c>Unrelate</c>).</summary>
+    /// <summary>A typed edge was removed via <c>SurrealSession.UnrelateAsync</c>.</summary>
     Unrelate,
 }
 

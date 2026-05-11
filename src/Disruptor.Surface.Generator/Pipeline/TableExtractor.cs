@@ -257,10 +257,12 @@ internal static class TableExtractor
     internal static bool InheritsFromForwardRelation(INamedTypeSymbol cls)
     {
         for (var current = cls.BaseType; current is not null; current = current.BaseType)
+        {
             if (NormaliseFullName(current) == AnnotationsMetadata.ForwardRelation)
             {
                 return true;
             }
+        }
 
         return false;
     }

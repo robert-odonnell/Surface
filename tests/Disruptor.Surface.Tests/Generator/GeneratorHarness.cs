@@ -28,7 +28,7 @@ internal static class GeneratorHarness
         return (runResult, output, diagnostics, compileDiagnostics);
     }
 
-    private static CSharpCompilation CreateCompilation(string source)
+    public static CSharpCompilation CreateCompilation(string source)
     {
         var references = ReferenceAssemblies();
         // Unique-per-call assembly name so CompileAndLoad can be called many times in

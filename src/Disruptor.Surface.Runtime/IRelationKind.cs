@@ -4,15 +4,11 @@ namespace Disruptor.Surface.Runtime;
 /// Marker interface for the typed relation-kind classes the generator emits alongside
 /// every forward relation attribute (<c>RestrictsAttribute</c> → emits a <c>Restricts</c>
 /// class implementing this interface). The static <see cref="EdgeName"/> carries the
-/// SurrealDB edge-table name so generic <see cref="SurrealSession.Relate{TKind}"/> /
-/// <see cref="SurrealSession.QueryRelated{TKind, TElement}"/> calls don't need a string
-/// literal.
-/// <para>
-/// Future-friendly: when relation tables grow payload, the same emitted marker class is
-/// the natural target for the constructible "edge with content" form
-/// (<c>new Restricts(src, tgt) { Severity = "high" }</c>); the static <c>EdgeName</c>
-/// stays as the schema anchor, the instance side grows around it.
-/// </para>
+/// SurrealDB edge-table name so generic session calls (e.g. <c>UnrelateAsync&lt;TKind&gt;</c>,
+/// the variant-query family, sync <c>QueryRelatedIds&lt;TKind&gt;</c>) don't need a
+/// string literal. The class itself has no instance API today; relation payloads carry
+/// on per-variant classes (annotated <c>[Restricts]</c>-on-class with <c>[In]</c> /
+/// <c>[Out]</c> / <c>[Property]</c> members), not on this marker.
 /// </summary>
 public interface IRelationKind
 {

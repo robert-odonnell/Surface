@@ -1,5 +1,5 @@
+using System.Collections;
 using Disruptor.Surreal.Values;
-using SdkRecordId = Disruptor.Surreal.Values.SurrealRecordId;
 
 namespace Disruptor.Surface.Runtime;
 
@@ -149,11 +149,11 @@ public static class HydrationValue
     // ──────────────────────────── conversions ────────────────────────────────
 
     /// <summary>
-    /// Convert an SDK <see cref="SdkRecordId"/> to Surface's <see cref="RecordId"/>.
+    /// Convert an SDK <see cref="SurrealRecordId"/> to Surface's <see cref="RecordId"/>.
     /// Surface only uses string keys today; integer/uuid keys format identically to
     /// what the legacy SurrealSdkTransport.FormatKey used.
     /// </summary>
-    private static RecordId FromSdk(SdkRecordId sdk)
+    private static RecordId FromSdk(SurrealRecordId sdk)
         => new(sdk.Table.Name, FormatKey(sdk.Key));
 
     private static string FormatKey(SurrealRecordIdKey key) => key switch
@@ -287,15 +287,21 @@ public static class HydrationValue
         {
             var arr = Array.CreateInstance(elementType, av.List.Count);
             for (var i = 0; i < av.List.Count; i++)
+            {
                 arr.SetValue(ConvertValue(av.List[i], elementType), i);
+            }
+
             return arr;
         }
         else
         {
             var listType = typeof(List<>).MakeGenericType(elementType);
-            var list = (System.Collections.IList)Activator.CreateInstance(listType)!;
+            var list = (IList)Activator.CreateInstance(listType)!;
             for (var i = 0; i < av.List.Count; i++)
+            {
                 list.Add(ConvertValue(av.List[i], elementType));
+            }
+
             return list;
         }
     }

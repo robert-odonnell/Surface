@@ -187,14 +187,19 @@ internal static class SchemaEmitter
             }
         }
 
-        // Chunks: per-relation-kind table definitions.
+        // Chunks: per-relation-kind table definitions. Variants are grouped by the
+        // attribute they carry (e.g. every [Restricts]-on-class variant lives under
+        // RestrictsAttribute's FQN); the lookup keys exactly match RelationKindModel.FullName.
+        var variantsByKind = graph.RelationVariants.ToLookup(v => v.KindAttributeFqn, StringComparer.Ordinal);
+
         var fwdKinds = graph.RelationKinds
             .Where(k => k.Direction == RelationDirection.Forward)
             .OrderBy(k => k.Name, StringComparer.Ordinal);
         foreach (var fwdKind in fwdKinds)
         {
+            var variantsForKind = variantsByKind[fwdKind.FullName].ToList();
             var relSb = new StringBuilder();
-            EmitRelationTable(relSb, fwdKind, graph);
+            EmitRelationTable(relSb, fwdKind, graph, variantsForKind);
             var content = relSb.ToString();
             if (!string.IsNullOrWhiteSpace(content))
             {
@@ -429,13 +434,17 @@ internal static class SchemaEmitter
         return null;
     }
 
-    private static void EmitRelationTable(StringBuilder sb, RelationKindModel fwdKind, ModelGraph graph)
+    private static void EmitRelationTable(
+        StringBuilder sb,
+        RelationKindModel fwdKind,
+        ModelGraph graph,
+        IReadOnlyList<RelationVariantModel> variantsForKind)
     {
         var edgeName = SurrealNaming.ToEdgeName(fwdKind.Name);
-        var sourceTables = FindSourceTables(graph, fwdKind.FullName)
+        var sourceTables = FindRelationInTables(graph, fwdKind, variantsForKind)
             .Select(t => SurrealNaming.ToTableName(t.Name))
             .ToList();
-        var targetTables = FindTargetTables(graph, fwdKind.FullName)
+        var targetTables = FindRelationOutTables(graph, fwdKind, variantsForKind)
             .Select(t => SurrealNaming.ToTableName(t.Name))
             .ToList();
 
@@ -446,7 +455,13 @@ internal static class SchemaEmitter
             return;
         }
 
-        sb.Append("DEFINE TABLE IF NOT EXISTS ").Append(edgeName).AppendLine(" SCHEMAFULL")
+        // Multi-variant kinds (e.g. EpicRestriction + FeatureRestriction both [Restricts])
+        // need SCHEMALESS so each variant's payload columns can coexist on the same edge
+        // table — SCHEMAFULL would force one rigid column set. Single-variant and
+        // zero-variant (legacy entity-property-only) kinds keep SCHEMAFULL.
+        var tableMode = variantsForKind.Count <= 1 ? "SCHEMAFULL" : "SCHEMALESS";
+
+        sb.Append("DEFINE TABLE IF NOT EXISTS ").Append(edgeName).Append(' ').AppendLine(tableMode)
           .AppendLine("TYPE RELATION")
           .Append("FROM ").AppendLine(string.Join("|", sourceTables))
           .Append("TO ").AppendLine(string.Join("|", targetTables))
@@ -460,64 +475,166 @@ internal static class SchemaEmitter
         sb.Append("DEFINE INDEX IF NOT EXISTS unique_relationship ON TABLE ")
           .Append(edgeName).AppendLine(" COLUMNS in, out UNIQUE;");
 
-        // Edge payload fields (only present for ForwardRelation<TPayload> kinds).
-        // Mirrors the per-property emission for entity tables — same scalar-type
-        // mapper, same `IF NOT EXISTS` idempotency, same DEFAULT seeding so untouched
-        // fields don't break SCHEMAFULL inserts. Keeps relation tables write-safe via
-        // RELATE … [CONTENT { … }] with optional payload dict.
-        foreach (var field in fwdKind.PayloadFields)
+        // Per-variant payload fields. Only emit when there's exactly one variant — the
+        // SCHEMAFULL path requires a stable column set and multiple variants would
+        // disagree on shape. Multi-variant kinds fall through with no DEFINE FIELD; the
+        // SCHEMALESS table accepts each variant's payload at write time.
+        if (variantsForKind.Count == 1)
         {
-            var (fieldType, fieldDefault) = MapScalarType(field.Type);
-            if (fieldType is null)
+            foreach (var p in variantsForKind[0].PayloadProperties)
+            {
+                if (p.Role != RelationVariantPropertyRole.Property)
+                {
+                    // Defensive: PayloadProperties only ever holds Property-role entries
+                    // by construction, but skipping non-Property keeps the emitter robust
+                    // against any future role expansion.
+                    continue;
+                }
+
+                var (fieldType, fieldDefault) = MapScalarType(p.Type);
+                if (fieldType is null)
+                {
+                    continue;
+                }
+
+                sb.Append("DEFINE FIELD IF NOT EXISTS ").Append(p.FieldName)
+                  .Append(" ON ").Append(edgeName)
+                  .Append(" TYPE ").Append(fieldType);
+
+                if (fieldDefault is not null)
+                {
+                    sb.Append(" DEFAULT ").Append(fieldDefault);
+                }
+
+                sb.AppendLine(";");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Resolves the set of source tables for a forward relation kind. Unions two
+    /// information channels: (1) the variant classes that carry the kind attribute
+    /// (each <c>[In]</c> endpoint names a source entity or a typed id), and (2) the
+    /// legacy entity-property scan (entities that themselves carry the forward
+    /// attribute on a read-side collection property). The legacy scan is a transitional
+    /// fallback — kinds without variant classes (e.g. every kind in the current Sample)
+    /// still need to emit a correct schema.
+    /// </summary>
+    private static List<TableModel> FindRelationInTables(
+        ModelGraph graph,
+        RelationKindModel fwdKind,
+        IReadOnlyList<RelationVariantModel> variantsForKind)
+        => CollectEndpointTables(
+            graph,
+            variantsForKind,
+            takeIn: true,
+            legacyScan: () => ScanEntityPropertiesForRole(graph, fwdKind.FullName, RelationRole.ForwardRelation));
+
+    /// <summary>
+    /// Resolves the set of target tables for a forward relation kind. Mirrors
+    /// <see cref="FindRelationInTables"/> — variant <c>[Out]</c> endpoints unioned with
+    /// the legacy entity-property scan over the paired inverse attribute.
+    /// </summary>
+    private static List<TableModel> FindRelationOutTables(
+        ModelGraph graph,
+        RelationKindModel fwdKind,
+        IReadOnlyList<RelationVariantModel> variantsForKind)
+    {
+        var inverseKind = graph.RelationKinds.FirstOrDefault(k =>
+            k.Direction == RelationDirection.Inverse && k.PairedForwardFullName == fwdKind.FullName);
+
+        return CollectEndpointTables(
+            graph,
+            variantsForKind,
+            takeIn: false,
+            legacyScan: () => inverseKind is null
+                ? []
+                : ScanEntityPropertiesForRole(graph, inverseKind.FullName, RelationRole.InverseRelation));
+    }
+
+    private static List<TableModel> CollectEndpointTables(
+        ModelGraph graph,
+        IReadOnlyList<RelationVariantModel> variantsForKind,
+        bool takeIn,
+        Func<List<TableModel>> legacyScan)
+    {
+        // Dedupe by table FullName so a variant declaring the same endpoint twice (or
+        // the legacy scan catching what a variant already named) doesn't double-emit
+        // in the FROM / TO list.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<TableModel>();
+
+        foreach (var variant in variantsForKind)
+        {
+            var endpoint = takeIn ? variant.In : variant.Out;
+            var resolved = ResolveEndpointTable(graph, endpoint.Type);
+            if (resolved is null)
             {
                 continue;
             }
 
-            sb.Append("DEFINE FIELD IF NOT EXISTS ").Append(field.FieldName)
-              .Append(" ON ").Append(edgeName)
-              .Append(" TYPE ").Append(fieldType);
-
-            if (fieldDefault is not null)
+            if (seen.Add(resolved.FullName))
             {
-                sb.Append(" DEFAULT ").Append(fieldDefault);
+                result.Add(resolved);
             }
-
-            sb.AppendLine(";");
         }
-    }
 
-    private static List<TableModel> FindSourceTables(ModelGraph graph, string fwdKindFullName)
-    {
-        var result = new List<TableModel>();
-        foreach (var t in graph.Tables)
+        foreach (var t in legacyScan())
         {
-            foreach (var p in t.Properties)
+            if (seen.Add(t.FullName))
             {
-                if (p.RelationRole == RelationRole.ForwardRelation && p.RelationKindFullName == fwdKindFullName)
-                {
-                    result.Add(t);
-                    break;
-                }
+                result.Add(t);
             }
         }
+
+        result.Sort((a, b) => StringComparer.Ordinal.Compare(a.Name, b.Name));
         return result;
     }
 
-    private static List<TableModel> FindTargetTables(ModelGraph graph, string fwdKindFullName)
+    /// <summary>
+    /// Resolves the [Table] a variant endpoint type points at. Entity-typed endpoints
+    /// (within-aggregate) resolve by simple name; typed-id endpoints (cross-aggregate,
+    /// e.g. <c>EpicId</c>) resolve after stripping the trailing <c>Id</c>. The first-hit
+    /// match always wins — a literal <c>FooId</c> [Table] (rare but legal) shadows the
+    /// stripped lookup so we don't surprise the user by collapsing two distinct tables.
+    /// </summary>
+    private static TableModel? ResolveEndpointTable(ModelGraph graph, TypeRef endpointType)
     {
-        var inverseKind = graph.RelationKinds.FirstOrDefault(k =>
-            k.Direction == RelationDirection.Inverse && k.PairedForwardFullName == fwdKindFullName);
-        if (inverseKind is null)
+        var simpleName = SurrealNaming.SimpleName(endpointType.FullyQualifiedName);
+
+        var exactMatch = graph.Tables.FirstOrDefault(t => t.Name == simpleName);
+        if (exactMatch is not null)
         {
-            return [];
+            return exactMatch;
         }
 
+        if (simpleName.EndsWith("Id"))
+        {
+            var stripped = simpleName[..^"Id".Length];
+            var strippedMatch = graph.Tables.FirstOrDefault(t => t.Name == stripped);
+            if (strippedMatch is not null)
+            {
+                return strippedMatch;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Walks every table's property list looking for one that carries the given relation
+    /// role + kind attribute (forward or inverse). Same logic as the pre-variant
+    /// <c>FindSourceTables</c> / <c>FindTargetTables</c>, kept as a transitional
+    /// fallback so kinds without a variant class still emit a correct schema.
+    /// </summary>
+    private static List<TableModel> ScanEntityPropertiesForRole(ModelGraph graph, string kindFullName, RelationRole role)
+    {
         var result = new List<TableModel>();
         foreach (var t in graph.Tables)
         {
             foreach (var p in t.Properties)
             {
-                if (p.RelationRole == RelationRole.InverseRelation && p.RelationKindFullName == inverseKind.FullName)
+                if (p.RelationRole == role && p.RelationKindFullName == kindFullName)
                 {
                     result.Add(t);
                     break;

@@ -25,13 +25,13 @@ public readonly record struct RecordId(string Table, string Value) : IRecordId, 
 
     /// <summary>
     /// Deferred edge-id strategy: the <c>Value</c> is left empty as a sentinel and the
-    /// commit emitter computes it at write time as <c>HashText("{source}|{Table}|{target}")</c>
-    /// — same triple → same hash, so re-running the same Relate lands on the same edge
-    /// row. Pair with <see cref="SurrealSession.Relate(IRecordId, IRecordId, RecordId)"/>
-    /// to express idempotent edges without changing the entity-id surface.
+    /// dispatcher resolves it at write time as <c>HashText("{source}|{Table}|{target}")</c>
+    /// — same triple → same hash, so re-running the same edge dispatch lands on the same
+    /// row. Used by relation-variant <c>SaveAsync</c> bodies to mint a stable edge id
+    /// from <c>(in, edge-table, out)</c> without changing the entity-id surface.
     /// <para>
-    /// Only meaningful as the <c>edge</c> argument to a relate command — using an
-    /// idempotent id elsewhere will produce empty-value strings in rendered SurrealQL.
+    /// Only meaningful as the edge id on a relation row — using an idempotent id
+    /// elsewhere will produce empty-value strings in rendered SurrealQL.
     /// </para>
     /// </summary>
     public static RecordId Idempotent(string table) => new(table, "");

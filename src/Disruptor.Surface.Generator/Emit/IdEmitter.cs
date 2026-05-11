@@ -39,6 +39,38 @@ internal static class IdEmitter
                 .AppendLine("{");
         }
         var indent = hasNamespace ? "    " : string.Empty;
+
+        // Id-side union interfaces (one per multi-member union this table is in).
+        // Mirrors PartialEmitter's entity-side base list — IRestrictedById alongside IRestrictedBy.
+        var idUnions = graph.UnionsForTable(table.FullName)
+            .Select(u => $"global::{u.IdInterfaceFullName}");
+        WriteIdType(builder, indent, idTypeName, SurrealNaming.ToTableName(table.Name), idUnions);
+
+        if (hasNamespace)
+        {
+            builder.AppendLine("}");
+        }
+        var hint = string.IsNullOrEmpty(table.Namespace)
+            ? $"{idTypeName}.g.cs"
+            : $"{table.Namespace}.{idTypeName}.g.cs";
+        spc.AddSource(hint, SourceText.From(builder.ToString(), Encoding.UTF8));
+    }
+
+    /// <summary>
+    /// Emits a <c>readonly record struct {idTypeName}(string Value) : IRecordId, …</c>
+    /// at <paramref name="indent"/>, with <paramref name="tableName"/> baked into the
+    /// <c>Table</c> property. Shared with <see cref="RelationKindEmitter"/> so per-kind
+    /// id types (<c>RestrictsId</c>) get the same validation + factory shape as per-table
+    /// ids (<c>ConstraintId</c>). <paramref name="extraBaseInterfaces"/> are appended to
+    /// the base list — empty for per-kind ids, the id-side union markers for per-table ids.
+    /// </summary>
+    internal static void WriteIdType(
+        StringBuilder builder,
+        string indent,
+        string idTypeName,
+        string tableName,
+        IEnumerable<string> extraBaseInterfaces)
+    {
         var memberIndent = $"{indent}    ";
         builder
             .Append(indent)
@@ -46,13 +78,9 @@ internal static class IdEmitter
             .Append(idTypeName)
             .Append("(string Value) : ")
             .Append(IRecordIdType);
-        // Add id-side union interfaces (one per multi-member union this table is in).
-        // Mirrors PartialEmitter's entity-side base list — IRestrictedById alongside IRestrictedBy.
-        foreach (var union in graph.UnionsForTable(table.FullName))
+        foreach (var iface in extraBaseInterfaces)
         {
-            builder
-                .Append(", global::")
-                .Append(union.IdInterfaceFullName);
+            builder.Append(", ").Append(iface);
         }
         builder
             .AppendLine()
@@ -71,7 +99,7 @@ internal static class IdEmitter
             // SurrealSession.IsForTable comparisons line up.
             .Append(memberIndent)
             .Append("public string Table => \"")
-            .Append(SurrealNaming.ToTableName(table.Name))
+            .Append(tableName)
             .AppendLine("\";")
             .AppendLine()
             .Append(memberIndent)
@@ -97,13 +125,5 @@ internal static class IdEmitter
             .AppendLine()
             .Append(indent)
             .AppendLine("}");
-        if (hasNamespace)
-        {
-            builder.AppendLine("}");
-        }
-        var hint = string.IsNullOrEmpty(table.Namespace)
-            ? $"{idTypeName}.g.cs"
-            : $"{table.Namespace}.{idTypeName}.g.cs";
-        spc.AddSource(hint, SourceText.From(builder.ToString(), Encoding.UTF8));
     }
 }

@@ -53,30 +53,36 @@ public sealed class CascadeAttribute : Attribute;
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class IgnoreAttribute : Attribute;
 
-/// <summary>Shared abstract base for every user-defined relation attribute (forward and inverse). Property-only — relations declare model shape and aren't a method-naming convention. The generator detects relation membership by walking up to this base.</summary>
-[AttributeUsage(AttributeTargets.Property, AllowMultiple = true)]
+/// <summary>
+/// Shared abstract base for every user-defined relation attribute (forward and inverse).
+/// Targets either a property (entity-side read collection) or a class (relation variant
+/// declaration): on a property → "this is a typed read collection over the kind's edges
+/// from this entity's side"; on a class → "this class is a variant of the kind, with
+/// <see cref="InAttribute"/> / <see cref="OutAttribute"/> properties naming the endpoints
+/// and <see cref="PropertyAttribute"/> properties carrying the payload."
+/// </summary>
+[AttributeUsage(AttributeTargets.Property | AttributeTargets.Class, AllowMultiple = true)]
 public abstract class RelationAttribute : Attribute;
 
 /// <summary>Abstract base for forward-direction relation attributes. Derive directly: <c>public sealed class RestrictsAttribute : ForwardRelation;</c>. Inheritance from this base IS the discoverability signal — no marker attribute needed.</summary>
 public abstract class ForwardRelation : RelationAttribute;
 
-/// <summary>
-/// Forward-direction relation attribute that carries a typed payload — derive when the
-/// edge table needs schema-defined fields (confidence, run id, source location, …).
-/// The generator walks <typeparamref name="TPayload"/>'s public properties and emits a
-/// <c>DEFINE FIELD</c> on the relation table for each scalar property, mirroring how
-/// <c>[Property]</c> fields are emitted on entity tables. <typeparamref name="TPayload"/>
-/// is a plain POCO — no <c>[Property]</c> annotations needed; public get/set scalar
-/// properties are picked up automatically.
-/// <para>
-/// Derive directly:
-/// <c>public sealed class UsesAttribute : ForwardRelation&lt;UsesPayload&gt;;</c>.
-/// Pass payload data at write time via <c>session.RelateAsync&lt;Uses&gt;(src, tgt, payload, tx)</c>
-/// (the dictionary overload) — typed-payload runtime overloads can be layered on later
-/// without changing the schema contract.
-/// </para>
-/// </summary>
-public abstract class ForwardRelation<TPayload> : ForwardRelation where TPayload : class;
-
 /// <summary>Abstract base for inverse-direction relation attributes. The type parameter points at the forward kind this inverse mirrors. Derive directly: <c>public sealed class RestrictedByAttribute : InverseRelation&lt;RestrictsAttribute&gt;;</c>.</summary>
 public abstract class InverseRelation<TForward> : RelationAttribute where TForward : ForwardRelation;
+
+/// <summary>
+/// On a relation class's property: marks the source ("in") endpoint of the edge.
+/// Property type is the source entity (<c>Constraint</c>) for within-aggregate or the
+/// typed id (<c>ConstraintId</c>) when the source lives in a foreign aggregate; the
+/// generator picks the read-side resolution based on which form was declared.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class InAttribute : Attribute;
+
+/// <summary>
+/// On a relation class's property: marks the target ("out") endpoint of the edge.
+/// Property type rules mirror <see cref="InAttribute"/> — entity for in-aggregate,
+/// typed id for foreign-aggregate.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class OutAttribute : Attribute;

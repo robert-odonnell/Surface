@@ -43,15 +43,12 @@ internal static class RelationKindExtractor
 
         if (TableExtractor.InheritsFromForwardRelation(cls))
         {
-            var (fields, payloadTypeFqn) = ExtractPayloadFields(cls);
             return new RelationKindModel(
                 FullName: fullName,
                 Namespace: ns,
                 Name: cls.Name,
                 Direction: RelationDirection.Forward,
-                PairedForwardFullName: null,
-                PayloadFields: fields,
-                PayloadTypeFqn: payloadTypeFqn);
+                PairedForwardFullName: null);
         }
 
         if (TableExtractor.InheritsFromInverseRelation(cls))
@@ -61,108 +58,10 @@ internal static class RelationKindExtractor
                 Namespace: ns,
                 Name: cls.Name,
                 Direction: RelationDirection.Inverse,
-                PairedForwardFullName: ResolveInverseForwardArgument(cls),
-                PayloadFields: EquatableArray<EdgePayloadFieldModel>.Empty,
-                PayloadTypeFqn: null);
+                PairedForwardFullName: ResolveInverseForwardArgument(cls));
         }
 
         return null;
-    }
-
-    /// <summary>
-    /// Walks <paramref name="cls"/>'s base chain looking for
-    /// <c>ForwardRelation&lt;TPayload&gt;</c>; when found, harvests
-    /// <typeparamref>TPayload</typeparamref>'s public scalar properties as edge-table
-    /// fields. Empty when the class derives from the non-generic <c>ForwardRelation</c>
-    /// (no payload — bare-edge schema, the existing behaviour).
-    /// </summary>
-    private static (EquatableArray<EdgePayloadFieldModel> Fields, string? PayloadTypeFqn) ExtractPayloadFields(INamedTypeSymbol cls)
-    {
-        for (var current = cls.BaseType; current is not null; current = current.BaseType)
-        {
-            if (!current.IsGenericType)
-            {
-                continue;
-            }
-
-            if (TableExtractor.NormaliseFullName(current.ConstructedFrom) != AnnotationsMetadata.ForwardRelationOfT)
-            {
-                continue;
-            }
-
-            if (current.TypeArguments.Length == 0)
-            {
-                return (EquatableArray<EdgePayloadFieldModel>.Empty, null);
-            }
-
-            if (current.TypeArguments[0] is not INamedTypeSymbol payload)
-            {
-                return (EquatableArray<EdgePayloadFieldModel>.Empty, null);
-            }
-
-            var fqn = "global::" + TableExtractor.NormaliseFullName(payload);
-            return (HarvestPayloadFields(payload), fqn);
-        }
-
-        return (EquatableArray<EdgePayloadFieldModel>.Empty, null);
-    }
-
-    /// <summary>
-    /// Discovers the payload type's public instance properties — getter visible to the
-    /// outside, mutable or immutable — and projects them onto
-    /// <see cref="EdgePayloadFieldModel"/>. Static / private / write-only / indexer /
-    /// override (already harvested via base) properties are skipped. The
-    /// <c>SchemaEmitter</c> is the gate for "is this type actually mappable as a SurrealDB
-    /// scalar?" — fields with un-mappable types still flow through here and get reported
-    /// at emit time, same as <c>[Property]</c> handling.
-    /// </summary>
-    private static EquatableArray<EdgePayloadFieldModel> HarvestPayloadFields(INamedTypeSymbol payload)
-    {
-        var fields = new List<EdgePayloadFieldModel>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-
-        for (var current = (ITypeSymbol?)payload; current is not null && current.SpecialType != SpecialType.System_Object; current = current.BaseType)
-        {
-            foreach (var member in current.GetMembers())
-            {
-                if (member is not IPropertySymbol prop)
-                {
-                    continue;
-                }
-
-                if (prop.IsStatic)
-                {
-                    continue;
-                }
-
-                if (prop.IsIndexer)
-                {
-                    continue;
-                }
-
-                if (prop.DeclaredAccessibility != Accessibility.Public)
-                {
-                    continue;
-                }
-
-                if (prop.GetMethod is null)
-                {
-                    continue;
-                }
-
-                if (!seen.Add(prop.Name))
-                {
-                    continue;
-                }
-
-                fields.Add(new EdgePayloadFieldModel(
-                    Name: prop.Name,
-                    FieldName: SurrealNaming.ToFieldName(prop.Name),
-                    Type: TypeRefBuilder.Build(prop.Type)));
-            }
-        }
-
-        return new EquatableArray<EdgePayloadFieldModel>(fields.ToArray());
     }
 
     /// <summary>

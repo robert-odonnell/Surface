@@ -25,7 +25,8 @@ internal static class RelationLinker
         ImmutableArray<TableModel> tables,
         ImmutableArray<RelationKindModel> forwardKinds,
         ImmutableArray<RelationKindModel> inverseKinds,
-        ImmutableArray<CompositionRootModel> compositionRoots)
+        ImmutableArray<CompositionRootModel> compositionRoots,
+        ImmutableArray<RelationVariantModel> relationVariants)
     {
         var tableFullNames = new HashSet<string>();
         foreach (var t in tables)
@@ -45,6 +46,12 @@ internal static class RelationLinker
         combinedKinds.AddRange(forwardKinds);
         combinedKinds.AddRange(inverseKinds);
 
+        var linkedVariants = ImmutableArray.CreateBuilder<RelationVariantModel>(relationVariants.Length);
+        foreach (var variant in relationVariants)
+        {
+            linkedVariants.Add(RewriteVariant(variant, tableFullNames));
+        }
+
         var unions = ComputeUnions(linked, forwardKinds, inverseKinds);
         var (aggregates, conflicts) = ComputeAggregates(linked);
         var cascadeCycles = ComputeCascadeCycles(linked);
@@ -52,11 +59,29 @@ internal static class RelationLinker
         return new ModelGraph(
             Tables: linked,
             RelationKinds: combinedKinds.ToImmutable(),
+            RelationVariants: new EquatableArray<RelationVariantModel>(linkedVariants.ToImmutable()),
             Unions: new EquatableArray<RelationUnion>(unions),
             Aggregates: new EquatableArray<AggregateModel>(aggregates),
             AggregateConflicts: new EquatableArray<string>(conflicts),
             CascadeCycles: new EquatableArray<string>(cascadeCycles),
             CompositionRoots: new EquatableArray<CompositionRootModel>(compositionRoots));
+    }
+
+    private static RelationVariantModel RewriteVariant(RelationVariantModel variant, HashSet<string> tableFullNames)
+    {
+        var rewrittenPayload = ImmutableArray.CreateBuilder<RelationVariantPropertyModel>(variant.PayloadProperties.Count);
+        foreach (var p in variant.PayloadProperties)
+        {
+            rewrittenPayload.Add(p with { Type = RewriteType(p.Type, tableFullNames) });
+        }
+
+        return variant with
+        {
+            In = variant.In with { Type = RewriteType(variant.In.Type, tableFullNames) },
+            Out = variant.Out with { Type = RewriteType(variant.Out.Type, tableFullNames) },
+            Id = variant.Id is null ? null : variant.Id with { Type = RewriteType(variant.Id.Type, tableFullNames) },
+            PayloadProperties = new EquatableArray<RelationVariantPropertyModel>(rewrittenPayload.ToImmutable()),
+        };
     }
 
     /// <summary>

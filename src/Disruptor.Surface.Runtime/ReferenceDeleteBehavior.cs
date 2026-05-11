@@ -17,5 +17,5 @@ public enum ReferenceDeleteBehavior
     /// <summary>Delete the referencing record when the referenced record is deleted.</summary>
     Cascade,
     /// <summary>Leave the referencing record unchanged; the reference may dangle.</summary>
-    Ignore,
+    Ignore
 }

@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
+using System.Reflection;
 using System.Text;
+using Disruptor.Surface.Annotations;
 using Disruptor.Surface.Runtime.Query;
 using Disruptor.Surreal;
 using Disruptor.Surreal.Values;
@@ -156,8 +159,10 @@ public interface IEntity
 /// references, relation collections — resolves against the entity's own backing fields
 /// or, for navigation across entities, the in-memory dictionaries the per-aggregate
 /// loader populated. Sync writes mutate backing fields directly. Async dispatch
-/// (<see cref="SaveAsync"/>, <see cref="DeleteAsync"/>, <see cref="RelateAsync"/>,
-/// <see cref="UnrelateAsync"/>) is the only path that touches Surreal.
+/// (<see cref="SaveAsync"/>, <see cref="DeleteAsync"/>, <see cref="UnrelateAsync"/>)
+/// is the only path that touches Surreal. Edge writes flow through
+/// <see cref="SaveAsync"/> against a relation-variant entity (the variant's emitted
+/// <c>IEntity.SaveAsync</c> body dispatches <c>INSERT RELATION INTO …</c>).
 /// <para>
 /// Each entity carries an explicit reference to its bound session via <see cref="IEntity.Session"/>;
 /// there is no ambient context. Pre-bind property setters write straight into backing
@@ -171,6 +176,19 @@ public interface IEntity
 /// writers collide at COMMIT as <see cref="SurrealConflictException"/> from the SDK —
 /// the substrate owns concurrency, no application-level lease.
 /// </para>
+/// <para>
+/// Sync edge reads (<see cref="QueryOutgoing{T}"/> / <see cref="QueryIncoming{T}"/> /
+/// <see cref="QueryRelatedIds"/> / <see cref="QueryInverseRelatedIds"/>) consult the
+/// in-memory snapshot. The async variant-query family
+/// (<see cref="QueryVariantsOutgoingAsync{TVariant}(IRecordId, SurrealTransaction, CancellationToken)"/> /
+/// <see cref="QueryVariantsIncomingAsync{TVariant}(IRecordId, SurrealTransaction, CancellationToken)"/> /
+/// <see cref="QueryVariantsAsync{TVariant}(string, SurrealObject?, SurrealTransaction, CancellationToken)"/> /
+/// <see cref="QueryOutgoingAsync{TKind, TTarget}(IRecordId, SurrealTransaction, CancellationToken)"/> /
+/// <see cref="QueryIncomingAsync{TKind, TTarget}(IRecordId, SurrealTransaction, CancellationToken)"/>)
+/// dispatches fresh SurrealQL against the user's transaction (or read-only
+/// <see cref="SurrealClient"/>) — use the variant family when the snapshot doesn't carry
+/// the edges (cross-aggregate, large fan-outs, ad-hoc traversal).
+/// </para>
 /// </summary>
 public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydrationSink
 {
@@ -179,11 +197,12 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         public readonly Dictionary<RecordId, IEntity> Entities = [];
 
         // Read-side index of edges visible in this session. Populated by IHydrationSink.Edge
-        // at load time and by RelateAsync after dispatch. Pure presence — Query{Outgoing,
-        // Incoming,RelatedIds,InverseRelatedIds} only ask "is this edge in the snapshot?".
-        // No write buffering: with sync Relate gone, every edge mutation goes straight
-        // through the user's transaction via RelateAsync / UnrelateAsync, and the index
-        // updates as those calls complete.
+        // at load time and by SaveContext.MarkSaved when a variant's IEntity.SaveAsync
+        // returns (RecordVariantEdge mirrors the (in, edge, out) tuple here). Pure
+        // presence — Query{Outgoing,Incoming,RelatedIds,InverseRelatedIds} only ask
+        // "is this edge in the snapshot?". No write buffering: with sync Relate gone,
+        // every edge mutation goes straight through the user's transaction via
+        // SaveAsync(variant) / UnrelateAsync, and the index updates as those calls complete.
         public readonly HashSet<(RecordId Source, string Edge, RecordId Target)> Edges = [];
 
         // Per-entity load-shape tracking. Each set lists the field names on that entity
@@ -218,8 +237,8 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     // Filled by the loader's IHydrationSink.Track. ISaveContext.IsTracked checks
     // loadedAtStart to distinguish "in DB" from "constructed in this session" so the
     // emitted SaveAsync can pick CREATE vs UPSERT semantics. Edges no longer need a
-    // start-time set — there's no snapshot-diff dispatch anymore; RelateAsync ships
-    // each edge straight through the user's transaction.
+    // start-time set — there's no snapshot-diff dispatch anymore; variant SaveAsync
+    // ships each edge straight through the user's transaction.
     private readonly HashSet<RecordId> loadedAtStart = [];
 
     /// <summary>Chronological history of recorded model commands. Diagnostic-only.</summary>
@@ -683,7 +702,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     // Sync Relate / Unrelate were removed — they buffered edge intent into state.Edges
     // for the emitted SaveAsync to drain via a snapshot-diff dispatch, which is the
     // exact write-buffering pattern the per-entity-Save pivot ripped out for property
-    // writes. Edge mutations now go through RelateAsync<TKind> / UnrelateAsync<TKind>
+    // writes. Edge mutations now go through SaveAsync<variantInstance> / UnrelateAsync,
     // which dispatch immediately against the user's transaction; no buffer to drain,
     // no snapshot to diff, no payload/edge-id silently dropped at save time.
 
@@ -832,214 +851,24 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
             // IsTracked checks to "yes, in DB now".
             session.state.Entities[entity.Id] = entity;
             savedThisPass.Add(entity.Id);
-        }
-    }
 
-    /// <summary>
-    /// Idempotently creates an edge of kind <typeparamref name="TKind"/> from
-    /// <paramref name="source"/> to <paramref name="target"/> through <paramref name="tx"/>.
-    /// Updates the in-memory edge index too so subsequent reads see the new edge.
-    /// <para>
-    /// No explicit edge id and no payload — the edge id defaults to
-    /// <see cref="RecordId.Idempotent"/> (deterministic hash of <c>{source}|{table}|{target}</c>),
-    /// dispatched as <c>INSERT RELATION IGNORE INTO {edge} { id, in, out }</c>. Re-running
-    /// the same triple is a substrate-side no-op (IGNORE absorbs the duplicate id and
-    /// the UNIQUE INDEX violation). Use the four-arg overload to override the edge id,
-    /// or pass a <c>payload</c> dictionary for the equivalent of <c>RELATE … CONTENT</c>.
-    /// </para>
-    /// </summary>
-    public Task RelateAsync<TKind>(IRecordId source, IRecordId target, SurrealTransaction tx, CancellationToken ct = default)
-        where TKind : IRelationKind
-        => RelateAsyncCore<TKind>(source, target, explicitEdge: null, payload: null, tx, ct);
+            // Promote into loadedAtStart so subsequent SaveContexts (e.g. a later
+            // session.SaveAsync(variant) call whose forward-dep walk reaches an entity
+            // already saved in an earlier call) see IsTracked=true and dispatch UPDATE
+            // instead of re-CREATE. Without this, every fresh SaveContext starts blind
+            // to anything we've previously saved in the same session and the substrate
+            // rejects the duplicate CREATE with "record already exists".
+            session.loadedAtStart.Add(entity.Id);
 
-    /// <summary>Idempotent RELATE with a caller-specified edge id (Random Ulid, Slug, or explicit Idempotent). IGNORE absorbs duplicate-id and UNIQUE INDEX (in, out) conflicts.</summary>
-    public Task RelateAsync<TKind>(IRecordId source, IRecordId target, RecordId edge, SurrealTransaction tx, CancellationToken ct = default)
-        where TKind : IRelationKind
-        => RelateAsyncCore<TKind>(source, target, edge, payload: null, tx, ct);
-
-    /// <summary>RELATE with payload — first call wins; a re-call with different payload is a no-op (IGNORE semantics). UPDATE the edge id directly if you need to mutate payload.</summary>
-    public Task RelateAsync<TKind>(IRecordId source, IRecordId target, IReadOnlyDictionary<string, object?> payload, SurrealTransaction tx, CancellationToken ct = default)
-        where TKind : IRelationKind
-    {
-        ArgumentNullException.ThrowIfNull(payload);
-        return RelateAsyncCore<TKind>(source, target, explicitEdge: null, payload, tx, ct);
-    }
-
-    /// <summary>RELATE with an explicit edge id and payload — full control over both fields the snapshot diff carries.</summary>
-    public Task RelateAsync<TKind>(IRecordId source, IRecordId target, RecordId edge, IReadOnlyDictionary<string, object?> payload, SurrealTransaction tx, CancellationToken ct = default)
-        where TKind : IRelationKind
-    {
-        ArgumentNullException.ThrowIfNull(payload);
-        return RelateAsyncCore<TKind>(source, target, edge, payload, tx, ct);
-    }
-
-    // IEntity convenience flavours — collapse straight to the IRecordId core via .Id.
-    public Task RelateAsync<TKind>(IEntity source, IEntity target, SurrealTransaction tx, CancellationToken ct = default)
-        where TKind : IRelationKind
-        => RelateAsync<TKind>(source.Id, target.Id, tx, ct);
-    public Task RelateAsync<TKind>(IEntity source, IEntity target, RecordId edge, SurrealTransaction tx, CancellationToken ct = default)
-        where TKind : IRelationKind
-        => RelateAsync<TKind>(source.Id, target.Id, edge, tx, ct);
-    public Task RelateAsync<TKind>(IEntity source, IEntity target, IReadOnlyDictionary<string, object?> payload, SurrealTransaction tx, CancellationToken ct = default)
-        where TKind : IRelationKind
-        => RelateAsync<TKind>(source.Id, target.Id, payload, tx, ct);
-    public Task RelateAsync<TKind>(IEntity source, IEntity target, RecordId edge, IReadOnlyDictionary<string, object?> payload, SurrealTransaction tx, CancellationToken ct = default)
-        where TKind : IRelationKind
-        => RelateAsync<TKind>(source.Id, target.Id, edge, payload, tx, ct);
-
-    /// <summary>
-    /// Generator-emission target for typed-payload RelateAsync. The per-kind extension
-    /// methods (emitted alongside the marker class for every <c>ForwardRelation&lt;TPayload&gt;</c>)
-    /// build a <see cref="SurrealObject"/> from the typed payload via
-    /// <see cref="ContentValue"/> and call this helper. The dispatch shape is
-    /// <c>INSERT RELATION INTO {edge} $_content ON DUPLICATE KEY UPDATE field1 = $_p_field1, …</c>:
-    /// re-running the same triple replaces every payload field on the existing edge,
-    /// because the generator passed every TPayload field as a key in
-    /// <paramref name="payload"/>. Empty payloads fall back to <c>INSERT RELATION IGNORE</c>
-    /// (no-op on duplicate, matching the no-payload <see cref="RelateAsync{TKind}(IRecordId, IRecordId, SurrealTransaction, CancellationToken)"/> overload).
-    /// <para>
-    /// Public so emitted code in the consumer assembly can call it. End users normally
-    /// call the typed extension methods directly (e.g. <c>session.RelateAsync(src, tgt, payload, tx)</c>);
-    /// this overload is the dispatch core.
-    /// </para>
-    /// </summary>
-    public async Task RelateAsyncReplace<TKind>(
-        IRecordId source,
-        IRecordId target,
-        RecordId? explicitEdge,
-        SurrealObject payload,
-        SurrealTransaction tx,
-        CancellationToken ct = default) where TKind : IRelationKind
-    {
-        ArgumentNullException.ThrowIfNull(source);
-        ArgumentNullException.ThrowIfNull(target);
-        ArgumentNullException.ThrowIfNull(payload);
-        ArgumentNullException.ThrowIfNull(tx);
-        ThrowIfClosed();
-        try
-        {
-            var src = RecordId.From(source);
-            var tgt = RecordId.From(target);
-            var edge = (explicitEdge ?? RecordId.Idempotent(TKind.EdgeName)).Resolve(src, tgt);
-            state.Edges.Add((src, TKind.EdgeName, tgt));
-
-            // Build the full content (id, in, out, plus the typed payload's fields). The
-            // generator passed payload as a SurrealObject containing only the user's
-            // payload keys; we wrap in id/in/out before dispatch.
-            var content = new SurrealObject
+            // Variant SaveAsync dispatches INSERT RELATION INTO {edge} … against the
+            // substrate but doesn't itself touch state.Edges — the variant's emitted
+            // Hydrate intentionally calls sink.Track(this) only (no sink.Edge). Mirror
+            // the new edge into the read-side index here so subsequent sync reads
+            // (QueryOutgoing / QueryRelatedIds) see it before the session is reloaded.
+            if (entity is IRelationVariant)
             {
-                ["id"] = new SurrealRecordIdValue(edge.ToSdk()),
-                ["in"] = new SurrealRecordIdValue(src.ToSdk()),
-                ["out"] = new SurrealRecordIdValue(tgt.ToSdk()),
-            };
-            foreach (var kv in payload)
-            {
-                content[kv.Key] = kv.Value;
+                session.RecordVariantEdge(entity);
             }
-
-            var bindings = new SurrealObject { ["_content"] = new SurrealObjectValue(content) };
-
-            string sql;
-            if (payload.Count == 0)
-            {
-                // No payload — IGNORE-shape no-op on duplicate, same as the no-payload
-                // RelateAsync overload. No SET clause to write.
-                sql = $"INSERT RELATION IGNORE INTO {TKind.EdgeName.Identifier()} $_content;";
-            }
-            else
-            {
-                // Bind each payload field separately as $_p_{field} so the SET clause
-                // can reference them. Slight redundancy with $_content (each value is
-                // bound twice), unambiguous and avoids depending on whether SurrealQL
-                // supports $_content.field property access in UPDATE expressions.
-                var setClauses = new StringBuilder();
-                foreach (var kv in payload)
-                {
-                    var bindKey = $"_p_{kv.Key}";
-                    bindings[bindKey] = kv.Value;
-                    if (setClauses.Length > 0)
-                    {
-                        setClauses.Append(", ");
-                    }
-                    setClauses.Append(kv.Key.Identifier()).Append(" = $").Append(bindKey);
-                }
-                sql = $"INSERT RELATION INTO {TKind.EdgeName.Identifier()} $_content ON DUPLICATE KEY UPDATE {setClauses};";
-            }
-
-            var response = await tx.QueryAsync(sql, bindings, ct).ConfigureAwait(false);
-            response.EnsureSuccess();
-            // Diagnostic log carries the edge id; payload values stay typed-CBOR so we
-            // skip the dict copy for the typed path (caller has the original object in
-            // their own scope).
-            Record(Command.Relate(src, edge, tgt));
-        }
-        catch
-        {
-            closed = true;
-            throw;
-        }
-    }
-
-    private async Task RelateAsyncCore<TKind>(
-        IRecordId source,
-        IRecordId target,
-        RecordId? explicitEdge,
-        IReadOnlyDictionary<string, object?>? payload,
-        SurrealTransaction tx,
-        CancellationToken ct) where TKind : IRelationKind
-    {
-        ArgumentNullException.ThrowIfNull(source);
-        ArgumentNullException.ThrowIfNull(target);
-        ArgumentNullException.ThrowIfNull(tx);
-        ThrowIfClosed();
-        try
-        {
-            var src = RecordId.From(source);
-            var tgt = RecordId.From(target);
-            var edge = (explicitEdge ?? RecordId.Idempotent(TKind.EdgeName)).Resolve(src, tgt);
-            state.Edges.Add((src, TKind.EdgeName, tgt));
-
-            // INSERT RELATION IGNORE — SurrealDB's substrate-native idempotent edge
-            // create. The IGNORE clause makes a duplicate id (or a duplicate (in, out)
-            // tripping the UNIQUE INDEX) a silent no-op rather than an error, so
-            // re-running RelateAsync on the same triple is safe. The RELATION keyword
-            // satisfies TYPE RELATION ENFORCED schemas (which UPSERT does NOT — UPSERT
-            // creates a regular row that the substrate then refuses to recognise as a
-            // valid edge; preview.46 was wrong about this).
-            //
-            // Semantic note: with IGNORE, the FIRST RelateAsync call wins. A second
-            // call with a different payload is a no-op — payload is not updated. Users
-            // wanting to change payload should UPDATE the edge id directly. This
-            // matches the "Relate is idempotent" contract: re-calling is safe and
-            // doesn't surprise-write.
-            //
-            // For caller-minted edge ids (Random Ulid / Slug), behaviour is the same:
-            // a different id for the same (in, out) pair trips the unique index and
-            // IGNORE silently absorbs it — no error, no duplicate row.
-            var content = new SurrealObject
-            {
-                ["id"] = new SurrealRecordIdValue(edge.ToSdk()),
-                ["in"] = new SurrealRecordIdValue(src.ToSdk()),
-                ["out"] = new SurrealRecordIdValue(tgt.ToSdk()),
-            };
-            if (payload is not null)
-            {
-                foreach (var kv in payload)
-                {
-                    content[kv.Key] = SurfaceQueryCompiler.WrapAsSurrealValue(kv.Value);
-                }
-            }
-
-            var sql = $"INSERT RELATION IGNORE INTO {TKind.EdgeName.Identifier()} $_content;";
-            var bindings = new SurrealObject { ["_content"] = new SurrealObjectValue(content) };
-            var response = await tx.QueryAsync(sql, bindings, ct).ConfigureAwait(false);
-            response.EnsureSuccess();
-            Record(Command.Relate(src, edge, tgt, payload));
-        }
-        catch
-        {
-            closed = true;
-            throw;
         }
     }
 
@@ -1308,6 +1137,473 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         return new DeletePlan(deleted.ToArray(), liveUnsets);
     }
 
+    // ──────────────────────────── variant queries (async) ───────────────────
+    //
+    // Three flavours, all dispatched fresh against the user's transport (no snapshot
+    // read):
+    //   * QueryVariantsOutgoingAsync<TVariant> / QueryVariantsIncomingAsync<TVariant>
+    //     — option A: return hydrated typed-variant rows for one side filter. Tracks
+    //     the variants in the session AND records each (in, edge, out) tuple in
+    //     state.Edges so subsequent sync reads off the entity-side [Restricts] /
+    //     [Restrictions] collection see the new edges.
+    //   * QueryOutgoingAsync<TKind, TTarget> / QueryIncomingAsync<TKind, TTarget>
+    //     — option B: skip the variant entirely, fetch the endpoint records directly
+    //     via SELECT VALUE out.* (or in.*). Read-side targets are NOT auto-tracked —
+    //     this is the ad-hoc "give me the targets" path. To track them in the
+    //     session, route through FetchAsync(Workspace.Query.{Table}.…) instead.
+    //   * QueryVariantsAsync<TVariant>(sql, bindings) — option E: caller-supplied
+    //     SQL, hydrated as typed variants. The escape hatch for queries the typed
+    //     surface doesn't model (multi-side, custom predicates, raw aggregations).
+
+    /// <summary>
+    /// Dispatches <c>SELECT * FROM {edge} WHERE in = $_src;</c> against
+    /// <paramref name="tx"/> and hydrates each row into a fresh
+    /// <typeparamref name="TVariant"/>. The variants are tracked in this session and
+    /// each <c>(in, edge, out)</c> tuple is added to the in-memory edge index, so
+    /// subsequent sync reads off the entity-side relation collection (e.g.
+    /// <c>constraint.Restrictions</c>) see the freshly loaded edges.
+    /// <para>
+    /// Use this when the snapshot doesn't carry the edges (cross-aggregate, large
+    /// fan-outs, ad-hoc traversal). For in-aggregate edges already loaded by
+    /// <c>Workspace.Load{Root}Async</c>, the entity's <c>[Restricts]</c> /
+    /// <c>[Restrictions]</c> property is the sync alternative.
+    /// </para>
+    /// </summary>
+    public Task<IReadOnlyList<TVariant>> QueryVariantsOutgoingAsync<TVariant>(
+        IRecordId source, SurrealTransaction tx, CancellationToken ct = default)
+        where TVariant : class, IEntity, new()
+        => QueryVariantsAsyncCore<TVariant>(source, isSource: true, tx.QueryAsync, ct);
+
+    /// <inheritdoc cref="QueryVariantsOutgoingAsync{TVariant}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TVariant>> QueryVariantsOutgoingAsync<TVariant>(
+        IRecordId source, SurrealClient db, CancellationToken ct = default)
+        where TVariant : class, IEntity, new()
+        => QueryVariantsAsyncCore<TVariant>(source, isSource: true, db.QueryAsync, ct);
+
+    /// <inheritdoc cref="QueryVariantsOutgoingAsync{TVariant}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TVariant>> QueryVariantsOutgoingAsync<TVariant>(
+        IEntity source, SurrealTransaction tx, CancellationToken ct = default)
+        where TVariant : class, IEntity, new()
+        => QueryVariantsOutgoingAsync<TVariant>(source.Id, tx, ct);
+
+    /// <inheritdoc cref="QueryVariantsOutgoingAsync{TVariant}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TVariant>> QueryVariantsOutgoingAsync<TVariant>(
+        IEntity source, SurrealClient db, CancellationToken ct = default)
+        where TVariant : class, IEntity, new()
+        => QueryVariantsOutgoingAsync<TVariant>(source.Id, db, ct);
+
+    /// <summary>
+    /// Dispatches <c>SELECT * FROM {edge} WHERE out = $_tgt;</c> against
+    /// <paramref name="tx"/> and hydrates each row into a fresh
+    /// <typeparamref name="TVariant"/>. Same tracking + edge-index population as
+    /// <see cref="QueryVariantsOutgoingAsync{TVariant}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    /// — see that overload for the contract.
+    /// </summary>
+    public Task<IReadOnlyList<TVariant>> QueryVariantsIncomingAsync<TVariant>(
+        IRecordId target, SurrealTransaction tx, CancellationToken ct = default)
+        where TVariant : class, IEntity, new()
+        => QueryVariantsAsyncCore<TVariant>(target, isSource: false, tx.QueryAsync, ct);
+
+    /// <inheritdoc cref="QueryVariantsIncomingAsync{TVariant}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TVariant>> QueryVariantsIncomingAsync<TVariant>(
+        IRecordId target, SurrealClient db, CancellationToken ct = default)
+        where TVariant : class, IEntity, new()
+        => QueryVariantsAsyncCore<TVariant>(target, isSource: false, db.QueryAsync, ct);
+
+    /// <inheritdoc cref="QueryVariantsIncomingAsync{TVariant}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TVariant>> QueryVariantsIncomingAsync<TVariant>(
+        IEntity target, SurrealTransaction tx, CancellationToken ct = default)
+        where TVariant : class, IEntity, new()
+        => QueryVariantsIncomingAsync<TVariant>(target.Id, tx, ct);
+
+    /// <inheritdoc cref="QueryVariantsIncomingAsync{TVariant}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TVariant>> QueryVariantsIncomingAsync<TVariant>(
+        IEntity target, SurrealClient db, CancellationToken ct = default)
+        where TVariant : class, IEntity, new()
+        => QueryVariantsIncomingAsync<TVariant>(target.Id, db, ct);
+
+    /// <summary>
+    /// Escape hatch for queries the typed variant surface doesn't model — caller
+    /// supplies SurrealQL + bindings, every row is hydrated as
+    /// <typeparamref name="TVariant"/>. Same tracking + edge-index update as the
+    /// typed overloads. The caller's SQL is opaque to the library: get the SELECT
+    /// shape right (the row needs <c>id</c>, <c>in</c>, <c>out</c>, plus payload
+    /// fields) or hydration silently drops fields.
+    /// </summary>
+    public Task<IReadOnlyList<TVariant>> QueryVariantsAsync<TVariant>(
+        string sql, SurrealObject? bindings, SurrealTransaction tx, CancellationToken ct = default)
+        where TVariant : class, IEntity, new()
+        => QueryVariantsRawAsyncCore<TVariant>(sql, bindings, tx.QueryAsync, ct);
+
+    /// <inheritdoc cref="QueryVariantsAsync{TVariant}(string, SurrealObject?, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TVariant>> QueryVariantsAsync<TVariant>(
+        string sql, SurrealObject? bindings, SurrealClient db, CancellationToken ct = default)
+        where TVariant : class, IEntity, new()
+        => QueryVariantsRawAsyncCore<TVariant>(sql, bindings, db.QueryAsync, ct);
+
+    /// <summary>
+    /// Dispatches <c>SELECT VALUE out.* FROM {edge} WHERE in = $_src AND out.tb = $_outTable;</c>
+    /// against <paramref name="tx"/> and hydrates each row into a fresh
+    /// <typeparamref name="TTarget"/>. The targets are NOT auto-tracked — option B is
+    /// the ad-hoc "give me the targets" path; to bring them into the session, route
+    /// through <c>FetchAsync(Workspace.Query.{Table}.…)</c> instead.
+    /// </summary>
+    public Task<IReadOnlyList<TTarget>> QueryOutgoingAsync<TKind, TTarget>(
+        IRecordId source, SurrealTransaction tx, CancellationToken ct = default)
+        where TKind : IRelationKind
+        where TTarget : class, IEntity, new()
+        => QueryEdgeTraversalAsyncCore<TTarget>(source, isSource: true, TKind.EdgeName, tx.QueryAsync, ct);
+
+    /// <inheritdoc cref="QueryOutgoingAsync{TKind, TTarget}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TTarget>> QueryOutgoingAsync<TKind, TTarget>(
+        IRecordId source, SurrealClient db, CancellationToken ct = default)
+        where TKind : IRelationKind
+        where TTarget : class, IEntity, new()
+        => QueryEdgeTraversalAsyncCore<TTarget>(source, isSource: true, TKind.EdgeName, db.QueryAsync, ct);
+
+    /// <inheritdoc cref="QueryOutgoingAsync{TKind, TTarget}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TTarget>> QueryOutgoingAsync<TKind, TTarget>(
+        IEntity source, SurrealTransaction tx, CancellationToken ct = default)
+        where TKind : IRelationKind
+        where TTarget : class, IEntity, new()
+        => QueryOutgoingAsync<TKind, TTarget>(source.Id, tx, ct);
+
+    /// <inheritdoc cref="QueryOutgoingAsync{TKind, TTarget}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TTarget>> QueryOutgoingAsync<TKind, TTarget>(
+        IEntity source, SurrealClient db, CancellationToken ct = default)
+        where TKind : IRelationKind
+        where TTarget : class, IEntity, new()
+        => QueryOutgoingAsync<TKind, TTarget>(source.Id, db, ct);
+
+    /// <summary>
+    /// Dispatches <c>SELECT VALUE in.* FROM {edge} WHERE out = $_tgt AND in.tb = $_inTable;</c>
+    /// — incoming-side mirror of
+    /// <see cref="QueryOutgoingAsync{TKind, TTarget}(IRecordId, SurrealTransaction, CancellationToken)"/>.
+    /// Targets are not tracked.
+    /// </summary>
+    public Task<IReadOnlyList<TTarget>> QueryIncomingAsync<TKind, TTarget>(
+        IRecordId target, SurrealTransaction tx, CancellationToken ct = default)
+        where TKind : IRelationKind
+        where TTarget : class, IEntity, new()
+        => QueryEdgeTraversalAsyncCore<TTarget>(target, isSource: false, TKind.EdgeName, tx.QueryAsync, ct);
+
+    /// <inheritdoc cref="QueryIncomingAsync{TKind, TTarget}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TTarget>> QueryIncomingAsync<TKind, TTarget>(
+        IRecordId target, SurrealClient db, CancellationToken ct = default)
+        where TKind : IRelationKind
+        where TTarget : class, IEntity, new()
+        => QueryEdgeTraversalAsyncCore<TTarget>(target, isSource: false, TKind.EdgeName, db.QueryAsync, ct);
+
+    /// <inheritdoc cref="QueryIncomingAsync{TKind, TTarget}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TTarget>> QueryIncomingAsync<TKind, TTarget>(
+        IEntity target, SurrealTransaction tx, CancellationToken ct = default)
+        where TKind : IRelationKind
+        where TTarget : class, IEntity, new()
+        => QueryIncomingAsync<TKind, TTarget>(target.Id, tx, ct);
+
+    /// <inheritdoc cref="QueryIncomingAsync{TKind, TTarget}(IRecordId, SurrealTransaction, CancellationToken)"/>
+    public Task<IReadOnlyList<TTarget>> QueryIncomingAsync<TKind, TTarget>(
+        IEntity target, SurrealClient db, CancellationToken ct = default)
+        where TKind : IRelationKind
+        where TTarget : class, IEntity, new()
+        => QueryIncomingAsync<TKind, TTarget>(target.Id, db, ct);
+
+    private async Task<IReadOnlyList<TVariant>> QueryVariantsAsyncCore<TVariant>(
+        IRecordId endpoint,
+        bool isSource,
+        Func<string, SurrealObject?, CancellationToken, Task<SurrealQueryResponse>> queryFn,
+        CancellationToken ct)
+        where TVariant : class, IEntity, new()
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        ThrowIfClosed();
+        try
+        {
+            var edgeName = ResolveVariantEdgeName(typeof(TVariant));
+            var rid = RecordId.From(endpoint);
+            var bindings = new SurrealObject();
+            string sql;
+            if (isSource)
+            {
+                bindings["_src"] = new SurrealRecordIdValue(rid.ToSdk());
+                sql = $"SELECT * FROM {edgeName.Identifier()} WHERE in = $_src;";
+            }
+            else
+            {
+                bindings["_tgt"] = new SurrealRecordIdValue(rid.ToSdk());
+                sql = $"SELECT * FROM {edgeName.Identifier()} WHERE out = $_tgt;";
+            }
+
+            var response = await queryFn(sql, bindings, ct).ConfigureAwait(false);
+            response.EnsureSuccess();
+            return HydrateVariants<TVariant>(response, edgeName);
+        }
+        catch
+        {
+            // Fail-closed: any dispatch failure marks the session done.
+            closed = true;
+            throw;
+        }
+    }
+
+    private async Task<IReadOnlyList<TVariant>> QueryVariantsRawAsyncCore<TVariant>(
+        string sql,
+        SurrealObject? bindings,
+        Func<string, SurrealObject?, CancellationToken, Task<SurrealQueryResponse>> queryFn,
+        CancellationToken ct)
+        where TVariant : class, IEntity, new()
+    {
+        ArgumentNullException.ThrowIfNull(sql);
+        ThrowIfClosed();
+        try
+        {
+            var edgeName = ResolveVariantEdgeName(typeof(TVariant));
+            var response = await queryFn(sql, bindings, ct).ConfigureAwait(false);
+            response.EnsureSuccess();
+            return HydrateVariants<TVariant>(response, edgeName);
+        }
+        catch
+        {
+            closed = true;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Hydrates each row of the (single-statement) response as a fresh
+    /// <typeparamref name="TVariant"/>, tracks the variant in the session via
+    /// <see cref="IHydrationSink.Track"/>, and feeds the <c>(in, edge, out)</c>
+    /// tuple to <see cref="IHydrationSink.Edge"/> so the in-memory edge index stays
+    /// consistent with what the substrate just returned. The variant emitter calls
+    /// <c>sink.Track(this)</c> from its own Hydrate body but does NOT add the edge
+    /// tuple — that's this helper's job, since the entity-side relation collections
+    /// are read off <c>state.Edges</c>.
+    /// </summary>
+    private List<TVariant> HydrateVariants<TVariant>(SurrealQueryResponse response, string edgeName)
+        where TVariant : class, IEntity, new()
+    {
+        var list = new List<TVariant>();
+        if (response.Count == 0)
+        {
+            return list;
+        }
+        var rows = response.Take(0);
+        IHydrationSink sink = this;
+        if (rows is SurrealListValue arr)
+        {
+            foreach (var row in arr.List)
+            {
+                if (row is SurrealObjectValue obj)
+                {
+                    HydrateOneVariant(obj, sink, edgeName, list);
+                }
+            }
+        }
+        else if (rows is SurrealObjectValue single)
+        {
+            HydrateOneVariant(single, sink, edgeName, list);
+        }
+        return list;
+    }
+
+    private static void HydrateOneVariant<TVariant>(
+        SurrealObjectValue row, IHydrationSink sink, string edgeName, List<TVariant> list)
+        where TVariant : class, IEntity, new()
+    {
+        var v = new TVariant();
+        v.Hydrate(row, sink);
+
+        // Variant Hydrate already called sink.Track(this); now mirror the (in, edge, out)
+        // tuple into the snapshot edge index so subsequent sync reads off the entity-side
+        // relation collection (which queries state.Edges) see this freshly-loaded edge.
+        if (HydrationValue.TryReadRecordId(row, "in", out var src)
+            && HydrationValue.TryReadRecordId(row, "out", out var tgt))
+        {
+            sink.Edge(src, edgeName, tgt);
+        }
+
+        list.Add(v);
+    }
+
+    private async Task<IReadOnlyList<TTarget>> QueryEdgeTraversalAsyncCore<TTarget>(
+        IRecordId endpoint,
+        bool isSource,
+        string edgeName,
+        Func<string, SurrealObject?, CancellationToken, Task<SurrealQueryResponse>> queryFn,
+        CancellationToken ct)
+        where TTarget : class, IEntity, new()
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        ThrowIfClosed();
+        try
+        {
+            var rid = RecordId.From(endpoint);
+            var targetTable = ResolveTargetTable<TTarget>();
+            var bindings = new SurrealObject();
+            string sql;
+            if (isSource)
+            {
+                bindings["_src"] = new SurrealRecordIdValue(rid.ToSdk());
+                bindings["_outTable"] = new StringSurrealValue(targetTable);
+                sql = $"SELECT VALUE out.* FROM {edgeName.Identifier()} WHERE in = $_src AND out.tb = $_outTable;";
+            }
+            else
+            {
+                bindings["_tgt"] = new SurrealRecordIdValue(rid.ToSdk());
+                bindings["_inTable"] = new StringSurrealValue(targetTable);
+                sql = $"SELECT VALUE in.* FROM {edgeName.Identifier()} WHERE out = $_tgt AND in.tb = $_inTable;";
+            }
+
+            var response = await queryFn(sql, bindings, ct).ConfigureAwait(false);
+            response.EnsureSuccess();
+            return HydrateTraversalTargets<TTarget>(response);
+        }
+        catch
+        {
+            closed = true;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Hydrates each row as a fresh <typeparamref name="TTarget"/> through a no-op sink
+    /// — option B is "ad-hoc give me the targets", so endpoints are not tracked in the
+    /// session. Callers that want the targets in the session should route through
+    /// <see cref="FetchAsync{T}(SurfaceQuery{T}, SurrealClient, CancellationToken)"/>
+    /// instead.
+    /// </summary>
+    private static List<TTarget> HydrateTraversalTargets<TTarget>(SurrealQueryResponse response)
+        where TTarget : class, IEntity, new()
+    {
+        var list = new List<TTarget>();
+        if (response.Count == 0)
+        {
+            return list;
+        }
+        var rows = response.Take(0);
+        IHydrationSink sink = NullHydrationSink.Instance;
+        if (rows is SurrealListValue arr)
+        {
+            foreach (var row in arr.List)
+            {
+                if (row is SurrealObjectValue obj)
+                {
+                    var t = new TTarget();
+                    t.Hydrate(obj, sink);
+                    list.Add(t);
+                }
+            }
+        }
+        else if (rows is SurrealObjectValue single)
+        {
+            var t = new TTarget();
+            t.Hydrate(single, sink);
+            list.Add(t);
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// No-op <see cref="IHydrationSink"/> used by option-B traversal hydration so the
+    /// returned target entities don't get tracked in the session. Generated entity
+    /// Hydrate bodies call <c>sink.Track(this)</c> unconditionally; routing through
+    /// the null sink keeps the option-B contract ("ad-hoc give me the targets") intact.
+    /// </summary>
+    private sealed class NullHydrationSink : IHydrationSink
+    {
+        public static readonly NullHydrationSink Instance = new();
+        public void Track(IEntity entity) { }
+        public void Edge(RecordId source, string edgeKind, RecordId target) { }
+        public bool IsTracked(IRecordId id) => false;
+        public void MarkSliceLoaded(RecordId ownerId, string fieldName) { }
+    }
+
+    /// <summary>
+    /// Resolves the SurrealDB table name for <typeparamref name="TTarget"/> by
+    /// instantiating once and reading <c>Id.Table</c>. Cached per <typeparamref name="TTarget"/>
+    /// type (process-wide; <see cref="ConcurrentDictionary{TKey, TValue}"/> for the
+    /// concurrent case where two sessions on different threads first see the same type).
+    /// </summary>
+    private static string ResolveTargetTable<TTarget>() where TTarget : class, IEntity, new()
+    {
+        return TargetTableCache.GetOrAdd(typeof(TTarget), _ =>
+        {
+            var probe = new TTarget();
+            return probe.Id.Table;
+        });
+    }
+
+    private static readonly ConcurrentDictionary<Type, string> TargetTableCache = new();
+
+    /// <summary>
+    /// Resolves the SurrealDB edge name for a relation variant
+    /// <typeparamref name="TVariant"/>: walks the type's attributes for one inheriting
+    /// <see cref="Disruptor.Surface.Annotations.RelationAttribute"/>, looks up the
+    /// sibling kind class (attribute name minus <c>Attribute</c> suffix, same
+    /// namespace, same assembly), and reads its static
+    /// <see cref="IRelationKind.EdgeName"/>. Cached per variant <see cref="Type"/> —
+    /// Type identity is stable, no invalidation needed.
+    /// </summary>
+    private static string ResolveVariantEdgeName(Type variantType)
+        => VariantEdgeNameCache.GetOrAdd(variantType, ResolveVariantEdgeNameUncached);
+
+    private static string ResolveVariantEdgeNameUncached(Type variantType)
+    {
+        // Walk the variant's attributes for the relation kind. Variants only ever carry
+        // one — see RelationVariantExtractor — but the AttributeUsage allows multiple,
+        // so we take the first that derives from RelationAttribute.
+        Type? attrType = null;
+        foreach (var attr in variantType.GetCustomAttributes(inherit: false))
+        {
+            if (attr is RelationAttribute)
+            {
+                attrType = attr.GetType();
+                break;
+            }
+        }
+        if (attrType is null)
+        {
+            throw new InvalidOperationException(
+                $"Variant type {variantType.FullName} carries no [RelationAttribute]-derived attribute. "
+                + "Ensure the class is annotated with the relation kind (e.g. [Restricts]).");
+        }
+
+        // Strip "Attribute" suffix and look the marker class up in the same namespace +
+        // assembly. The generator emits the kind class as a sibling type alongside the
+        // attribute (e.g. RestrictsAttribute → Restricts).
+        var attrName = attrType.Name;
+        if (!attrName.EndsWith("Attribute", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Relation attribute {attrType.FullName} does not end in 'Attribute'; cannot resolve sibling kind class.");
+        }
+        var markerName = attrName[..^"Attribute".Length];
+        var markerFullName = string.IsNullOrEmpty(attrType.Namespace)
+            ? markerName
+            : $"{attrType.Namespace}.{markerName}";
+
+        var markerType = attrType.Assembly.GetType(markerFullName, throwOnError: false);
+        if (markerType is null || !typeof(IRelationKind).IsAssignableFrom(markerType))
+        {
+            throw new InvalidOperationException(
+                $"Could not resolve relation kind marker class '{markerFullName}' for variant {variantType.FullName}. "
+                + "Expected a sibling type implementing IRelationKind alongside the attribute.");
+        }
+
+        // Read the static abstract EdgeName via a generic dispatch (cleaner than
+        // BindingFlags.Public | Static reflection, which works but isn't the canonical
+        // path for static-virtual interface members).
+        var method = GetEdgeNameMethod.MakeGenericMethod(markerType);
+        return (string)method.Invoke(null, null)!;
+    }
+
+    private static readonly ConcurrentDictionary<Type, string> VariantEdgeNameCache = new();
+    private static readonly MethodInfo GetEdgeNameMethod = typeof(SurrealSession)
+        .GetMethod(nameof(GetEdgeName), BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Could not locate GetEdgeName helper.");
+
+    private static string GetEdgeName<TKind>() where TKind : IRelationKind => TKind.EdgeName;
+
     /// <summary>Closes the session — once abandoned, it's done.</summary>
     public void Abandon()
     {
@@ -1379,9 +1675,8 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
 
     /// <summary>
     /// Append-to-log chokepoint for diagnostic-grade tracing of model commands. Track
-    /// records a Create command here; RelateAsync / UnrelateAsync / DeleteAsync record
-    /// their own. Property setters do not go through this path under the explicit-Save
-    /// model.
+    /// records a Create command here; UnrelateAsync / DeleteAsync record their own.
+    /// Property setters do not go through this path under the explicit-Save model.
     /// </summary>
     private void Record(Command c)
     {
@@ -1394,14 +1689,94 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// per-entity now (via <see cref="IEntity.GetParentId"/> + entity backing fields),
     /// so deleted entities naturally drop out of <see cref="QueryChildren{T}"/> when
     /// state.Entities loses them.
+    /// <para>
+    /// When the deleted id is itself a relation variant, drop its specific
+    /// <c>(in, edge, out)</c> tuple from the edge index first so deleting the variant
+    /// also clears the corresponding edge from sync reads. The endpoint-walk below
+    /// only fires when the deleted id is one of the endpoints, not when it's the edge
+    /// row itself.
+    /// </para>
     /// </summary>
     private void CleanupLocalState(RecordId id)
     {
+        if (state.Entities.TryGetValue(id, out var ent) && ent is IRelationVariant)
+        {
+            DropVariantEdge(ent);
+        }
+
         state.Entities.Remove(id);
 
         foreach (var k in state.Edges.Where(k => k.Source == id || k.Target == id).ToList())
         {
             state.Edges.Remove(k);
         }
+    }
+
+    /// <summary>
+    /// Mirrors a freshly-saved relation variant into the read-side edge index. Reads the
+    /// variant's two endpoints off <see cref="IEntity.EnumerateReferences"/> (which yields
+    /// <c>("in", inId)</c> / <c>("out", outId)</c> per the variant emitter contract) and
+    /// adds the <c>(in, edgeName, out)</c> tuple — the edge name comes from
+    /// <c>Id.Table</c>, which the variant's per-kind <c>{Marker}Id</c> struct sets to the
+    /// edge-table name (e.g. <c>"restricts"</c>).
+    /// <para>Either endpoint missing means the variant isn't fully formed yet — bail
+    /// silently rather than synthesise a partial edge.</para>
+    /// </summary>
+    private void RecordVariantEdge(IEntity variant)
+    {
+        RecordId? src = null;
+        RecordId? tgt = null;
+        foreach (var (fieldName, target) in variant.EnumerateReferences())
+        {
+            if (target is null)
+            {
+                continue;
+            }
+            if (fieldName == "in")
+            {
+                src = target;
+            }
+            else if (fieldName == "out")
+            {
+                tgt = target;
+            }
+        }
+        if (src is null || tgt is null)
+        {
+            return;
+        }
+        state.Edges.Add((src.Value, variant.Id.Table, tgt.Value));
+    }
+
+    /// <summary>
+    /// Inverse of <see cref="RecordVariantEdge"/>: removes the variant's
+    /// <c>(in, edge, out)</c> tuple from the edge index. Called from
+    /// <see cref="CleanupLocalState"/> when a variant is being deleted, so subsequent
+    /// sync reads stop seeing the edge before the session is reloaded.
+    /// </summary>
+    private void DropVariantEdge(IEntity variant)
+    {
+        RecordId? src = null;
+        RecordId? tgt = null;
+        foreach (var (fieldName, target) in variant.EnumerateReferences())
+        {
+            if (target is null)
+            {
+                continue;
+            }
+            if (fieldName == "in")
+            {
+                src = target;
+            }
+            else if (fieldName == "out")
+            {
+                tgt = target;
+            }
+        }
+        if (src is null || tgt is null)
+        {
+            return;
+        }
+        state.Edges.Remove((src.Value, variant.Id.Table, tgt.Value));
     }
 }

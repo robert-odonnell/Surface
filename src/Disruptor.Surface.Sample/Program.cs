@@ -3,6 +3,7 @@ using Disruptor.Surface.Runtime.Query;
 using Disruptor.Surface.Sample;
 using Disruptor.Surface.Sample.Models;
 using Disruptor.Surface.Sample.Relations;
+using Disruptor.Surface.Sample.Relations.Variants;
 using Disruptor.Surreal.Connection;
 using SdkSurreal = Disruptor.Surreal.SurrealClient;
 
@@ -52,6 +53,13 @@ await DemoQueryLayer(seededDesignIds, db);
 //    outgoing multi-target leaf, and cross-aggregate id-only.
 await DemoRelationTraversal(db);
 
+// ── 7. Async variant-query terminals (Phase 4). Exercises the option-A surface
+//    (typed-variant rows via QueryVariantsOutgoingAsync) and the option-B surface
+//    (endpoint records via QueryOutgoingAsync / QueryIncomingAsync) on a fresh
+//    session — variants are entities, the terminals dispatch SELECT against the
+//    substrate and return hydrated rows independent of the seed-phase session.
+await DemoAsyncQueryTerminals(seededDesignIds[2], reviewId, db);
+
 return 0;
 
 async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
@@ -59,8 +67,8 @@ async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
     Console.WriteLine($"--- Seeding design '{text}' ---");
 
     var session = new SurrealSession(Workspace.ReferenceRegistry);
-    var restricts = new List<(IEntity Source, IEntity Target)>();
-    var validates = new List<(IEntity Source, IEntity Target)>();
+    var restricts = new List<IEntity>();
+    var validates = new List<IEntity>();
     var design = session.Track(new Design
     {
         RepositoryRoot = $"design.repository_root: {text}",
@@ -126,14 +134,16 @@ async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
                         Details = MintDetails($"design.epic.{i}.feature.{j}.user_story.{k}.test.{l}"),
                     });
 
-                    // Within-aggregate edges. Sync Relate is gone — buffer each pair into
-                    // a small intent list and dispatch RELATE through the transaction
-                    // after SaveAsync lands the entities themselves. Substrate owns the
-                    // atomicity (everything inside the same tx); we just stream commands.
-                    restricts.Add((constraint, userStory));
-                    restricts.Add((constraint, ac));
-                    restricts.Add((constraint, test));
-                    validates.Add((test, ac));
+                    // Within-aggregate edges, now expressed as relation-variant entities.
+                    // Each variant is a [Restricts]/[Validates]-tagged class with [In] /
+                    // [Out] endpoints — the buffered list holds the variant instances
+                    // themselves, and SaveAsync below dispatches each as INSERT RELATION
+                    // INTO {edge} $_content under the same transaction as the entities.
+                    // Multi-target [Restricts] picks the right variant per target type.
+                    restricts.Add(new ConstraintRestrictsUserStory { Source = constraint, Target = userStory });
+                    restricts.Add(new ConstraintRestrictsAcceptanceCriteria { Source = constraint, Target = ac });
+                    restricts.Add(new ConstraintRestrictsTest { Source = constraint, Target = test });
+                    validates.Add(new TestValidatesAcceptanceCriteria { Source = test, Target = ac });
 
                     for (var m = 0; m < 3; m++)
                     {
@@ -155,16 +165,17 @@ async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
     await using var tx = await db.BeginTransactionAsync();
     // Per-entity Save: design's emitted SaveAsync auto-recurses through forward refs
     // (Details), then walks Tracked children (Constraints, Epics, …) recursively. App
-    // owns Commit. Edge dispatch happens in the same tx via RelateAsync — substrate
-    // sees the entities first, then the edges, all under one BEGIN/COMMIT.
+    // owns Commit. Variants are entities too — saving each dispatches INSERT RELATION
+    // INTO {edge} … against the same tx, so the substrate sees the endpoints first,
+    // then the edges, all under one BEGIN/COMMIT.
     await session.SaveAsync(design, tx);
-    foreach (var (src, tgt) in restricts)
+    foreach (var v in restricts)
     {
-        await session.RelateAsync<Restricts>(src, tgt, tx);
+        await session.SaveAsync(v, tx);
     }
-    foreach (var (src, tgt) in validates)
+    foreach (var v in validates)
     {
-        await session.RelateAsync<Validates>(src, tgt, tx);
+        await session.SaveAsync(v, tx);
     }
     await tx.CommitAsync();
     Console.WriteLine($"  committed; design id = {design.Id}\n");
@@ -235,23 +246,24 @@ async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SdkSurreal db)
 
     Console.WriteLine($"  tracked: {session.Log.Count} Track intents captured in the log");
     await using var tx = await db.BeginTransactionAsync();
-    // Per-entity Save: review root recurses through children. Edge dispatch follows in
-    // the same tx via RelateAsync — within-aggregate (Finding→Issue, etc.) and
-    // cross-aggregate (Review→Design, etc.) all stream through the same BEGIN/COMMIT.
+    // Per-entity Save: review root recurses through children, then each variant
+    // instance is saved as INSERT RELATION INTO {edge} … under the same tx —
+    // within-aggregate (Finding→Issue, etc.) and cross-aggregate (Review→Design,
+    // etc.) edges all stream through the same BEGIN/COMMIT.
     await session.SaveAsync(review, tx);
 
     // Within-aggregate edges: Finding informs Issue, Finding cites Observation,
     // DesignChange resolves Issue.
-    await session.RelateAsync<Informs>(finding, issue, tx);
-    await session.RelateAsync<Cites>(finding, observation, tx);
-    await session.RelateAsync<Resolves>(change, issue, tx);
+    await session.SaveAsync(new FindingInformsIssue { Source = finding, Target = issue }, tx);
+    await session.SaveAsync(new FindingCitesObservation { Source = finding, Target = observation }, tx);
+    await session.SaveAsync(new DesignChangeResolvesIssue { Source = change, Target = issue }, tx);
 
     // Cross-aggregate edges (Review → Design): Review assesses the Design, Observation
     // references it, Issue concerns one of its Constraints, DesignChange revises it.
-    await session.RelateAsync<Assesses>(review.Id, targetDesignId, tx);
-    await session.RelateAsync<References>(observation.Id, targetDesignId, tx);
-    await session.RelateAsync<Concerns>(issue.Id, someConstraintId, tx);
-    await session.RelateAsync<Revises>(change.Id, targetDesignId, tx);
+    await session.SaveAsync(new ReviewAssessesDesign { Source = review.Id, Target = targetDesignId }, tx);
+    await session.SaveAsync(new ObservationReferencesDesign { Source = observation.Id, Target = targetDesignId }, tx);
+    await session.SaveAsync(new IssueConcernsConstraint { Source = issue.Id, Target = someConstraintId }, tx);
+    await session.SaveAsync(new DesignChangeRevisesDesign { Source = change.Id, Target = targetDesignId }, tx);
 
     await tx.CommitAsync();
     Console.WriteLine($"  committed; review id = {review.Id}\n");
@@ -519,6 +531,115 @@ static async Task DemoRelationTraversal(SdkSurreal db)
         {
             Console.WriteLine($"        concerns: {id}");
         }
+    }
+
+    Console.WriteLine();
+}
+
+static async Task DemoAsyncQueryTerminals(DesignId designId, ReviewId reviewId, SdkSurreal db)
+{
+    Console.WriteLine("--- Async variant-query terminals (Phase 4) ---");
+
+    // Resolve the demo's two endpoint ids by loading the design once. The loaded
+    // session walks Constraints / Epics → Features → UserStories → AcceptanceCriteria
+    // to grab a known (constraint, ac) pair to query against. A fresh Workspace is
+    // fine — it's stateless (no fields, no caches).
+    var workspace = new Workspace();
+    var loaded = await workspace.LoadDesignAsync(db, designId);
+    var design = loaded.Get<Design>(designId)
+                 ?? throw new InvalidOperationException($"design {designId} did not hydrate");
+    var constraint = design.Constraints.First();
+    var firstAc = design.Epics
+        .SelectMany(e => loaded.QueryChildren<Feature>(e, "features"))
+        .SelectMany(f => loaded.QueryChildren<UserStory>(f, "user_stories"))
+        .SelectMany(u => loaded.QueryChildren<AcceptanceCriteria>(u, "acceptance_criteria"))
+        .First();
+
+    // Reuse `loaded` for the variant queries — option A variants get tracked into the
+    // session's identity map alongside the already-loaded Design aggregate. Option B and
+    // option-B-incoming don't materialise variants at all; they could run against any
+    // session, including a fresh empty one.
+    var session = loaded;
+
+    // (a) Option A — typed-variant rows. Returns ConstraintRestrictsUserStory edges
+    //     outgoing from `constraint`, fully hydrated; the variant entities are tracked
+    //     in `session` and their (in, edge, out) tuples are mirrored in state.Edges so
+    //     subsequent sync reads off the entity-side relation collection see them.
+    //     Note: an edge can point at an endpoint that lives outside the loaded
+    //     aggregate (e.g. a cross-design restricts target). The .Source / .Target
+    //     getters resolve through the session's identity map and throw if the endpoint
+    //     isn't loaded — so we print the raw endpoint ids straight from the row via
+    //     EnumerateReferences(), which always works.
+    var restrictsToUserStories = await session.QueryVariantsOutgoingAsync<ConstraintRestrictsUserStory>(
+        ((IEntity)constraint).Id, db);
+    Console.WriteLine($"  option A — QueryVariantsOutgoingAsync<ConstraintRestrictsUserStory>: {restrictsToUserStories.Count} edge(s)");
+    foreach (var v in restrictsToUserStories.Take(2))
+    {
+        var refs = ((IEntity)v).EnumerateReferences().ToDictionary(r => r.FieldName, r => r.Target);
+        Console.WriteLine($"    - {((IEntity)v).Id}  in={refs["in"]}  out={refs["out"]}");
+    }
+
+    // (b) Option B — endpoint records, no variant materialisation. Same edge as (a)
+    //     but skips the variant entirely; we get back UserStory rows directly. NOT
+    //     auto-tracked in `session`; this is the ad-hoc "give me the targets" path.
+    var userStories = await session.QueryOutgoingAsync<Restricts, UserStory>(
+        ((IEntity)constraint).Id, db);
+    Console.WriteLine($"  option B — QueryOutgoingAsync<Restricts, UserStory>: {userStories.Count} target(s)");
+    foreach (var u in userStories.Take(2))
+    {
+        Console.WriteLine($"    - {((IEntity)u).Id}  asA='{u.AsA}'");
+    }
+
+    // (c) Option B incoming — Test ←[Validates] AC. The endpoint to filter against is
+    //     the AC; the result is the inbound source-side Test rows. Same untracked,
+    //     ad-hoc semantics as (b).
+    var validatingTests = await session.QueryIncomingAsync<Validates, Test>(
+        ((IEntity)firstAc).Id, db);
+    Console.WriteLine($"  option B incoming — QueryIncomingAsync<Validates, Test>: {validatingTests.Count} source(s)");
+    foreach (var t in validatingTests.Take(2))
+    {
+        Console.WriteLine($"    - {((IEntity)t).Id}");
+    }
+
+    // (d) Multi-variant kind dispatch — `[Restricts]` carries three variants pinning
+    //     three different (in.tb, out.tb) pairs (Constraint→UserStory in (a) above,
+    //     Constraint→AcceptanceCriteria here, Constraint→Test next). Each variant
+    //     query filters to its specific pair via the variant's emitted SQL — the
+    //     server only returns the rows whose `out.tb` matches the variant's [Out]
+    //     table. The hydration dispatcher (also emitted per-kind) would discriminate
+    //     if we'd queried via the marker interface; here we ask for one variant at a
+    //     time, so the dispatcher isn't invoked.
+    var restrictsToAcs = await session.QueryVariantsOutgoingAsync<ConstraintRestrictsAcceptanceCriteria>(
+        ((IEntity)constraint).Id, db);
+    Console.WriteLine($"  option A multi-variant — Constraint→AcceptanceCriteria: {restrictsToAcs.Count} edge(s)");
+    var restrictsToTests = await session.QueryVariantsOutgoingAsync<ConstraintRestrictsTest>(
+        ((IEntity)constraint).Id, db);
+    Console.WriteLine($"  option A multi-variant — Constraint→Test: {restrictsToTests.Count} edge(s)");
+
+    // (e) Cross-aggregate variant query — Issue lives in Review, the Constraint it
+    //     concerns lives in Design. The variant's [Out] is `ConstraintId` (typed id,
+    //     no entity resolution); accessing it returns the id directly without
+    //     touching the session's identity map. This is the pattern for any cross-
+    //     aggregate variant: typed ids on the foreign side, entity types only on
+    //     the within-aggregate side.
+    var reviewSession = await new Workspace().LoadReviewAsync(db, reviewId);
+    var review = reviewSession.Get<Review>(reviewId)
+                 ?? throw new InvalidOperationException($"review {reviewId} did not hydrate");
+    var firstIssue = reviewSession.QueryChildren<Issue>(review, "issues").FirstOrDefault();
+    if (firstIssue is not null)
+    {
+        var concernsEdges = await reviewSession.QueryVariantsOutgoingAsync<IssueConcernsConstraint>(
+            ((IEntity)firstIssue).Id, db);
+        Console.WriteLine($"  cross-aggregate option A — IssueConcernsConstraint from issue {((IEntity)firstIssue).Id}: {concernsEdges.Count} edge(s)");
+        foreach (var ec in concernsEdges.Take(2))
+        {
+            // Both endpoints are typed ids — no resolution needed, no throw risk.
+            Console.WriteLine($"    - {((IEntity)ec).Id}  in={ec.Source}  out={ec.Target}");
+        }
+    }
+    else
+    {
+        Console.WriteLine("  cross-aggregate option A — no issues seeded under this review (skipped).");
     }
 
     Console.WriteLine();

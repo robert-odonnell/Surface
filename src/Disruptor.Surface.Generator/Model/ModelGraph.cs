@@ -15,6 +15,7 @@ namespace Disruptor.Surface.Generator.Model;
 public sealed record ModelGraph(
     EquatableArray<TableModel> Tables,
     EquatableArray<RelationKindModel> RelationKinds,
+    EquatableArray<RelationVariantModel> RelationVariants,
     EquatableArray<RelationUnion> Unions,
     EquatableArray<AggregateModel> Aggregates,
     EquatableArray<string> AggregateConflicts,

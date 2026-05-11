@@ -165,4 +165,20 @@ internal static class Diagnostics
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor VariantMustBePartial = new(
+        id: "CG029",
+        title: "Relation variant classes must be partial",
+        messageFormat: "'{0}' is annotated with a relation kind attribute (e.g. [Restricts]) on the class itself but is not declared partial; the generator emits the implementation half (IEntity scaffolding, Hydrate, SaveAsync), so the user-side declaration must use the partial keyword.",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor VariantEndpointPairCollision = new(
+        id: "CG030",
+        title: "Two relation variants share the same (In, Out) endpoint pair",
+        messageFormat: "Relation kind '{0}' has multiple variants with the same ([In] type, [Out] type) pair ({1}); the hydration dispatcher discriminates variants by (in.tb, out.tb), so duplicate endpoint pairs would be ambiguous",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }
