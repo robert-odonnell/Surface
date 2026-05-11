@@ -141,18 +141,18 @@ public sealed class EdgeQuery<TIn, TOut>
     /// undefined results.
     /// </summary>
     public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default)
-        => ExecuteAsync((sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
+        => ExecuteAsync((sql, bindings, c) => db.QueryAsync(sql, bindings, c), ct);
 
     /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.SurrealClient, CancellationToken)"/>
     public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default)
-        => ExecuteAsync((sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
+        => ExecuteAsync((sql, bindings, c) => tx.QueryAsync(sql, bindings, c), ct);
 
     private async Task<IReadOnlyList<EdgeRow>> ExecuteAsync(
-        Func<string, CancellationToken, Task<Disruptor.Surreal.SurrealQueryResponse>> queryFn,
+        Func<string, global::Disruptor.Surreal.Values.SurrealObject?, CancellationToken, Task<Disruptor.Surreal.SurrealQueryResponse>> queryFn,
         CancellationToken ct)
     {
-        var sql = EdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra, orderClauses, limitCount, startAt);
-        var response = await queryFn(sql, ct);
+        var (sql, bindings) = EdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra, orderClauses, limitCount, startAt);
+        var response = await queryFn(sql, bindings, ct);
         var rows = response.Count > 0 ? response.Statements[0].Result : null;
 
         var list = new List<EdgeRow>();
@@ -209,7 +209,7 @@ public sealed class EdgeQuery<TIn, TOut>
 /// </summary>
 internal static class EdgeQueryCompiler
 {
-    public static string Compile(
+    public static (string Sql, global::Disruptor.Surreal.Values.SurrealObject Bindings) Compile(
         string edgeTable,
         IReadOnlyList<IRecordId>? inFilter,
         IReadOnlyList<IRecordId>? outFilter,
@@ -218,6 +218,7 @@ internal static class EdgeQueryCompiler
         int? limit = null,
         int? start = null)
     {
+        var b = new QueryCompiler.Builder();
         var sb = new StringBuilder();
         // SurrealDB requires every ORDER BY field to appear in the SELECT projection
         // ("Missing order idiom <field> in statement selection"). The hydration path
@@ -246,7 +247,7 @@ internal static class EdgeQueryCompiler
 
         if (combined is not null)
         {
-            sb.Append(" WHERE ").Append(combined.CompilePredicate());
+            sb.Append(" WHERE ").Append(b.CompilePredicate(combined));
         }
 
         AppendOrderBy(sb, orderClauses);
@@ -254,7 +255,7 @@ internal static class EdgeQueryCompiler
         AppendStart(sb, start);
 
         sb.Append(';');
-        return sb.ToString();
+        return (sb.ToString(), b.Bindings);
     }
 
     private static void AppendOrderProjection(StringBuilder sb, IReadOnlyList<OrderClause>? clauses)

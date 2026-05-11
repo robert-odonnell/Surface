@@ -844,8 +844,8 @@ Not consumed by the per-entity Save dispatch path — that reads the entity's cu
 
 These are public for diagnostics and tests but most consumers do not call them directly:
 
-- `SurrealCommandEmitter.EmitOne(command, sb)`: renders a single recorded `Command` (Create / Set / Unset / Relate / Unrelate / Delete) into a single SurrealQL statement. Used internally by `RelateAsync` / `UnrelateAsync` / `DeleteAsync`.
-- `SurrealFormatter`: formats identifiers (regex-validated), record ids (bare `table:value` when safe, `table:⟨value⟩` escape when not), and string literals. Defends against `[RecordIdValue<string>]` and emitter bugs.
+- `SurrealFormatter.Identifier(string)`: regex-validates a SurrealQL identifier (table / field / edge name) and returns it. The chokepoint that defends against malformed identifiers reaching emitted SQL.
+- `Command` / `CommandOp` / `CommandLog`: typed records for the diagnostic intent log. Sync `Track` / `Relate` / `Unrelate` and async `DeleteAsync` / `RelateAsync` / `UnrelateAsync` append `Command` entries; tests + telemetry inspect `session.Log.Entries`.
 
 ## Diagnostics
 

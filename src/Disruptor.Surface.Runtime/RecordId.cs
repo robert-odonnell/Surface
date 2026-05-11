@@ -1,10 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace Disruptor.Surface.Runtime;
 
-[JsonConverter(typeof(RecordIdJsonConverter))]
 public readonly record struct RecordId(string Table, string Value) : IRecordId, IComparable<RecordId>
 {
     public string Table { get; } = Table;
@@ -103,11 +100,3 @@ public readonly record struct RecordId(string Table, string Value) : IRecordId, 
     public string ToLiteral() => Value;
 }
 
-public sealed class RecordIdJsonConverter : JsonConverter<RecordId>
-{
-    public override RecordId Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-        => RecordId.Parse(reader.GetString());
-
-    public override void Write(Utf8JsonWriter writer, RecordId value, JsonSerializerOptions options) =>
-        writer.WriteStringValue(value.ToString());
-}

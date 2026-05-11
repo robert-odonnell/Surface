@@ -5,10 +5,11 @@ using Xunit;
 namespace Disruptor.Surface.Tests.Runtime.Query;
 
 /// <summary>
-/// QueryCompiler now returns a single SurrealQL string with all bindings inlined as
-/// literals via <see cref="SurrealFormatter"/>. Strings are quoted via
-/// <see cref="SurrealFormatter.StringLiteral"/>; record ids via
-/// <see cref="SurrealFormatter.RecordId"/>; collections become array literals.
+/// QueryCompiler returns SurrealQL + a typed-CBOR <c>SurrealObject</c> bindings dict.
+/// Each leaf value gets a <c>$_pN</c> placeholder; the value is wrapped as the right
+/// <see cref="global::Disruptor.Surreal.Values.SurrealValue"/> variant in the bindings.
+/// These tests pin the SQL shape; binding values get verified separately via the
+/// helper-extracted SQL plus per-test bindings inspection where it matters.
 /// </summary>
 public sealed class QueryCompilerTests
 {
@@ -21,23 +22,23 @@ public sealed class QueryCompilerTests
     }
 
     [Fact]
-    public void Compile_EqPredicate_InlinesStringLiteral()
+    public void Compile_EqPredicate_BindsValue()
     {
         var pred = new EqPredicate("description", "security");
 
         var sql = Invoke("constraints", pred, pinnedId: null);
 
-        Assert.Equal("SELECT * FROM constraints WHERE description = \"security\";", sql);
+        Assert.Equal("SELECT * FROM constraints WHERE description = $_p0;", sql);
     }
 
     [Fact]
-    public void Compile_PinnedId_InlinesRecordLiteral()
+    public void Compile_PinnedId_BindsRecordIdValue()
     {
         var pin = new RecordId("constraints", "01HX7AF5");
 
         var sql = Invoke("constraints", filter: null, pinnedId: pin);
 
-        Assert.Equal("SELECT * FROM constraints WHERE id = constraints:01HX7AF5;", sql);
+        Assert.Equal("SELECT * FROM constraints WHERE id = $_p0;", sql);
     }
 
     [Fact]
@@ -49,7 +50,7 @@ public sealed class QueryCompilerTests
         var sql = Invoke("constraints", pred, pin);
 
         Assert.Equal(
-            "SELECT * FROM constraints WHERE id = constraints:01HX7AF5 AND description = \"security\";",
+            "SELECT * FROM constraints WHERE id = $_p0 AND description = $_p1;",
             sql);
     }
 
@@ -65,7 +66,7 @@ public sealed class QueryCompilerTests
         var sql = Invoke("constraints", pred, pinnedId: null);
 
         Assert.Equal(
-            "SELECT * FROM constraints WHERE (description = \"security\" AND status = \"open\");",
+            "SELECT * FROM constraints WHERE (description = $_p0 AND status = $_p1);",
             sql);
     }
 
@@ -81,7 +82,7 @@ public sealed class QueryCompilerTests
         var sql = Invoke("issues", pred, pinnedId: null);
 
         Assert.Equal(
-            "SELECT * FROM issues WHERE (status = \"open\" OR status = \"acknowledged\");",
+            "SELECT * FROM issues WHERE (status = $_p0 OR status = $_p1);",
             sql);
     }
 
@@ -92,21 +93,21 @@ public sealed class QueryCompilerTests
 
         var sql = Invoke("constraints", pred, pinnedId: null);
 
-        Assert.Equal("SELECT * FROM constraints WHERE !(description = \"x\");", sql);
+        Assert.Equal("SELECT * FROM constraints WHERE !(description = $_p0);", sql);
     }
 
     [Fact]
-    public void Compile_TypedRecordId_NormalisedToRecordLiteral()
+    public void Compile_TypedRecordId_BindsAsRecordIdValue()
     {
-        // PropertyExpr<TId>.Eq(typedId) flows the typed id through; the compiler
-        // collapses IRecordId → canonical RecordId before SurrealFormatter renders it,
-        // so the wire form is the SurrealQL record literal — not a JSON-quoted string.
+        // PropertyExpr<TId>.Eq(typedId) flows the typed id through; the compiler wraps
+        // it as a SurrealRecordIdValue binding so Thing typing survives CBOR — not a
+        // string fallback.
         var typed = new TypedTestId("constraints", "01HX7AF5");
         var pred = new EqPredicate("id", typed);
 
         var sql = Invoke("constraints", pred, pinnedId: null);
 
-        Assert.Equal("SELECT * FROM constraints WHERE id = constraints:01HX7AF5;", sql);
+        Assert.Equal("SELECT * FROM constraints WHERE id = $_p0;", sql);
     }
 
     [Fact]
@@ -181,27 +182,25 @@ public sealed class QueryCompilerTests
 
         var sql = Invoke("issues", pred, pinnedId: null);
 
-        Assert.Equal($"SELECT * FROM issues WHERE priority {surreal} 5;", sql);
+        Assert.Equal($"SELECT * FROM issues WHERE priority {surreal} $_p0;", sql);
     }
 
     [Fact]
-    public void Compile_InPredicate_InlinesArrayLiteral()
+    public void Compile_InPredicate_BindsArrayValue()
     {
         var pred = new InPredicate("status", ["open", "acknowledged"]);
 
         var sql = Invoke("issues", pred, pinnedId: null);
 
-        Assert.Equal(
-            "SELECT * FROM issues WHERE status IN [\"open\", \"acknowledged\"];",
-            sql);
+        Assert.Equal("SELECT * FROM issues WHERE status IN $_p0;", sql);
     }
 
     [Fact]
-    public void Compile_InPredicate_WithTypedIds_NormalisesEachElement()
+    public void Compile_InPredicate_WithTypedIds_BindsAsList()
     {
-        // Each element passes through the same canonicalisation as a single typed-id
-        // binding — the compiler walks the collection and renders each element with
-        // SurrealFormatter so typed ids end up as record literals, not strings.
+        // The compiler wraps the IEnumerable into a single SurrealListValue binding,
+        // each element typed as the right SurrealValue variant — typed ids become
+        // SurrealRecordIdValue, preserving Thing typing through CBOR.
         var ids = new object?[]
         {
             new TypedTestId("constraints", "01HX7AF5"),
@@ -211,9 +210,7 @@ public sealed class QueryCompilerTests
 
         var sql = Invoke("constraints", pred, pinnedId: null);
 
-        Assert.Equal(
-            "SELECT * FROM constraints WHERE id IN [constraints:01HX7AF5, constraints:01HX7AF6];",
-            sql);
+        Assert.Equal("SELECT * FROM constraints WHERE id IN $_p0;", sql);
     }
 
     [Fact]
@@ -224,21 +221,21 @@ public sealed class QueryCompilerTests
         var sql = Invoke("constraints", pred, pinnedId: null);
 
         Assert.Equal(
-            "SELECT * FROM constraints WHERE string::contains(description, \"security\");",
+            "SELECT * FROM constraints WHERE string::contains(description, $_p0);",
             sql);
     }
 
     [Fact]
     public void Compile_ContainsPredicate_PreservesStringAsScalarNotEnumerable()
     {
-        // string is IEnumerable<char>; if the normaliser decomposed strings it would
+        // string is IEnumerable<char>; if the wrapper decomposed strings it would
         // emit a list of characters. This test pins down that strings stay scalar.
         var pred = new ContainsPredicate("description", "abc");
 
         var sql = Invoke("constraints", pred, pinnedId: null);
 
         Assert.Equal(
-            "SELECT * FROM constraints WHERE string::contains(description, \"abc\");",
+            "SELECT * FROM constraints WHERE string::contains(description, $_p0);",
             sql);
     }
 
@@ -253,7 +250,7 @@ public sealed class QueryCompilerTests
         var sql = Invoke("issues", pred, pinnedId: null);
 
         Assert.Equal(
-            "SELECT * FROM issues WHERE (priority > 3 AND status IN [\"open\", \"acknowledged\"] AND string::contains(description, \"security\"));",
+            "SELECT * FROM issues WHERE (priority > $_p0 AND status IN $_p1 AND string::contains(description, $_p2));",
             sql);
     }
 
@@ -346,7 +343,7 @@ public sealed class QueryCompilerTests
         var sql = InvokeWithIncludes("designs", filter: null, pinnedId: null, includes: includes);
 
         Assert.Equal(
-            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = \"x\") AS constraints FROM designs;",
+            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = $_p0) AS constraints FROM designs;",
             sql);
     }
 
@@ -395,9 +392,11 @@ public sealed class QueryCompilerTests
     }
 
     [Fact]
-    public void Compile_TopLevelFilterAndChildrenFilter_ComposeIndependently()
+    public void Compile_TopLevelFilterAndChildrenFilter_ShareTheBindingsCounter()
     {
-        // No shared parameter space — each filter inlines its own literal in place.
+        // Single counter across the recursion — child predicate binds first ($_p0)
+        // because BuildProjection runs before AppendWhereOrderLimitStart in the SELECT
+        // shape, then the top-level filter binds next ($_p1).
         var includes = new IIncludeNode[]
         {
             new IncludeChildrenNode(
@@ -413,8 +412,8 @@ public sealed class QueryCompilerTests
             includes: includes);
 
         Assert.Equal(
-            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = \"inner\") AS constraints "
-            + "FROM designs WHERE description = \"outer\";",
+            "SELECT *, (SELECT * FROM constraints WHERE design = $parent.id AND description = $_p0) AS constraints "
+            + "FROM designs WHERE description = $_p1;",
             sql);
     }
 
@@ -499,7 +498,7 @@ public sealed class QueryCompilerTests
         var sql = InvokeWithIncludes("tests", filter: null, pinnedId: null, includes: [rel]);
 
         Assert.Equal(
-            "SELECT *, (->validates->acceptance_criteria[WHERE status = \"passed\"].*) AS validations FROM tests;",
+            "SELECT *, (->validates->acceptance_criteria[WHERE status = $_p0].*) AS validations FROM tests;",
             sql);
     }
 
@@ -584,7 +583,7 @@ public sealed class QueryCompilerTests
         var sql = InvokeWithIncludes("tests", filter: null, pinnedId: null, includes: [rel]);
 
         Assert.Equal(
-            "SELECT *, (SELECT *, details.* FROM ->validates->acceptance_criteria WHERE status = \"passed\") AS validations FROM tests;",
+            "SELECT *, (SELECT *, details.* FROM ->validates->acceptance_criteria WHERE status = $_p0) AS validations FROM tests;",
             sql);
     }
 
@@ -625,12 +624,13 @@ public sealed class QueryCompilerTests
     [Fact]
     public void Compile_WithLimit_AppendsLimitClauseAtTheEnd()
     {
-        var sql = new Query<TestTable>("symbols")
+        var (sql, bindings) = new Query<TestTable>("symbols")
             .Where(new EqPredicate("kind", "method"))
             .Limit(10)
             .Compile();
 
-        Assert.Equal("SELECT * FROM symbols WHERE kind = \"method\" LIMIT 10;", sql);
+        Assert.Equal("SELECT * FROM symbols WHERE kind = $_p0 LIMIT 10;", sql);
+        Assert.Equal(new global::Disruptor.Surreal.Values.StringSurrealValue("method"), bindings["_p0"]);
     }
 
     [Fact]
@@ -638,7 +638,7 @@ public sealed class QueryCompilerTests
     {
         // SurrealQL clause order is fixed: ORDER BY → LIMIT → START. Pinning the
         // emit order so paged reads (Limit + Start) don't drift into a syntax error.
-        var sql = new Query<TestTable>("symbols").Limit(20).Start(40).Compile();
+        var (sql, _) = new Query<TestTable>("symbols").Limit(20).Start(40).Compile();
 
         Assert.Equal("SELECT * FROM symbols LIMIT 20 START 40;", sql);
     }
@@ -646,8 +646,8 @@ public sealed class QueryCompilerTests
     [Fact]
     public void Compile_OrderBy_EmitsAscByDefault_AndDescWhenAsked()
     {
-        var ascSql = new Query<TestTable>("symbols").OrderBy(new PropertyExpr<string>("name")).Compile();
-        var descSql = new Query<TestTable>("symbols")
+        var (ascSql, _) = new Query<TestTable>("symbols").OrderBy(new PropertyExpr<string>("name")).Compile();
+        var (descSql, _) = new Query<TestTable>("symbols")
             .OrderBy(new PropertyExpr<int>("line"), OrderDirection.Descending)
             .Compile();
 
@@ -658,7 +658,7 @@ public sealed class QueryCompilerTests
     [Fact]
     public void Compile_OrderByThenBy_ChainsCommaSeparated()
     {
-        var sql = new Query<TestTable>("symbols")
+        var (sql, _) = new Query<TestTable>("symbols")
             .OrderBy(new PropertyExpr<string>("kind"))
             .ThenBy(new PropertyExpr<string>("name"), OrderDirection.Descending)
             .Compile();
@@ -670,7 +670,7 @@ public sealed class QueryCompilerTests
     public void Compile_FullClauseStack_RendersInCanonicalOrder()
     {
         // WHERE → ORDER BY → LIMIT → START — same shape SurrealQL parses.
-        var sql = new Query<TestTable>("symbols")
+        var (sql, bindings) = new Query<TestTable>("symbols")
             .Where(PropertyExprStringExtensions.Contains(new PropertyExpr<string>("name"), "Foo"))
             .OrderBy(new PropertyExpr<string>("name"))
             .Limit(5)
@@ -678,8 +678,9 @@ public sealed class QueryCompilerTests
             .Compile();
 
         Assert.Equal(
-            "SELECT * FROM symbols WHERE string::contains(name, \"Foo\") ORDER BY name ASC LIMIT 5 START 10;",
+            "SELECT * FROM symbols WHERE string::contains(name, $_p0) ORDER BY name ASC LIMIT 5 START 10;",
             sql);
+        Assert.Equal(new global::Disruptor.Surreal.Values.StringSurrealValue("Foo"), bindings["_p0"]);
     }
 
     [Fact]
@@ -688,7 +689,7 @@ public sealed class QueryCompilerTests
         // Defensive: passing zero or a negative number should be a "no-op no cap"
         // signal rather than silently emitting `LIMIT 0` (which Surreal honours and
         // returns nothing).
-        var sql = new Query<TestTable>("symbols").Limit(10).Limit(0).Compile();
+        var (sql, _) = new Query<TestTable>("symbols").Limit(10).Limit(0).Compile();
 
         Assert.Equal("SELECT * FROM symbols;", sql);
     }
@@ -696,7 +697,7 @@ public sealed class QueryCompilerTests
     [Fact]
     public void CompileIdsOnly_NoFilter_NoPin_EmitsBareIdSelect()
     {
-        var sql = new Query<TestTable>("symbols").CompileIdsOnly();
+        var (sql, _) = new Query<TestTable>("symbols").CompileIdsOnly();
 
         Assert.Equal("SELECT id FROM symbols;", sql);
     }
@@ -704,7 +705,7 @@ public sealed class QueryCompilerTests
     [Fact]
     public void CompileIdsOnly_WithWhereOrderLimitStart_RendersCanonicalClauseOrder()
     {
-        var sql = new Query<TestTable>("symbols")
+        var (sql, bindings) = new Query<TestTable>("symbols")
             .Where(new PropertyExpr<string>("kind").Eq("method"))
             .OrderBy(new PropertyExpr<string>("name"))
             .Limit(20)
@@ -712,18 +713,21 @@ public sealed class QueryCompilerTests
             .CompileIdsOnly();
 
         Assert.Equal(
-            "SELECT id FROM symbols WHERE kind = \"method\" ORDER BY name ASC LIMIT 20 START 40;",
+            "SELECT id FROM symbols WHERE kind = $_p0 ORDER BY name ASC LIMIT 20 START 40;",
             sql);
+        Assert.Equal(new global::Disruptor.Surreal.Values.StringSurrealValue("method"), bindings["_p0"]);
     }
 
     [Fact]
-    public void CompileIdsOnly_PinnedId_InlinesRecordLiteral()
+    public void CompileIdsOnly_PinnedId_BindsRecordIdValue()
     {
         var pin = new RecordId("constraints", "01HX7AF5");
 
-        var sql = new Query<TestTable>("constraints").WithId(pin).CompileIdsOnly();
+        var (sql, bindings) = new Query<TestTable>("constraints").WithId(pin).CompileIdsOnly();
 
-        Assert.Equal("SELECT id FROM constraints WHERE id = constraints:01HX7AF5;", sql);
+        Assert.Equal("SELECT id FROM constraints WHERE id = $_p0;", sql);
+        var bound = Assert.IsType<global::Disruptor.Surreal.Values.SurrealRecordIdValue>(bindings["_p0"]);
+        Assert.Equal("constraints", bound.SurrealRecordId.Table.Name);
     }
 
     [Fact]
@@ -774,7 +778,10 @@ public sealed class QueryCompilerTests
                 modifiers: null)!;
         try
         {
-            return (string)method.Invoke(null, [table, filter, pinnedId, includes, null, null, null])!;
+            // QueryCompiler.Compile returns ValueTuple<string, SurrealObject>; grab the
+            // Sql portion. Tests that need to verify bindings use an alternate helper.
+            var result = method.Invoke(null, [table, filter, pinnedId, includes, null, null, null])!;
+            return (string)result.GetType().GetField("Item1")!.GetValue(result)!;
         }
         catch (System.Reflection.TargetInvocationException tie) when (tie.InnerException is not null)
         {

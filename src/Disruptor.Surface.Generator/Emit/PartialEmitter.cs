@@ -989,7 +989,7 @@ internal static class PartialEmitter
     /// Walks forward dependencies (<c>[Reference]</c> / <c>[Parent]</c> targets that
     /// aren't tracked yet → recurse via <c>ctx.SaveAsync</c>); builds a content dict
     /// from <c>[Property]</c> + <c>[Reference]</c> + <c>[Parent]</c> backing fields;
-    /// dispatches <c>CREATE</c> or <c>UPDATE</c> via SurrealCommandEmitter; recurses
+    /// dispatches <c>CREATE</c> or <c>UPDATE</c> via the SDK's typed methods (CBOR, no SurrealQL); recurses
     /// into new children via the <c>[Children]</c> property accessor; dispatches new
     /// outgoing relations via <see cref="SurrealSession.GetNewOutgoingEdges{TKind}"/>.
     /// </summary>
@@ -1025,8 +1025,12 @@ internal static class PartialEmitter
         }
         if (hasForwardDeps) builder.AppendLine();
 
-        // Content dictionary: [Property] (scalar + element collections) + [Reference] + [Parent] FKs.
-        builder.Append(indent).AppendLine("    var __content = new global::System.Collections.Generic.Dictionary<string, object?>();");
+        // Typed CBOR content — SurrealObject built via ContentValue.Set helpers (the
+        // mirror of HydrationValue's read side). Each scalar wraps into the right
+        // SurrealValue variant; nullable values that are null get omitted so the
+        // schema's DEFAULT applies. No SurrealQL string formatting, no JSON, no
+        // reflection — pure typed CBOR.
+        builder.Append(indent).AppendLine("    var __content = new global::Disruptor.Surreal.Values.SurrealObject();");
         foreach (var p in table.Properties)
         {
             if (p.Kinds.HasFlag(PropertyKind.Id)) continue;
@@ -1041,58 +1045,57 @@ internal static class PartialEmitter
                 if (IsElementCollection(p.Type) && p.InlineMembers.Count > 0)
                 {
                     // Element collection of records — typed per-element SurrealObject
-                    // construction, no reflection. SurrealFormatter renders the resulting
-                    // List<Dictionary<string, object?>> as a SurrealQL array of object literals.
+                    // construction; the outer SurrealList wraps as SurrealListValue.
                     var elemLocal = $"__elem_{ToCamel(p.Name)}";
+                    var objLocal = $"__obj_{ToCamel(p.Name)}";
                     builder
-                        .Append(indent).Append("    {")
-                        .AppendLine()
-                        .Append(indent).Append("        var __list = new global::System.Collections.Generic.List<global::System.Collections.Generic.Dictionary<string, object?>>(")
+                        .Append(indent).AppendLine("    {")
+                        .Append(indent).Append("        var __list = new global::Disruptor.Surreal.Values.SurrealList(")
                         .Append(backing).AppendLine(".Count);")
                         .Append(indent).Append("        foreach (var ").Append(elemLocal).Append(" in ").Append(backing).AppendLine(")")
                         .Append(indent).AppendLine("        {")
-                        .Append(indent).AppendLine("            __list.Add(new global::System.Collections.Generic.Dictionary<string, object?>");
-                    builder.Append(indent).AppendLine("            {");
+                        .Append(indent).Append("            var ").Append(objLocal).AppendLine(" = new global::Disruptor.Surreal.Values.SurrealObject();");
                     foreach (var im in p.InlineMembers)
                     {
                         var subLit = Quote(SurrealNaming.ToFieldName(im.Name));
-                        builder.Append(indent).Append("                [").Append(subLit).Append("] = ").Append(elemLocal).Append('.').Append(im.Name).AppendLine(",");
+                        builder.Append(indent).Append("            global::Disruptor.Surface.Runtime.ContentValue.Set(").Append(objLocal).Append(", ").Append(subLit)
+                               .Append(", ").Append(elemLocal).Append('.').Append(im.Name).AppendLine(");");
                     }
-                    builder.Append(indent).AppendLine("            });");
+                    builder.Append(indent).Append("            __list.Add(new global::Disruptor.Surreal.Values.SurrealObjectValue(").Append(objLocal).AppendLine("));");
                     builder.Append(indent).AppendLine("        }");
-                    builder.Append(indent).Append("        __content[").Append(fieldLit).AppendLine("] = __list;");
+                    builder.Append(indent).Append("        __content[").Append(fieldLit).AppendLine("] = new global::Disruptor.Surreal.Values.SurrealListValue(__list);");
                     builder.Append(indent).AppendLine("    }");
                 }
                 else
                 {
-                    // Scalar [Property] (or primitive-element collection) — pass the
-                    // backing field directly. SurrealFormatter handles primitives,
-                    // primitive arrays, and IEnumerable.
-                    builder.Append(indent).Append("    __content[").Append(fieldLit).Append("] = ").Append(backing).AppendLine(";");
+                    // Scalar [Property] — typed Set picks the right SurrealValue variant
+                    // based on the C# type. Nullable scalars omit null values (schema
+                    // DEFAULT applies).
+                    builder.Append(indent).Append("    global::Disruptor.Surface.Runtime.ContentValue.Set(__content, ").Append(fieldLit).Append(", ").Append(backing).AppendLine(");");
                 }
             }
             else if (p.Kinds.HasFlag(PropertyKind.Reference) || p.Kinds.HasFlag(PropertyKind.Parent))
             {
                 // FK rendered from the cached id (or the entity's id if only the entity
-                // ref is set — e.g. user assigned but Save hasn't yet rebuilt the id).
+                // ref is set — user assigned but Save hasn't yet rebuilt the id). Emits
+                // as a typed SurrealRecordIdValue, preserving Thing typing through CBOR.
                 var backing = $"_{ToCamel(p.Name)}";
                 var idBacking = $"_{ToCamel(p.Name)}Id";
                 builder
-                    .Append(indent).Append("    __content[").Append(fieldLit).Append("] = ").Append(idBacking)
-                    .Append(" ?? (").Append(backing).Append(" is null ? null : (object)((")
-                    .Append(EntityInterface).Append(')').Append(backing).AppendLine(").Id);");
+                    .Append(indent).Append("    global::Disruptor.Surface.Runtime.ContentValue.SetRef(__content, ").Append(fieldLit).Append(", ").Append(idBacking)
+                    .Append(" ?? (").Append(backing).Append(" is null ? (global::Disruptor.Surface.Runtime.RecordId?)null : ((")
+                    .Append(EntityInterface).Append(')').Append(backing).AppendLine(").Id));");
             }
         }
         builder.AppendLine();
 
-        // Dispatch via SurrealCommandEmitter — same render path as RelateAsync / DeleteAsync.
+        // Typed CBOR dispatch — SDK methods accept ISurrealRecordId + SurrealObject and
+        // CBOR-encode end-to-end. No SurrealQL string, no escape rules.
         builder
-            .Append(indent).AppendLine("    var __cmd = __isNew")
-            .Append(indent).AppendLine("        ? global::Disruptor.Surface.Runtime.Command.Create(__id, __content)")
-            .Append(indent).AppendLine("        : global::Disruptor.Surface.Runtime.Command.Upsert(__id, __content);")
-            .Append(indent).AppendLine("    var __sb = new global::System.Text.StringBuilder();")
-            .Append(indent).AppendLine("    global::Disruptor.Surface.Runtime.SurrealCommandEmitter.EmitOne(__cmd, __sb);")
-            .Append(indent).AppendLine("    await ctx.Transaction.QueryAsync(__sb.ToString(), bindings: null, ct);")
+            .Append(indent).AppendLine("    if (__isNew)")
+            .Append(indent).AppendLine("        await ctx.Transaction.CreateAsync(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk(__id), __content, ct);")
+            .Append(indent).AppendLine("    else")
+            .Append(indent).AppendLine("        await ctx.Transaction.UpsertAsync(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk(__id), __content, ct);")
             .AppendLine()
             .Append(indent).AppendLine("    ctx.MarkSaved(this);");
 
@@ -1114,7 +1117,8 @@ internal static class PartialEmitter
 
         // Outgoing relations dispatch: for each [ForwardRelation]-bearing property, ask
         // the session for new (post-load) outgoing edges of that kind and dispatch a
-        // RELATE per new edge.
+        // RELATE per new edge — reuses Session.RelateAsync<TKind>'s typed-CBOR path
+        // (Idempotent edge id with CBOR-bound endpoints, no string formatting).
         foreach (var p in table.Properties)
         {
             if (p.RelationRole != RelationRole.ForwardRelation) continue;
@@ -1126,18 +1130,12 @@ internal static class PartialEmitter
             var markerName = SurrealNaming.StripAttributeSuffix(attrName);
             var markerFqn = string.IsNullOrEmpty(attrNs) ? $"global::{markerName}" : $"global::{attrNs}.{markerName}";
             var targetLocal = $"__rel_{ToCamel(p.Name)}";
-            var sbLocal = $"__sb_{ToCamel(p.Name)}";
             builder
                 .AppendLine()
                 .Append(indent).Append("    foreach (var ").Append(targetLocal)
                 .Append(" in Session.GetNewOutgoingEdges<").Append(markerFqn).AppendLine(">(this))")
-                .Append(indent).AppendLine("    {")
-                .Append(indent).Append("        var ").Append(sbLocal).AppendLine(" = new global::System.Text.StringBuilder();")
-                .Append(indent).Append("        global::Disruptor.Surface.Runtime.SurrealCommandEmitter.EmitOne(")
-                    .Append("global::Disruptor.Surface.Runtime.Command.Relate(__id, global::Disruptor.Surface.Runtime.RecordId.Idempotent(")
-                    .Append(markerFqn).Append(".EdgeName), ").Append(targetLocal).Append("), ").Append(sbLocal).AppendLine(");")
-                .Append(indent).Append("        await ctx.Transaction.QueryAsync(").Append(sbLocal).AppendLine(".ToString(), bindings: null, ct);")
-                .Append(indent).AppendLine("    }");
+                .Append(indent).Append("        await Session.RelateAsync<").Append(markerFqn).Append(">(__id, ")
+                .Append(targetLocal).AppendLine(", ctx.Transaction, ct);");
         }
 
         builder.Append(indent).AppendLine("}");

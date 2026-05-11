@@ -157,15 +157,28 @@ Predicate AST + Includes AST + PinnedId
         v
 QueryCompiler.Compile
         |
-        +--> SurrealQL with all values inlined as literals via SurrealFormatter:
+        +--> (sql, bindings) — SurrealQL with $_pN placeholders + a typed-CBOR
+             SurrealObject with each leaf value wrapped as the right SurrealValue
+             variant (records become SurrealRecordIdValue, IN lists become
+             SurrealListValue, etc.):
              SELECT *, field.*, (SELECT … FROM child WHERE parent = $parent.id) AS …
-             WHERE description = "x" AND id = constraints:01HX…
+             WHERE description = $_p0 AND id = $_p1
+             bindings = { _p0: "x", _p1: SurrealRecordIdValue(constraints:01HX…) }
         |
         v
-Disruptor.Surreal.SurrealClient.QueryAsync (or SurrealTransaction.QueryAsync)
+Disruptor.Surreal.SurrealClient.QueryAsync(sql, bindings)
+(or SurrealTransaction.QueryAsync — same shape inside a transaction)
         |
         +--> CBOR over WebSocket → SurrealQueryResponse → SurrealValue tree
 ```
+
+Identifiers (table names, field names, edge names, slice keys) stay inlined in the SQL
+— they're trusted, regex-validated by `SurrealFormatter.Identifier`. `LIMIT` / `START`
+integers also stay inlined (no escape concern). User-supplied values always go via the
+typed bindings. Same goes for the per-entity Save dispatch and Delete / Relate /
+Unrelate paths — they call `tx.CreateAsync(id, content)` / `tx.UpsertAsync` /
+`tx.DeleteAsync(id)` / `tx.RelateAsync(src, edge, tgt, content?)` directly with typed
+arguments. No SurrealQL string formatting, no JSON anywhere on the wire path.
 
 Generator-emitted hydrator delegates on each `IncludeChildrenNode` capture the right concrete `new TChild()` + `Hydrate(SurrealValue, IHydrationSink)` at codegen time, so the runtime walks the `SurrealValue` tree without reflection. `Fetch` reuses the same compile-and-hydrate path: existing tracked entities re-Hydrate (slice-widening; scalar fields get clobbered with the DB row, no merge guard); brand-new entities get the include's full Hydrate.
 
@@ -265,7 +278,7 @@ await using var db = await SurrealClient.ConnectAsync(SurrealOptions.Parse(
     "Url=ws://localhost:8000;Namespace=app;Database=main;User=root;Password=root"));
 ```
 
-Generated load methods, query terminals, schema application, and per-entity Save dispatch all call `Surreal.QueryAsync(sql, bindings, ct)` (or `Transaction.QueryAsync(...)`) directly. Every value (record ids, strings, numbers) is rendered as a SurrealQL literal by `SurrealFormatter` at the call site (`QueryCompiler`, the per-entity Save bodies emitted by `PartialEmitter`) before reaching the SDK. The bindings dictionary slot stays empty because every literal is already inlined — and SurrealDB's wire-binding of record-shaped objects has historically lost `Thing` types, which inlining sidesteps entirely.
+Generated query terminals call `tx.QueryAsync(sql, bindings)` with typed-CBOR `SurrealObject` bindings — `QueryCompiler` allocates a `$_pN` placeholder per leaf value and pushes it into bindings as the right `SurrealValue` variant (records become `SurrealRecordIdValue`, IN lists become `SurrealListValue`, etc.). Per-entity Save / Delete / Relate / Unrelate dispatch goes through the SDK's typed CRUD methods directly: `tx.CreateAsync(id, content)` / `tx.UpsertAsync(id, content)` / `tx.DeleteAsync(id)` / `tx.RelateAsync(src, edge, tgt, content?)`. The wire path is end-to-end CBOR — no SurrealQL formatting for user values, no escape rules, no JSON. Schema DDL stays as text (`tx.QueryAsync(chunk)` per chunk) since DDL is fundamentally text. The aggregate loader's nested SELECT also stays text but the root id flows in via a typed `$_rootId` binding. SurrealDB's wire-binding of record-shaped objects through CBOR preserves `Thing` types correctly — the older JSON-RPC binding limitation that the inlining-via-`SurrealFormatter` workaround addressed doesn't apply on the CBOR transport.
 
 The SDK's `SurrealQueryResponse` and `Disruptor.Surreal.Values.SurrealValue` are the Value-tree return shape; `HydrationValue` walks them in emitted hydration bodies.
 

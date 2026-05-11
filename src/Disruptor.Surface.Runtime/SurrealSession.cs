@@ -445,23 +445,23 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// </summary>
     public Task FetchAsync<T>(Query.Query<T> query, SurrealClient db, CancellationToken ct = default)
         where T : class, IEntity, new()
-        => FetchAsync(query, (sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
+        => FetchAsync(query, (sql, bindings, c) => db.QueryAsync(sql, bindings, c), ct);
 
     /// <inheritdoc cref="FetchAsync{T}(Query.Query{T}, SurrealClient, CancellationToken)"/>
     public Task FetchAsync<T>(Query.Query<T> query, SurrealTransaction tx, CancellationToken ct = default)
         where T : class, IEntity, new()
-        => FetchAsync(query, (sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
+        => FetchAsync(query, (sql, bindings, c) => tx.QueryAsync(sql, bindings, c), ct);
 
     private async Task FetchAsync<T>(
         Query.Query<T> query,
-        Func<string, CancellationToken, Task<SurrealQueryResponse>> queryFn,
+        Func<string, SurrealObject?, CancellationToken, Task<SurrealQueryResponse>> queryFn,
         CancellationToken ct)
         where T : class, IEntity, new()
     {
         ThrowIfClosed();
 
-        var sql = query.Compile();
-        var response = await queryFn(sql, ct);
+        var (sql, bindings) = query.Compile();
+        var response = await queryFn(sql, bindings, ct);
         var rows = response.Count > 0 ? response.Statements[0].Result : null;
 
         IHydrationSink sink = this;
@@ -845,8 +845,11 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     /// Dispatches a RELATE through <paramref name="tx"/>: creates an edge of kind
     /// <typeparamref name="TKind"/> from <paramref name="source"/> to <paramref name="target"/>.
     /// Updates the in-memory edge index too so subsequent reads see the new edge.
-    /// Use the <see cref="RecordId.Idempotent"/> default for safe re-dispatch (the
-    /// schema's UNIQUE INDEX rejects duplicates regardless).
+    /// <para>
+    /// Idempotent edge id strategy: the edge row id is a deterministic hash of
+    /// <c>{source}|{table}|{target}</c>, so re-dispatching the same triple lands on the
+    /// same row. The schema's <c>UNIQUE INDEX</c> guards against duplicates regardless.
+    /// </para>
     /// </summary>
     public async Task RelateAsync<TKind>(
         IRecordId source,
@@ -862,11 +865,22 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         {
             var src = RecordId.From(source);
             var tgt = RecordId.From(target);
-            var edge = RecordId.Idempotent(TKind.EdgeName);
+            var edge = RecordId.Idempotent(TKind.EdgeName).Resolve(src, tgt);
             state.Edges[(src, TKind.EdgeName, tgt)] = true;
-            var sb = new StringBuilder();
-            SurrealCommandEmitter.EmitOne(Command.Relate(src, edge, tgt), sb);
-            await tx.QueryAsync(sb.ToString(), bindings: null, ct).ConfigureAwait(false);
+
+            // Typed dispatch via the SDK's QueryAsync with CBOR-encoded bindings — the
+            // SDK's RelateAsync(src, edgeTable, tgt) auto-mints the edge id, so we
+            // use raw SurrealQL with an explicit edge id to preserve the Idempotent
+            // strategy. Values flow as typed SurrealRecordIdValue bindings; no SurrealQL
+            // formatting / no string escape rules.
+            var bindings = new SurrealObject
+            {
+                ["_src"] = new SurrealRecordIdValue(src.ToSdk()),
+                ["_edge"] = new SurrealRecordIdValue(edge.ToSdk()),
+                ["_tgt"] = new SurrealRecordIdValue(tgt.ToSdk()),
+            };
+            await tx.QueryAsync("RELATE $_src->$_edge->$_tgt;", bindings, ct).ConfigureAwait(false);
+            Record(Command.Relate(src, edge, tgt));
         }
         catch
         {
@@ -907,9 +921,26 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                 if (tgt is { } t && key.Target != t) continue;
                 state.Edges.Remove(key);
             }
-            var sb = new StringBuilder();
-            SurrealCommandEmitter.EmitOne(Command.Unrelate(src, TKind.EdgeName, tgt), sb);
-            await tx.QueryAsync(sb.ToString(), bindings: null, ct).ConfigureAwait(false);
+
+            // Typed dispatch: identifier (edge table) inlined into SurrealQL, endpoint
+            // ids carried as typed SurrealRecordIdValue bindings. No string escape rules.
+            var bindings = new SurrealObject();
+            var sql = new StringBuilder("DELETE ").Append(TKind.EdgeName.Identifier());
+            var hasWhere = false;
+            if (src is { } sId)
+            {
+                sql.Append(" WHERE in = $_src");
+                bindings["_src"] = new SurrealRecordIdValue(sId.ToSdk());
+                hasWhere = true;
+            }
+            if (tgt is { } tId)
+            {
+                sql.Append(hasWhere ? " AND out = $_tgt" : " WHERE out = $_tgt");
+                bindings["_tgt"] = new SurrealRecordIdValue(tId.ToSdk());
+            }
+            sql.Append(';');
+            await tx.QueryAsync(sql.ToString(), bindings, ct).ConfigureAwait(false);
+            Record(Command.Unrelate(src, TKind.EdgeName, tgt));
         }
         catch
         {
@@ -941,9 +972,9 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         try
         {
             entity.OnDeleting();
-            var sb = new StringBuilder();
-            SurrealCommandEmitter.EmitOne(Command.Delete(entity.Id), sb);
-            await tx.QueryAsync(sb.ToString(), bindings: null, ct).ConfigureAwait(false);
+            // Typed SDK dispatch — no SurrealQL string, no formatting.
+            await tx.DeleteAsync(entity.Id.ToSdk(), ct).ConfigureAwait(false);
+            Record(Command.Delete(entity.Id));
             CleanupLocalState(entity.Id);
         }
         catch

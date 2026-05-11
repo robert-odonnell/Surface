@@ -634,7 +634,7 @@ public sealed class EmissionShapeTests
         Assert.Contains("IdsAsync(this global::Disruptor.Surface.Runtime.Query.Query<global::M.Design>", allSrc);
         Assert.Contains("IReadOnlyList<global::M.DesignId>", allSrc);
         Assert.Contains("IReadOnlyList<global::M.ConstraintId>", allSrc);
-        Assert.Contains("var sql = query.CompileIdsOnly();", allSrc);
+        Assert.Contains("var (sql, __bindings) = query.CompileIdsOnly();", allSrc);
     }
 
     [Fact]

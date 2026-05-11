@@ -1,3 +1,5 @@
+using Disruptor.Surreal.Values;
+
 namespace Disruptor.Surface.Runtime;
 
 /// <summary>
@@ -13,4 +15,18 @@ public interface IRecordId
 
     /// <summary>String form of the id value — whatever the underlying typed value serialises to.</summary>
     string ToLiteral();
+}
+
+/// <summary>
+/// Bridges Surface's <see cref="IRecordId"/> to the SDK's <see cref="SurrealRecordId"/>
+/// for typed-CBOR dispatch. The wire path is end-to-end typed: no SurrealQL string
+/// formatting, no escape rules, no JSON. Surface only ever uses string-keyed record ids
+/// (Ulid stringifications / slugs / content hashes), so the bridge always lands as a
+/// <see cref="SurrealStringRecordIdKey"/>.
+/// </summary>
+public static class RecordIdSdkBridge
+{
+    /// <summary>Convert any <see cref="IRecordId"/> to a typed SDK <see cref="SurrealRecordId"/>.</summary>
+    public static SurrealRecordId ToSdk(this IRecordId id)
+        => new(id.Table, id.ToLiteral());
 }

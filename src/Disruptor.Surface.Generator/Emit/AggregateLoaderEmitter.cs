@@ -83,15 +83,21 @@ internal static class AggregateLoaderEmitter
               .Append(handleParam).Append(", ")
               .Append(rootIdType).AppendLine(" rootId, CancellationToken ct = default)");
             sb.AppendLine("        {");
-            sb.AppendLine("            var __rootLiteral = global::Disruptor.Surface.Runtime.SurrealFormatter.RecordId(rootId);");
-            sb.AppendLine("            var sql = $\"\"\"");
+            // Typed-CBOR binding for the root id — preserves Thing typing through CBOR
+            // instead of inlining a SurrealQL record-literal string. The SQL references
+            // it as `$_rootId`.
+            sb.AppendLine("            var __bindings = new global::Disruptor.Surreal.Values.SurrealObject");
+            sb.AppendLine("            {");
+            sb.AppendLine("                [\"_rootId\"] = new global::Disruptor.Surreal.Values.SurrealRecordIdValue(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk(rootId)),");
+            sb.AppendLine("            };");
+            sb.AppendLine("            const string sql = \"\"\"");
             foreach (var line in sql.Split('\n'))
             {
                 sb.Append("                ").AppendLine(line.TrimEnd('\r'));
             }
             sb.AppendLine("                \"\"\";");
             sb.AppendLine();
-            sb.Append("            var __response = await ").Append(handleName).AppendLine(".QueryAsync(sql, bindings: null, ct);");
+            sb.Append("            var __response = await ").Append(handleName).AppendLine(".QueryAsync(sql, __bindings, ct);");
             sb.AppendLine("            var rootRow = ExtractFirstResultRow(__response);");
             sb.AppendLine("            if (rootRow is null) return;");
             sb.AppendLine();
@@ -178,11 +184,9 @@ internal static class AggregateLoaderEmitter
         }
 
         sb.AppendLine();
-        // Runtime substitution via $-string interpolation, but we route through a
-        // pre-computed local (`__rootLiteral`) instead of inlining the formatter call —
-        // C# raw-string interpolation parses `:` as a format-spec separator, which
-        // collides with the `global::` namespace qualifier on a direct call.
-        sb.Append("FROM {__rootLiteral};");
+        // Root id flows in as the `$_rootId` binding (typed SurrealRecordIdValue, CBOR-
+        // encoded). No SurrealQL string literal, no escape rules.
+        sb.Append("FROM $_rootId;");
         return sb.ToString();
     }
 

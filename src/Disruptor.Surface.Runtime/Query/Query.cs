@@ -186,11 +186,11 @@ public sealed class Query<T>
     }
 
     /// <summary>
-    /// Compile this query to SurrealQL + parameter bindings without executing. Used by
+    /// Compile this query to SurrealQL + typed-CBOR bindings without executing. Used by
     /// <see cref="SurrealSession.FetchAsync{T}"/> and any other caller that wants to
     /// inspect or splice the rendered query before sending.
     /// </summary>
-    public string Compile()
+    public (string Sql, global::Disruptor.Surreal.Values.SurrealObject Bindings) Compile()
         => QueryCompiler.Compile(Table, Filter, PinnedId, Includes, OrderClauses, LimitCount, StartAt);
 
     /// <summary>
@@ -200,7 +200,7 @@ public sealed class Query<T>
     /// without taking a dependency on the internal <see cref="QueryCompiler"/>. Throws
     /// when <see cref="Includes"/> are present — id-only selection is flat by definition.
     /// </summary>
-    public string CompileIdsOnly()
+    public (string Sql, global::Disruptor.Surreal.Values.SurrealObject Bindings) CompileIdsOnly()
     {
         if (Includes.Count > 0)
         {
@@ -228,22 +228,22 @@ public sealed class Query<T>
         SurrealSession session,
         Disruptor.Surreal.SurrealClient db,
         CancellationToken ct = default)
-        => ExecuteIntoSessionAsync(session, (sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
+        => ExecuteIntoSessionAsync(session, (sql, bindings, c) => db.QueryAsync(sql, bindings, c), ct);
 
     /// <inheritdoc cref="ExecuteIntoSessionAsync(SurrealSession, Disruptor.Surreal.SurrealClient, CancellationToken)"/>
     public Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(
         SurrealSession session,
         Disruptor.Surreal.SurrealTransaction tx,
         CancellationToken ct = default)
-        => ExecuteIntoSessionAsync(session, (sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
+        => ExecuteIntoSessionAsync(session, (sql, bindings, c) => tx.QueryAsync(sql, bindings, c), ct);
 
     private async Task<IReadOnlyList<T>> ExecuteIntoSessionAsync(
         SurrealSession session,
-        Func<string, CancellationToken, Task<Disruptor.Surreal.SurrealQueryResponse>> queryFn,
+        Func<string, global::Disruptor.Surreal.Values.SurrealObject?, CancellationToken, Task<Disruptor.Surreal.SurrealQueryResponse>> queryFn,
         CancellationToken ct)
     {
-        var sql = QueryCompiler.Compile(Table, Filter, PinnedId, Includes, OrderClauses, LimitCount, StartAt);
-        var response = await queryFn(sql, ct);
+        var (sql, bindings) = QueryCompiler.Compile(Table, Filter, PinnedId, Includes, OrderClauses, LimitCount, StartAt);
+        var response = await queryFn(sql, bindings, ct);
         var rows = ExtractRows(response);
 
         IHydrationSink sink = session;

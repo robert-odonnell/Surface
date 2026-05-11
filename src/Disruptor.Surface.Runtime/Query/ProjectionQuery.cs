@@ -56,7 +56,7 @@ public sealed class ProjectionQuery<T, TRow>
     /// projection's field list. Useful for inspection or splicing; the runtime calls
     /// this from <see cref="ExecuteAsync"/>.
     /// </summary>
-    public string Compile()
+    public (string Sql, global::Disruptor.Surreal.Values.SurrealObject Bindings) Compile()
     {
         if (Query.Includes.Count > 0)
         {
@@ -74,18 +74,18 @@ public sealed class ProjectionQuery<T, TRow>
     /// no session.
     /// </summary>
     public Task<IReadOnlyList<TRow>> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default)
-        => ExecuteAsync((sql, c) => db.QueryAsync(sql, bindings: null, c), ct);
+        => ExecuteAsync((sql, bindings, c) => db.QueryAsync(sql, bindings, c), ct);
 
     /// <inheritdoc cref="ExecuteAsync(Disruptor.Surreal.SurrealClient, CancellationToken)"/>
     public Task<IReadOnlyList<TRow>> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default)
-        => ExecuteAsync((sql, c) => tx.QueryAsync(sql, bindings: null, c), ct);
+        => ExecuteAsync((sql, bindings, c) => tx.QueryAsync(sql, bindings, c), ct);
 
     private async Task<IReadOnlyList<TRow>> ExecuteAsync(
-        Func<string, CancellationToken, Task<Disruptor.Surreal.SurrealQueryResponse>> queryFn,
+        Func<string, global::Disruptor.Surreal.Values.SurrealObject?, CancellationToken, Task<Disruptor.Surreal.SurrealQueryResponse>> queryFn,
         CancellationToken ct)
     {
-        var sql = Compile();
-        var response = await queryFn(sql, ct);
+        var (sql, bindings) = Compile();
+        var response = await queryFn(sql, bindings, ct);
         var rows = response.Count > 0 ? response.Statements[0].Result : null;
 
         var list = new List<TRow>();

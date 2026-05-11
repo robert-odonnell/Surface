@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Disruptor.Surface.Runtime;
 using Xunit;
 
@@ -246,8 +245,8 @@ public sealed class SurrealSessionTests
     {
         // Edges in SurrealDB can carry their own properties (confidence scores, run id,
         // resolution method, …). The payload-aware overload threads the dict through
-        // Command.Relate's EdgeContent so SurrealCommandEmitter renders RELATE … CONTENT
-        // { … } instead of bare RELATE.
+        // Command.Relate's EdgeContent so the diagnostic log entry preserves the
+        // payload alongside the edge.
         var session = new SurrealSession();
         var src = new RecordId("findings", "f");
         var tgt = new RecordId("observations", "o");
@@ -272,24 +271,22 @@ public sealed class SurrealSessionTests
         // The typed-kind shorthand `Relate<TKind>(src, tgt)` defaults to the Idempotent
         // edge strategy: same triple → same edge id, every run. Re-running the same
         // Relate after commit/reload lands on the same row instead of erroring against
-        // the schema-level UNIQUE INDEX on (in, out).
-        string Render()
-        {
-            var session = new SurrealSession();
-            session.Relate<StubKind>(new RecordId("findings", "f"), new RecordId("issues", "i"));
-            return SurrealCommandEmitter.Emit(session.Log.Entries);
-        }
+        // the schema-level UNIQUE INDEX on (in, out). Verified by resolving the captured
+        // Idempotent sentinel against the same triple twice and asserting equality.
+        var src = new RecordId("findings", "f");
+        var tgt = new RecordId("issues", "i");
 
-        var first = Render();
-        var second = Render();
-        Assert.Equal(first, second);
-        Assert.StartsWith("RELATE findings:f->stub_edge:", first);
-        Assert.EndsWith("->issues:i;\n", first);
-        Assert.DoesNotContain("UNIQUE", first);
+        var session = new SurrealSession();
+        session.Relate<StubKind>(src, tgt);
+        var entry = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
+
+        Assert.True(entry.Edge.IsIdempotent);
+        Assert.Equal(entry.Edge.Resolve(src, tgt), entry.Edge.Resolve(src, tgt));
+        Assert.Equal("stub_edge", entry.Edge.Table);
     }
 
     [Fact]
-    public void TypedRelate_WithExplicitSlugEdge_RendersSlugVerbatim()
+    public void TypedRelate_WithExplicitSlugEdge_PreservesSlugInLogEntry()
     {
         var session = new SurrealSession();
         session.Relate<StubKind>(
@@ -297,12 +294,13 @@ public sealed class SurrealSessionTests
             new RecordId("issues", "i"),
             edge: new RecordId("stub_edge", "main_link"));
 
-        var sql = SurrealCommandEmitter.Emit(session.Log.Entries);
-        Assert.Equal("RELATE findings:f->stub_edge:main_link->issues:i;\n", sql);
+        var entry = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
+        Assert.Equal("stub_edge", entry.Edge.Table);
+        Assert.Equal("main_link", entry.Edge.Value);
     }
 
     [Fact]
-    public void TypedRelate_WithRandomUlidEdge_RendersClientMintedValue()
+    public void TypedRelate_WithRandomUlidEdge_PreservesClientMintedValueInLogEntry()
     {
         var session = new SurrealSession();
         var edge = RecordId.New("stub_edge");   // pre-minted Ulid
@@ -311,16 +309,16 @@ public sealed class SurrealSessionTests
             new RecordId("issues", "i"),
             edge);
 
-        var sql = SurrealCommandEmitter.Emit(session.Log.Entries);
-        Assert.Contains($"->stub_edge:{edge.Value}->", sql);
+        var entry = session.Log.Entries.Single(e => e.Op == CommandOp.Relate);
+        Assert.Equal(edge.Value, entry.Edge.Value);
     }
 
     [Fact]
     public void Relate_WithoutPayload_LeavesEdgeContentNull()
     {
-        // Regression: the legacy zero-payload overload must not start emitting an empty
-        // CONTENT clause. EdgeContent stays null so SurrealCommandEmitter takes the
-        // bare-RELATE branch.
+        // Regression: the legacy zero-payload overload must not start populating an empty
+        // EdgeContent dict. EdgeContent stays null on the log entry so downstream
+        // consumers can distinguish "no payload" from "empty payload".
         var session = new SurrealSession();
         var src = new RecordId("a", "1");
         var tgt = new RecordId("b", "2");
