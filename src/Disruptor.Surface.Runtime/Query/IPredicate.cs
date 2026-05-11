@@ -18,7 +18,7 @@ public enum RangeOp
     Lt,
     Le,
     Gt,
-    Ge,
+    Ge
 }
 
 /// <summary>Range comparison: <c>field {op} $param</c>.</summary>

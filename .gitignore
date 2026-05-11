@@ -15,7 +15,7 @@
 *.DotSettings.user
 
 # Claude Code per-project local settings
-.claude/settings.local.json
+.claude/
 
 # OS junk
 .DS_Store
