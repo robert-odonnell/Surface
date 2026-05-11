@@ -4,19 +4,20 @@ using Xunit;
 namespace Disruptor.Surface.Tests.Runtime;
 
 /// <summary>
-/// Regression coverage for the pre-bind data-loss bug: a <see cref="SurrealArray{T}"/>
-/// mutated before its owner is tracked must replay through the owner's <see cref="IEntity.Flush"/>
-/// — i.e. the writer callback the generator emits is what wires this up, NOT a direct
-/// reach into <c>owner.Session</c>.
+/// Coverage for <see cref="SurrealArray{T}"/>'s mutation-aware contract: every mutation
+/// invokes the writer callback with the live <see cref="List{T}"/> reference.
+/// Generator-emitted code passes a no-op writer under the pure-setter model — Save
+/// reads the list at dispatch time — but the wrapper itself still honours whatever
+/// writer the constructor receives.
 /// </summary>
 public sealed class SurrealArrayTests
 {
     [Fact]
     public void Mutation_Invokes_TheWriterCallback_WithLiveListReference()
     {
-        // The writer receives the SAME List<T> reference on every call — that lets the
-        // dirty batch hold a single live reference whose subsequent mutations are picked
-        // up automatically at commit time without re-recording.
+        // The writer receives the SAME List<T> reference on every call — that lets a
+        // caller hold a single live reference whose subsequent mutations are visible
+        // without re-querying the wrapper.
         var captures = new List<List<int>>();
         _ = new SurrealArray<int>(initial: null, items => captures.Add(items))
         {
@@ -37,46 +38,6 @@ public sealed class SurrealArrayTests
 
         Assert.Equal(3, array.Count);
         Assert.False(fired);
-    }
-
-    [Fact]
-    public void PreBind_Mutations_Replay_Through_Buffer_AndArrive_AtSession()
-    {
-        // Simulates the entity-side wiring: pre-bind writes accumulate in a per-entity
-        // buffer (here a Dictionary), and a single Flush call replays them. This mirrors
-        // what the generator's __WriteField + IEntity.Flush emit.
-        var pendingWrites = new Dictionary<string, object?>();
-        SurrealSession? boundSession = null;
-
-        _ = new SurrealArray<int>(initial: null, Writer)
-        {
-            // Pre-bind mutations — the bug used to drop these on the floor.
-            1,
-            2
-        };
-
-        Assert.Single(pendingWrites);
-        Assert.Equal(new[] { 1, 2 }, (List<int>)pendingWrites["scenarios"]!);
-
-        // Now bind and flush — the buffered writer payload lands in the session.
-        var session = new SurrealSession();
-        boundSession = session;
-        foreach (var (field, value) in pendingWrites)
-        {
-            session.SetField(new RecordId("ac", "x"), field, value);
-        }
-
-        var setCmd = session.Log.Entries.Single(e => e.Op == CommandOp.Set);
-        Assert.Equal("scenarios", setCmd.Key);
-        Assert.IsAssignableFrom<List<int>>(setCmd.Value);
-        return;
-
-        // Writer captures into the buffer when unbound; routes to the session post-bind.
-        void Writer(List<int> items)
-        {
-            if (boundSession is null) pendingWrites["scenarios"] = items;
-            else boundSession.SetField(new RecordId("ac", "x"), "scenarios", items);
-        }
     }
 
     [Fact]

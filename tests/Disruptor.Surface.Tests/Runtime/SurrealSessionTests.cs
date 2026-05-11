@@ -13,16 +13,16 @@ namespace Disruptor.Surface.Tests.Runtime;
 public sealed class SurrealSessionTests
 {
     [Fact]
-    public void Track_Runs_Bind_Then_Initialize_Then_Flush_InOrder()
+    public void Track_Runs_Bind_Then_Initialize_Then_MarkAllSlicesLoaded_InOrder()
     {
         var session = new SurrealSession();
         var entity = new StubEntity(new RecordId("designs", "x"));
 
         session.Track(entity);
 
-        // PR7: MarkAllSlicesLoaded runs after Flush — fresh-entity Track owns the entire
-        // state, so every slice on the entity is marked loaded as part of the lifecycle.
-        Assert.Equal(new[] { "Bind", "Initialize", "Flush", "MarkAllSlicesLoaded" }, entity.Calls.ToArray());
+        // Pure-setter model: no Flush phase (no pre-bind buffer to drain). Bind + Initialize
+        // (mandatory-ref seeding) + MarkAllSlicesLoaded (fresh-entity owns its full state).
+        Assert.Equal(new[] { "Bind", "Initialize", "MarkAllSlicesLoaded" }, entity.Calls.ToArray());
         Assert.Same(session, entity.BoundSession);
     }
 
@@ -58,7 +58,6 @@ public sealed class SurrealSessionTests
         session.Abandon();
 
         Assert.Throws<InvalidOperationException>(() => session.Get<StubEntity>(entity.Id));
-        Assert.Throws<InvalidOperationException>(() => session.GetReferenceOrDefault<StubEntity>(entity, "x"));
         Assert.Throws<InvalidOperationException>(() => session.QueryChildren<StubEntity>(entity, "child"));
         Assert.Throws<InvalidOperationException>(() => session.QueryOutgoing<StubEntity>(entity, "edge"));
         Assert.Throws<InvalidOperationException>(() => session.QueryIncoming<StubEntity>(entity, "edge"));
@@ -72,8 +71,6 @@ public sealed class SurrealSessionTests
         var id = new RecordId("t", "1");
 
         Assert.Throws<InvalidOperationException>(() => session.Track(new StubEntity(id)));
-        Assert.Throws<InvalidOperationException>(() => session.SetField(id, "field", "v"));
-        Assert.Throws<InvalidOperationException>(() => session.UnsetField(id, "field"));
         Assert.Throws<InvalidOperationException>(() => session.Relate(id, id, RecordId.Idempotent("edge")));
         Assert.Throws<InvalidOperationException>(() => session.Unrelate(id, id, "edge"));
         Assert.Throws<InvalidOperationException>(() => session.Unrelate(id, null, "edge"));
@@ -168,8 +165,8 @@ public sealed class SurrealSessionTests
         ((IHydrationSink)session).Track(entity);
         Assert.Equal(new[] { "Bind" }, entity.Calls.ToArray());
 
-        // A subsequent explicit Track must not re-Initialize / re-Flush, must not record
-        // a Create — the row already exists in Surreal.
+        // A subsequent explicit Track must not re-Initialize, must not record a Create —
+        // the row already exists in Surreal.
         session.Track(entity);
 
         Assert.Equal(new[] { "Bind" }, entity.Calls.ToArray());
@@ -177,34 +174,35 @@ public sealed class SurrealSessionTests
     }
 
     [Fact]
-    public void SetField_WithEntityValue_CascadesIntoTrack()
+    public void AdoptIfUnbound_PullsChildIntoSession()
     {
+        // Cascade-track via Parent setter (the integration shape used by generated
+        // entities) is tested here at the bare-Session level: AdoptIfUnbound called
+        // from a parent with a session pulls the unbound child in via Track.
         var session = new SurrealSession();
         var owner = new StubEntity(new RecordId("designs", "d"));
-        var refTarget = new StubEntity(new RecordId("details", "t"));
+        var child = new StubEntity(new RecordId("constraints", "c"));
 
         session.Track(owner);
-        session.SetField(owner.Id, "details", refTarget, FieldKind.Reference);
+        session.AdoptIfUnbound(child);
 
-        // The cascade should have tracked the Details entity (Bind+Create+Initialize+Flush).
-        Assert.Contains("Bind", refTarget.Calls);
-        Assert.Equal(2, session.Log.Entries.Count(e => e.Op == CommandOp.Create));
+        Assert.Contains("Bind", child.Calls);
+        Assert.Same(child, session.Get<StubEntity>(child.Id));
     }
 
     [Fact]
-    public void SetField_WithEntityValue_CanonicalisesToId_BeforeRecording()
+    public void AdoptIfUnbound_NoOp_WhenChildAlreadyBound()
     {
+        // The other half of the cascade-track contract: don't move an already-bound
+        // child to a different session.
         var session = new SurrealSession();
-        var owner = new StubEntity(new RecordId("designs", "d"));
-        var refTarget = new StubEntity(new RecordId("details", "t"));
+        var child = new StubEntity(new RecordId("constraints", "c"));
+        session.Track(child);
+        var bindCount = child.Calls.Count(c => c == "Bind");
 
-        session.Track(owner);
-        session.SetField(owner.Id, "details", refTarget, FieldKind.Reference);
+        session.AdoptIfUnbound(child);
 
-        // The recorded Set value must be the target's RecordId, not the entity instance.
-        var setCommand = session.Log.Entries.Single(e => e.Op == CommandOp.Set);
-        Assert.IsType<RecordId>(setCommand.Value);
-        Assert.Equal(refTarget.Id, (RecordId)setCommand.Value!);
+        Assert.Equal(bindCount, child.Calls.Count(c => c == "Bind"));
     }
 
     [Fact]
@@ -480,9 +478,6 @@ public sealed class SurrealSessionTests
         }
 
         public void Initialize(SurrealSession session) => Calls.Add("Initialize");
-        public void Flush(SurrealSession session)      => Calls.Add("Flush");
-        public void Hydrate(JsonElement json, IHydrationSink sink) => Calls.Add("Hydrate");
-        public void HydratePartial(JsonElement json, IHydrationSink sink) => Calls.Add("HydratePartial");
         public void OnDeleting()                       => Calls.Add("OnDeleting");
         public void MarkAllSlicesLoaded(IHydrationSink sink) => Calls.Add("MarkAllSlicesLoaded");
     }

@@ -71,27 +71,47 @@ public static class HydrationValue
     }
 
     /// <summary>
-    /// Hydrates a <c>[Reference]</c> field. Always registers the link via
-    /// <see cref="IHydrationSink.Reference"/>; when the loader's projection inline-
-    /// expanded the referenced record (a <see cref="SurrealObjectValue"/> rather than
-    /// just an id), constructs a <typeparamref name="T"/> and runs its
-    /// <see cref="IEntity.Hydrate(SurrealValue, IHydrationSink)"/>. The sink's
-    /// <see cref="IHydrationSink.IsTracked"/> dedups multi-owner inline expansion.
+    /// Reads a <c>[Reference]</c> field's id from <paramref name="parent"/>, returning
+    /// <c>null</c> when the field is missing or null/none. Used by emitted Hydrate
+    /// bodies on plain (non-Inline) <c>[Reference]</c> fields and by all <c>[Parent]</c>
+    /// fields — both store the id directly in the entity's backing field; entity
+    /// resolution falls through to <see cref="SurrealSession.Get{T}"/> on read.
     /// </summary>
-    public static void HydrateReference<T>(SurrealObjectValue parent, string field, RecordId ownerId, IHydrationSink sink)
+    public static RecordId? TryReadReferenceId(SurrealObjectValue parent, string field)
+    {
+        if (!parent.Object.TryGetValue(field, out var v)) return null;
+        if (v is SurrealNullValue or SurrealNoneValue) return null;
+        try { return ReadRecordId(v); }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Hydrates an inline-expanded <c>[Reference, Inline]</c> field from <paramref name="parent"/>:
+    /// constructs a <typeparamref name="T"/>, runs its
+    /// <see cref="IEntity.Hydrate(SurrealValue, IHydrationSink)"/> against the inlined
+    /// payload, and returns the populated entity. Returns <c>null</c> when the field is
+    /// missing, null, or contains only an id (not the full inline object). The sink's
+    /// <see cref="IHydrationSink.IsTracked"/> dedups multi-owner inline expansion: a
+    /// second hit returns the entity already in the session.
+    /// </summary>
+    public static T? HydrateInlineReference<T>(SurrealObjectValue parent, string field, IHydrationSink sink)
         where T : class, IEntity, new()
     {
-        if (!parent.Object.TryGetValue(field, out var v)) return;
-        if (v is SurrealNullValue or SurrealNoneValue) return;
+        if (!parent.Object.TryGetValue(field, out var v)) return null;
+        if (v is SurrealNullValue or SurrealNoneValue) return null;
+        if (v is not SurrealObjectValue inline || !inline.Object.ContainsKey("id")) return null;
 
-        var refId = ReadRecordId(v);
-        sink.Reference(ownerId, field, refId);
-
-        if (v is SurrealObjectValue inline && inline.Object.ContainsKey("id") && !sink.IsTracked(refId))
+        var refId = ReadRecordId(inline);
+        if (sink.IsTracked(refId))
         {
-            var entity = new T();
-            entity.Hydrate(inline, sink);
+            // Another owner reached this inline target first — its hydrated entity is
+            // already in the session. Caller can pull it out via Session.Get<T>(refId).
+            return null;
         }
+
+        var entity = new T();
+        entity.Hydrate(inline, sink);
+        return entity;
     }
 
     // ──────────────────────────── conversions ────────────────────────────────

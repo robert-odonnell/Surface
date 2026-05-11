@@ -748,9 +748,6 @@ public sealed class QueryCompilerTests
         public SurrealSession? Session => null;
         public void Bind(SurrealSession session) { }
         public void Initialize(SurrealSession session) { }
-        public void Flush(SurrealSession session) { }
-        public void Hydrate(System.Text.Json.JsonElement json, IHydrationSink sink) { }
-        public void HydratePartial(System.Text.Json.JsonElement json, IHydrationSink sink) { }
         public void OnDeleting() { }
         public void MarkAllSlicesLoaded(IHydrationSink sink) { }
     }

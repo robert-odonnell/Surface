@@ -186,12 +186,12 @@ grafts the per-aggregate load methods onto it.
 | Attribute             | Shape                                                     | What you get                                                                                |
 | --------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | `[Id]`                | `partial {Name}Id Id { get; set; }`                       | Lazy-minted typed id; assignable for "construct a handle to a known record"                 |
-| `[Property]`          | `partial T Name { get; set; }`                            | Backing field + setter that updates the in-memory snapshot via `__WriteField`. Get-only also legal. |
+| `[Property]`          | `partial T Name { get; set; }`                            | Pure backing field — `get => _name; set => _name = value;`. Get-only also legal. |
 | `[Property]`          | `partial SurrealArray<T> Name { get; }`                   | Inline `array<object>` column with mutation-aware wrapper                                   |
 | `[Reference]`         | `partial T Name { get; }` (mandatory)                     | Foreign pointer; `OnCreate{Name}` hook auto-mints a fresh target via `new`. Hydrates as id only. |
-| `[Reference]`         | `partial T? Name { get; set; }` (optional)                | Foreign pointer; setter routes through `__WriteField`/`__ClearField` with `FieldKind.Reference`. |
+| `[Reference]`         | `partial T? Name { get; set; }` (optional)                | Foreign pointer; pure backing-field setter, getter falls back to `Session.Get<T>(id)` when only the id is cached. |
 | `[Reference, Inline]` | either shape above, plus `[Inline]`                       | Owned-sidecar — loader emits `field.*` projection, hydrates the linked record alongside its owner. |
-| `[Parent]`            | `partial T Name { get; set; }`                            | `Session.GetParent<T>(this)` + `__WriteField(..., FieldKind.Parent)`                        |
+| `[Parent]`            | `partial T Name { get; set; }`                            | Pure backing-field setter; cascade-tracks the child into the parent's session via `parent.Session.AdoptIfUnbound(this)` so `parent.Children` sees it. |
 | `[Children]`          | `partial IReadOnlyCollection<T> Name { get; }`            | Reverse-fk traversal via `Session.QueryChildren`                                            |
 | `[CompositionRoot]`   | tag on a partial class                                    | Generator grafts per-`[AggregateRoot]` `Load{Root}Async` overloads plus `Schema` / `ApplySchemaAsync` / `ReferenceRegistry` |
 
@@ -246,10 +246,11 @@ Plus aggregate / relation marker attributes:
   (`GetNewOutgoingEdges<TKind>`). The user picks what to save; the library does not
   do change tracking.
 - **Track lifecycle.** `session.Track(new T { … })` does `Bind` (wires the entity's
-  `_session`) → `Initialize` (mandatory-ref seeding) → `Flush` (drains object-initializer
-  writes that were buffered while the entity was unbound). `SetField` cascades into
-  `Track` for any `IEntity` value, so nested object initialisers auto-track without
-  an explicit `Track` per fresh ref.
+  `_session`) → `Initialize` (mandatory-ref seeding via `OnCreate{Name}` hooks; idempotent
+  so a later `SaveAsync` auto-bind doesn't re-mint). Object-initializer writes land
+  directly in backing fields — no buffer, no flush. `[Parent]` setters cascade-track via
+  `parent.Session.AdoptIfUnbound(this)`, so `new Constraint { Design = design }` joins
+  `design`'s session and shows up in `design.Constraints` at Save time.
 - **Typed relation kinds + directional reads.** Every forward relation attribute
   (e.g. `RestrictsAttribute`) gets a sibling marker class (`Restricts : IRelationKind`)
   emitted alongside it. `session.RelateAsync<Restricts>(constraint, userStory, tx)` is

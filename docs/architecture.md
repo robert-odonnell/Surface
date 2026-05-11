@@ -54,7 +54,7 @@ Main emitter responsibilities:
 | Emitter | Output |
 | --- | --- |
 | `IdEmitter` | `{Table}Id` typed record structs implementing `IRecordId`. |
-| `PartialEmitter` | Entity partial implementations, generated property bodies, session binding, hydration hooks (`Hydrate(Value, IHydrationSink)` + `HydratePartial`), `SaveAsync(ISaveContext, ct)` dispatch, delete hooks, and slice-guard read paths. |
+| `PartialEmitter` | Entity partial implementations: pure-backing-field property setters, session binding, hydration (`Hydrate(SurrealValue, IHydrationSink)` writes directly into backing fields), `SaveAsync(ISaveContext, ct)` dispatch, `GetParentId()`, delete hooks, and slice-guard read paths. |
 | `RelationKindEmitter` | `IRelationKind` marker class per forward relation attribute. |
 | `UnionInterfaceEmitter` | Shared interfaces for relation target/source unions when one relation can point at multiple table types. |
 | `AggregateLoaderEmitter` | Internal loader per aggregate root, with two `PopulateAsync` overloads (Surreal db / Transaction tx). |
@@ -167,7 +167,7 @@ Disruptor.Surreal.SurrealClient.QueryAsync (or SurrealTransaction.QueryAsync)
         +--> CBOR over WebSocket → SurrealQueryResponse → SurrealValue tree
 ```
 
-Generator-emitted hydrator delegates on each `IncludeChildrenNode` capture the right concrete `new TChild()` + `Hydrate(Value, IHydrationSink)` at codegen time, so the runtime walks the `Value` tree without reflection. `Fetch` reuses the same compile-and-hydrate path but dispatches to `IEntity.HydratePartial` when an entity is already tracked — pending writes survive a top-up via the `IHydrationSink.HasPendingWrite` guard.
+Generator-emitted hydrator delegates on each `IncludeChildrenNode` capture the right concrete `new TChild()` + `Hydrate(SurrealValue, IHydrationSink)` at codegen time, so the runtime walks the `SurrealValue` tree without reflection. `Fetch` reuses the same compile-and-hydrate path: existing tracked entities re-Hydrate (slice-widening; scalar fields get clobbered with the DB row, no merge guard); brand-new entities get the include's full Hydrate.
 
 Strict-with-escape: filtered loads only mark the user-`Include`d slices loaded; reads outside the slice throw `LoadShapeViolationException` with a hint at `session.FetchAsync(...)`. The legacy aggregate-loader path marks every slice on every loaded entity, so existing code stays unaffected.
 
@@ -181,9 +181,14 @@ Lifecycle for fresh entities:
 session.Track(entity)
         |
         +--> bind entity to session
-        +--> Initialize mandatory references (OnCreate{Name} hooks)
-        +--> flush object-initializer writes that buffered while unbound
+        +--> Initialize mandatory references (OnCreate{Name} hooks; idempotent)
+        +--> mark every slice loaded (fresh entity owns its full state)
 ```
+
+Object-initializer writes land directly in the entity's backing fields — no buffer, no
+flush phase. The one cascade in a sync setter is `[Parent]`'s
+`parent.Session.AdoptIfUnbound(this)`, which pulls a freshly constructed
+`new Constraint { Design = design }` into design's session.
 
 Lifecycle for loaded entities:
 
@@ -196,7 +201,7 @@ Load{Root}Async(db | tx, id)
         +--> mark as loaded-at-start in the identity map
 ```
 
-Reads are synchronous lookups against in-memory dictionaries. Sync writes (property setters, `Track`, sync `Relate<TKind>` / `Unrelate<TKind>`) update those dictionaries and append to a small `CommandLog` for diagnostics. **No database call happens until you call an async dispatch method:**
+Reads resolve directly off the entity's backing fields (`[Property]`, `[Reference]`, `[Parent]` — the latter two with a `Session.Get<T>(id)` fall-through when only the id is cached) or via the session for cross-entity navigation (`[Children]`, relations). Sync writes (property setters, `Track`, sync `Relate<TKind>` / `Unrelate<TKind>`) update backing fields and the session's edge index. `CommandLog` records `Track`, `Relate`, `Unrelate`, and `Delete` intents for diagnostics — property setters do **not** record. **No database call happens until you call an async dispatch method:**
 
 - `session.SaveAsync(entity, tx, ct)` — per-entity Save. Auto-binds the entity, walks its forward dependencies (Reference / Parent) recursively, dispatches a whole-entity `CREATE/UPDATE record:id CONTENT { ... }`, walks new children recursively, and dispatches new outgoing relations via the snapshot diff (`GetNewOutgoingEdges<TKind>`).
 - `session.DeleteAsync(entity, tx, ct)` — runs `OnDeleting`, dispatches a single `DELETE`, removes from the in-memory snapshot.

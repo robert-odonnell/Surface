@@ -37,10 +37,10 @@ For each `[Table]` class, the generator emits a partial implementation that:
 - Implements `IEntity`.
 - Adds backing fields for generated properties.
 - Binds each entity instance to a `SurrealSession` when tracked or hydrated.
-- Routes property writes into `SurrealSession.SetField(...)`.
-- Routes reference clears into `SurrealSession.UnsetField(...)`.
+- Property setters are pure backing-field writes (no Session call, no buffer, no command log entry).
+- `[Parent]` setters additionally cascade-track the child into the parent's session via `parent.Session.AdoptIfUnbound(this)` so the parent's `[Children]` sees the new child at Save time.
 - Routes child and relation reads into session queries.
-- Implements `IEntity.Hydrate(Value, IHydrationSink)` / `HydratePartial` (Value-consuming row → entity population).
+- Implements `IEntity.Hydrate(SurrealValue, IHydrationSink)` (Value-consuming row → entity population, writes directly into backing fields).
 - Implements `IEntity.SaveAsync(ISaveContext, ct)` — per-entity Save dispatch (forward-deps → entity content → new children → new outgoing relations).
 
 Generated property behavior:
@@ -49,7 +49,7 @@ Generated property behavior:
 | --- | --- |
 | `[Id] public partial DesignId Id { get; set; }` | Lazy typed id. Setter is allowed only before the entity is bound to a session. |
 | `[Property] public partial string Title { get; set; }` | Synchronous getter/setter. Setter mutates the in-memory snapshot and appends to `CommandLog`. |
-| `[Property] public partial SurrealArray<T> Items { get; }` | Lazy mutation-aware list wrapper. Mutations route through `__WriteField` to update the in-memory snapshot. |
+| `[Property] public partial SurrealArray<T> Items { get; }` | Lazy mutation-aware list wrapper. Mutations land in the wrapper's backing list; Save reads it at dispatch time. |
 | `[Reference] public partial T Ref { get; }` | Mandatory reference. Getter throws if the referenced entity is not available in the session. |
 | `[Reference] public partial T? Ref { get; set; }` | Optional reference. Setting `null` clears the field. |
 | `[Reference, Inline] public partial T? Ref { get; set; }` | Optional owned-sidecar reference that hydrates with the owner. |
@@ -508,7 +508,7 @@ catch (LoadShapeViolationException)
 }
 ```
 
-`FetchAsync` runs a partial-merge hydration: existing entities in the session receive `IEntity.HydratePartial` (skips fields the user has already mutated since load — pending writes always win); brand-new entities get the full `IEntity.Hydrate`. Slices listed in the extension query's `Includes` are marked loaded. Closed sessions throw `InvalidOperationException`.
+`FetchAsync` is a slice widener: existing entities re-Hydrate (overwriting scalar fields with the DB row); brand-new entities go through the include's full Hydrate. Slices listed in the extension query's `Includes` are marked loaded. **Caveat:** if you've mutated an entity in memory and Fetch re-hydrates it, your edits get clobbered — Save first or accept the clobber. Per-field "did the user touch this" tracking was deliberately removed under the explicit-Save model. Closed sessions throw `InvalidOperationException`.
 
 ```csharp
 public Task FetchAsync<T>(
@@ -663,11 +663,7 @@ Read methods (sync):
 | Method | Purpose |
 | --- | --- |
 | `Get<T>(IRecordId id)` | Lookup a hydrated or tracked entity by id. |
-| `GetParent<T>(IEntity owner)` | Resolve a parent link; throws on miss. |
-| `GetParentOrDefault<T>(IEntity owner)` | Resolve a parent link; returns null on miss. |
-| `GetReference<T>(owner, field)` | Resolve mandatory reference or throw. |
-| `GetReferenceOrDefault<T>(owner, field)` | Resolve optional reference or return `null`. |
-| `QueryChildren<T>(owner, childTable)` | Read children by parent link. |
+| `QueryChildren<T>(owner, childTable)` | Read children by parent link. Matches each candidate's `IEntity.GetParentId()` against `owner.Id`. |
 | `QueryOutgoing<TKind, T>(owner)` | Read same-aggregate outgoing relation targets. |
 | `QueryIncoming<TKind, T>(owner)` | Read same-aggregate incoming relation sources. |
 | `QueryRelatedIds<TKind>(owner)` | Read cross-aggregate outgoing ids. |
@@ -680,9 +676,8 @@ Sync write methods (mutate the in-memory snapshot, append to `CommandLog`):
 
 | Method | Purpose |
 | --- | --- |
-| `Track<T>(T entity)` | Bind a fresh entity to the session, run `Initialize` (mandatory-ref seeding) + `Flush` (replay buffered writes), mark every slice loaded. |
-| `SetField(owner, field, value, kind)` | Low-level field write used by generated setters. Cascades into `Track` for nested `IEntity` values. |
-| `UnsetField(owner, field, kind)` | Low-level field clear used by generated setters. |
+| `Track<T>(T entity)` | Bind a fresh entity to the session, run `Initialize` (idempotent mandatory-ref seeding via `OnCreate*` hooks), mark every slice loaded. |
+| `AdoptIfUnbound(IEntity child)` | Cascade-track called from emitted `[Parent]` setters: pulls an unbound child into this session via `Track`. No-op when the child is already bound. |
 | `Relate(source, target, edge)` / `Relate<TKind>(source, target)` | Buffer an edge in the snapshot. The next `SaveAsync(source)` dispatches it via the snapshot diff. The typed-kind shorthand defaults to the **Idempotent** strategy — `RecordId.Idempotent(TKind.EdgeName)` resolves to a deterministic hash of `{source}\|{table}\|{target}` at emit time, so re-runs land on the same row. Pass an explicit edge to override (Random Ulid via `RecordId.New(...)`, slug via `new RecordId(...)`). |
 | `Relate<TKind>(source, target, payload)` | Same as above with a typed edge payload — renders as `RELATE source->edge:<id>->target CONTENT { … }`. |
 | `Unrelate<TKind>(source?, target?)` | Buffer an edge deletion. At least one endpoint non-null; one-side-null is bulk delete. |

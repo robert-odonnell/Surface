@@ -345,7 +345,7 @@ catch (LoadShapeViolationException)
 }
 ```
 
-`Fetch` preserves uncommitted user mutations: if the user has already written to `design.Description` since load, a Fetch that re-hydrates the same row leaves the pending value alone (a `HasPendingWrite` guard skips field-level overwrites).
+`Fetch` is a slice widener: if you've mutated `design.Description` in memory and Fetch re-hydrates the same row, your edit gets overwritten with the DB value. Save first, or accept the clobber. (The per-field "did the user touch this" tracking was deliberately removed under the explicit-Save model.)
 
 ## 10. Add Relations
 

@@ -5,36 +5,22 @@ using Disruptor.Surreal.Values;
 namespace Disruptor.Surface.Runtime;
 
 /// <summary>
-/// Distinguishes the three flavours of single-field writes the session handles. Lets a
-/// single <see cref="SurrealSession.SetField"/> / <see cref="SurrealSession.UnsetField"/> pair cover
-/// scalar properties, parent links, and reference links — each updates a different local
-/// dict, but the SurrealQL command is the same shape.
-/// </summary>
-public enum FieldKind
-{
-    Property,
-    Parent,
-    Reference,
-}
-
-/// <summary>
-/// The hydration-time write surface a loader uses to populate session state. Implemented
-/// explicitly by <see cref="SurrealSession"/> so domain code with a session reference
-/// doesn't see <c>Track</c> / <c>Parent</c> / <c>Reference</c> / <c>Edge</c> in IntelliSense
-/// — getting at them requires a deliberate <c>(IHydrationSink)session</c> cast, which is
-/// loud enough that nobody calls them by accident. Loaders + <see cref="HydrationJson"/>
-/// are the legitimate callers.
+/// The hydration-time write surface a loader uses to populate session-side state.
+/// Entity-side state (parent links, reference links, scalar fields) is written directly
+/// into the entity's backing fields by emitted <see cref="IEntity.Hydrate"/> bodies — no
+/// sink call needed. The sink only carries cross-entity / session-scoped state: identity
+/// map registration, edge index, slice-loaded marks.
+/// <para>
+/// Implemented explicitly by <see cref="SurrealSession"/> so domain code with a session
+/// reference doesn't see <c>Track</c> / <c>Edge</c> in IntelliSense — getting at them
+/// requires a deliberate <c>(IHydrationSink)session</c> cast, which is loud enough that
+/// nobody calls them by accident.
+/// </para>
 /// </summary>
 public interface IHydrationSink
 {
     /// <summary>Marks an entity as loaded-at-start in the snapshot and binds it to the session on first sight.</summary>
     void Track(IEntity entity);
-
-    /// <summary>Records a parent link from <paramref name="childId"/> to <paramref name="parentId"/>.</summary>
-    void Parent(RecordId childId, RecordId parentId);
-
-    /// <summary>Records a reference link <c>(owner, fieldName) → refId</c>, including the at-start snapshot used by the commit planner.</summary>
-    void Reference(RecordId ownerId, string fieldName, RecordId refId);
 
     /// <summary>Records an edge <c>(source, edgeKind, target)</c> as already present in the DB at load time.</summary>
     void Edge(RecordId source, string edgeKind, RecordId target);
@@ -51,21 +37,14 @@ public interface IHydrationSink
     /// marks only what the user explicitly Included.
     /// </summary>
     void MarkSliceLoaded(RecordId ownerId, string fieldName);
-
-    /// <summary>
-    /// True iff the user has a pending Set/Unset on <paramref name="ownerId"/>.<paramref name="field"/>.
-    /// The partial-merge hydrator path (<see cref="SurrealSession.FetchAsync{T}"/>) consults
-    /// this before overwriting backing fields — pending writes always win, since clobbering
-    /// uncommitted user state during a top-up Fetch would be very surprising.
-    /// </summary>
-    bool HasPendingWrite(RecordId ownerId, string field);
 }
 
 /// <summary>
-/// Common shape of every generated entity. The five session-side hooks (<see cref="Bind"/>,
-/// <see cref="Initialize"/>, <see cref="Flush"/>, <see cref="Hydrate"/>,
-/// <see cref="OnDeleting"/>) are explicit-interface implementations on every generated
-/// entity so they don't pollute the user-facing surface; the session is the only caller.
+/// Common shape of every generated entity. The session-side hooks (<see cref="Bind"/>,
+/// <see cref="Initialize"/>, <see cref="Hydrate"/>, <see cref="OnDeleting"/>,
+/// <see cref="MarkAllSlicesLoaded"/>, <see cref="SaveAsync"/>) are explicit-interface
+/// implementations on every generated entity so they don't pollute the user-facing
+/// surface; the session is the only caller.
 /// </summary>
 public interface IEntity
 {
@@ -73,48 +52,45 @@ public interface IEntity
 
     /// <summary>
     /// The session this entity is bound to, or <c>null</c> if it hasn't been tracked yet.
-    /// Mutating an unbound entity buffers the writes locally — they're replayed when
-    /// <see cref="Bind"/> + <see cref="Flush"/> run.
+    /// Bound entities can resolve session-mediated reads (children, relations,
+    /// reference fall-through to the identity map). Sync setters write straight into
+    /// backing fields and need no session — pre-bind property writes are pure.
     /// </summary>
     SurrealSession? Session { get; }
 
     /// <summary>
-    /// Wires the session into the entity's <c>_session</c> field so subsequent writes go
-    /// straight to the session. Called by <see cref="SurrealSession.Track{T}"/> for fresh
-    /// entities and by <see cref="Hydrate"/> for loaded ones — runs exactly once per
-    /// entity instance.
+    /// Wires the session into the entity's <c>_session</c> field so subsequent
+    /// session-mediated reads (children, relations, lazy reference resolution) work.
+    /// Called by <see cref="SurrealSession.Track{T}"/> for fresh entities and by
+    /// <see cref="Hydrate"/> for loaded ones — runs exactly once per entity instance.
     /// </summary>
     void Bind(SurrealSession session);
 
     /// <summary>
-    /// SurrealSession-only entry point; declared on the interface so the session can call it
-    /// without reflection. The generator emits this body to seed mandatory
-    /// <c>[Reference]</c> targets via the user's <c>OnCreate*</c> hooks.
+    /// SurrealSession-only entry point; declared on the interface so the session can call
+    /// it without reflection. The generator emits this body to seed mandatory
+    /// <c>[Reference]</c> targets via the user's <c>OnCreate*</c> hooks. Idempotent —
+    /// re-invocation skips already-set references, so <see cref="SurrealSession.SaveAsync"/>'s
+    /// auto-bind path can call it safely on entities that have already been initialised.
     /// </summary>
     void Initialize(SurrealSession session);
 
     /// <summary>
-    /// Drains writes that were buffered while the entity was unbound (object-initializer
-    /// values etc.) into <paramref name="session"/>'s pending state. <see cref="SurrealSession.Track{T}"/>
-    /// invokes this after <see cref="Bind"/> + <see cref="Initialize"/> so the create
-    /// command lands first, then the user's initializer values, then the mandatory-ref
-    /// seeds. No-op for hydrated entities (they hit <see cref="Hydrate"/> instead).
-    /// </summary>
-    void Flush(SurrealSession session);
-
-    /// <summary>
     /// Loader-only entry point. Reads the row's <see cref="Disruptor.Surreal.Values.SurrealValue"/>
-    /// payload and writes the entity's backing fields plus the corresponding session
-    /// dicts (parent / reference) via the supplied hydration sink. Edges and children
+    /// payload and writes directly into the entity's backing fields. Edges and children
     /// are loaded by the per-aggregate loader separately. Default-interface no-op for
     /// hand-written stubs that don't go through hydration.
     /// </summary>
     void Hydrate(SurrealValue row, IHydrationSink sink) { }
 
     /// <summary>
-    /// Partial-merge variant of <see cref="Hydrate"/>. Default no-op for stubs.
+    /// Returns this entity's parent record id, or <c>null</c> when no <c>[Parent]</c>
+    /// is set (or no <c>[Parent]</c> exists on the type). Generator-emitted on every
+    /// table with a <c>[Parent]</c> property; default no-op covers entities without one
+    /// and hand-written stubs. Used by <see cref="SurrealSession.QueryChildren{T}"/> to
+    /// match a child against its parent owner.
     /// </summary>
-    void HydratePartial(SurrealValue row, IHydrationSink sink) { }
+    RecordId? GetParentId() => null;
 
     /// <summary>
     /// SurrealSession calls this immediately before queueing the entity's own DELETE command,
@@ -155,23 +131,23 @@ public interface IEntity
 
 /// <summary>
 /// Snapshot-isolated entity store. Every read on the model — properties, parent/children,
-/// references, relation collections — is a synchronous lookup against the in-memory
-/// dictionaries the per-aggregate loader (generator-emitted, invoked from
-/// <c>Sessions.Load{Root}Async</c>) populated. Writes mutate the same dictionaries and
-/// append to a per-entity dirty batch which <see cref="CommitAsync"/> flushes to Surreal
-/// as a single SurrealQL script. The only async boundaries are the boundary methods on
-/// this class — nothing inside the model surface returns <see cref="Task"/>.
+/// references, relation collections — resolves against the entity's own backing fields
+/// or, for navigation across entities, the in-memory dictionaries the per-aggregate
+/// loader populated. Sync writes mutate backing fields directly. Async dispatch
+/// (<see cref="SaveAsync"/>, <see cref="DeleteAsync"/>, <see cref="RelateAsync"/>,
+/// <see cref="UnrelateAsync"/>) is the only path that touches Surreal.
 /// <para>
 /// Each entity carries an explicit reference to its bound session via <see cref="IEntity.Session"/>;
-/// there is no ambient context. Pre-bind writes (object-initializer values) buffer on
-/// the entity itself and replay through <see cref="IEntity.Flush"/> when
-/// <see cref="Track{T}"/> binds the entity to this session.
+/// there is no ambient context. Pre-bind property setters write straight into backing
+/// fields — no buffer, no flush. The cascade-track in a <c>[Parent]</c> setter is the
+/// one place sync code calls back into the session: assigning a parent that's bound to
+/// a session pulls the child into that session so the parent's <c>[Children]</c> sees it.
 /// </para>
 /// <para>
 /// The session knows nothing about persistence permissions. Domain code can mutate it
-/// freely; until <see cref="CommitAsync"/> runs, every change is purely in-memory. Cross-
-/// process write coordination lives in <see cref="WriterLease"/>, which the caller holds
-/// alongside the session and passes into <see cref="CommitAsync"/> for renewal.
+/// freely; until <see cref="SaveAsync"/> runs, every change is purely in-memory. Concurrent
+/// writers collide at COMMIT as <see cref="SurrealConflictException"/> from the SDK —
+/// the substrate owns concurrency, no application-level lease.
 /// </para>
 /// </summary>
 public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydrationSink
@@ -179,8 +155,6 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     private class MaterializedSessionState
     {
         public readonly Dictionary<RecordId, IEntity> Entities = [];
-        public readonly Dictionary<RecordId, RecordId> Parents = [];
-        public readonly Dictionary<(RecordId Owner, string Field), RecordId> References = [];
         public readonly Dictionary<(RecordId Source, string Edge, RecordId Target), bool> Edges = [];
 
         // Per-entity load-shape tracking. Each set lists the field names on that entity
@@ -218,11 +192,6 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     private readonly HashSet<RecordId> loadedAtStart = [];
     private readonly HashSet<(string Kind, RecordId Source, RecordId Target)> relationsAtStart = [];
 
-    // Per-(owner, field) flag set by SetField/UnsetField. Read by HydratePartial
-    // (FetchAsync top-up) to skip overwriting fields the user has mutated since the
-    // initial load.
-    private readonly HashSet<(RecordId Owner, string Field)> pendingFieldWrites = [];
-
     /// <summary>Chronological history of recorded model commands. Diagnostic-only.</summary>
     public CommandLog Log { get; } = new();
 
@@ -238,50 +207,14 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
 
     // ──────────────────────────── reads (sync) ───────────────────────────────
 
-    public T GetParent<T>(IEntity owner) where T : class, IEntity
-        => GetParentOrDefault<T>(owner)
-           ?? throw new InvalidOperationException($"Entity {owner.Id} has no registered parent of type {typeof(T).Name}.");
-
-    /// <summary>
-    /// Look up the registered parent without throwing on miss. Returns null when the
-    /// owner has no parent link, when the parent isn't tracked, or when the tracked
-    /// parent isn't assignable to <typeparamref name="T"/>. Used by generator-emitted
-    /// <see cref="IEntity.SaveAsync"/> for forward-dependency walks where a missing
-    /// parent simply means "no FK to dispatch in CONTENT", not an error.
-    /// </summary>
-    public T? GetParentOrDefault<T>(IEntity owner) where T : class, IEntity
-    {
-        ThrowIfClosed();
-        if (state.Parents.TryGetValue(owner.Id, out var parentId)
-            && state.Entities.TryGetValue(parentId, out var parent)
-            && parent is T typed)
-        {
-            return typed;
-        }
-        return null;
-    }
-
-    public T GetReference<T>(IEntity owner, string fieldName) where T : class, IEntity
-        => GetReferenceOrDefault<T>(owner, fieldName)
-           ?? throw new InvalidOperationException($"Mandatory reference '{fieldName}' on {owner.Id} is not set.");
-
-    public T? GetReferenceOrDefault<T>(IEntity owner, string fieldName) where T : class, IEntity
-    {
-        ThrowIfClosed();
-        if (state.References.TryGetValue((owner.Id, fieldName), out var refId)
-            && state.Entities.TryGetValue(refId, out var entity)
-            && entity is T typed)
-        {
-            return typed;
-        }
-        return null;
-    }
-
     /// <summary>
     /// Look up a hydrated entity by id. Returns <c>null</c> when the session doesn't
     /// hold an entity for the id, or when the loaded entity isn't assignable to
     /// <typeparamref name="T"/>. Primary use case: get a typed handle to an aggregate
-    /// root (or any other known entity) after <c>Sessions.Load{Root}Async</c>.
+    /// root (or any other known entity) after <c>Sessions.Load{Root}Async</c>. Also
+    /// used by generator-emitted <c>[Parent]</c> / <c>[Reference]</c> getters for
+    /// the fallback resolution path (when the entity holds an id but no cached entity
+    /// reference).
     /// </summary>
     public T? Get<T>(IRecordId id) where T : class, IEntity
     {
@@ -290,23 +223,32 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         return state.Entities.TryGetValue(rid, out var entity) && entity is T typed ? typed : null;
     }
 
+    /// <summary>
+    /// Walks the in-memory entity index for children of <paramref name="owner"/> in
+    /// <paramref name="childTable"/>. Children are filtered by their typed-id table
+    /// match and by their <see cref="IEntity"/>-side <c>Parent</c> matching
+    /// <paramref name="owner"/>. The match is done by reading the candidate's
+    /// generator-emitted <c>__ParentIdFor</c> helper; a mismatch (or missing parent)
+    /// excludes the candidate.
+    /// </summary>
     public IReadOnlyCollection<T> QueryChildren<T>(IEntity owner, string childTable)
         where T : class, IEntity
     {
         ThrowIfClosed();
         var results = new List<T>();
-        foreach (var kv in state.Parents)
+        foreach (var kv in state.Entities)
         {
-            if (kv.Value == owner.Id
-                && kv.Key.IsForTable(childTable)
-                && state.Entities.TryGetValue(kv.Key, out var child)
-                && child is T typed)
+            if (!kv.Key.IsForTable(childTable)) continue;
+            if (kv.Value is not T typed) continue;
+            if (TryGetParentId(typed) is { } pid && pid == owner.Id)
             {
                 results.Add(typed);
             }
         }
         return results;
     }
+
+    private static RecordId? TryGetParentId(IEntity child) => child.GetParentId();
 
     /// <summary>
     /// Walks the in-memory edge index along <paramref name="edgeKind"/> with
@@ -433,14 +375,12 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     // WriterLease and choose to call CommitAsync.
 
     /// <summary>
-    /// Register a fresh entity with this session. The Create is queued, <c>Bind</c> wires
-    /// the session into the instance, <c>Initialize</c> seeds mandatory references, and
-    /// <c>Flush</c> drains object-initializer writes that were buffered while the entity
-    /// was unbound. Idempotent on the same instance; throws if a different instance with
-    /// the same id is already tracked. Hydrated entities are registered separately via
-    /// <see cref="IHydrationSink.Track"/> — they don't go through this path. Tracking an
-    /// id that was previously loaded-and-then-deleted opens a fresh lifecycle segment;
-    /// the planner will emit <c>DELETE; CREATE</c>.
+    /// Register a fresh entity with this session. <c>Bind</c> wires the session into the
+    /// instance and <c>Initialize</c> seeds mandatory references via <c>OnCreate*</c> hooks
+    /// (idempotent — no-op if the references are already set). Idempotent on the same
+    /// instance; throws if a different instance with the same id is already tracked.
+    /// Hydrated entities are registered separately via <see cref="IHydrationSink.Track"/>
+    /// — they don't go through this path.
     /// </summary>
     public T Track<T>(T entity) where T : class, IEntity
     {
@@ -463,11 +403,10 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         entity.Bind(this);
         Record(Command.Create(entity.Id));
         entity.Initialize(this);
-        entity.Flush(this);
         // Fresh-entity Track: the user owns the entire state, so every slice is
         // implicitly "loaded" — there's no DB row to compare against. Mark all of them
         // so subsequent reads of [Children] / [Reference] / relations return the local
-        // dicts (which may be empty for a brand-new entity, and that's fine).
+        // state (which may be empty for a brand-new entity, and that's fine).
         entity.MarkAllSlicesLoaded(this);
         return entity;
     }
@@ -487,13 +426,16 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
            && set.Contains(fieldName);
 
     /// <summary>
-    /// Strict-with-escape extension query: runs <paramref name="query"/> through the
-    /// transport and hydrates rows back into <c>this</c> session, top-up style. Already-
-    /// tracked entities receive <see cref="IEntity.HydratePartial"/> (skips fields the
-    /// user has mutated since the original load); brand-new entities receive the full
-    /// <see cref="IEntity.Hydrate"/>. Slices listed in <see cref="Query{T}.Includes"/>
+    /// Strict-with-escape extension query: runs <paramref name="query"/> and re-Hydrates
+    /// rows back into <c>this</c> session. Slices listed in <see cref="Query{T}.Includes"/>
     /// are marked loaded on their owners — subsequent reads against those slices stop
     /// throwing <see cref="LoadShapeViolationException"/>.
+    /// <para>
+    /// <b>Caveat:</b> Fetch is a slice widener, not a polite refresh. Re-Hydrate of an
+    /// entity already in the session overwrites its scalar fields with whatever the DB
+    /// returns. If you've mutated an entity in memory, save first or accept the clobber —
+    /// per-field "did the user touch this" tracking is gone.
+    /// </para>
     /// <para>
     /// Typical usage: a property read raises a <see cref="LoadShapeViolationException"/>;
     /// catch it (or pre-empt it) and call <c>session.FetchAsync(Workspace.Query.{Root}.WithId(id).Include*(...))</c>
@@ -539,9 +481,9 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     }
 
     /// <summary>
-    /// Hydrate one root row, then recurse through <paramref name="includes"/>. Existing
-    /// entities receive HydratePartial (uncommitted writes preserved); new entities get
-    /// the full Hydrate via <c>new T()</c>.
+    /// Hydrate one root row (or re-Hydrate over an existing tracked entity), then recurse
+    /// through <paramref name="includes"/>. Re-Hydrate clobbers existing scalar fields —
+    /// the slice-widening contract documented on <see cref="FetchAsync{T}(Query.Query{T}, SurrealClient, CancellationToken)"/>.
     /// </summary>
     private void HydrateMergingRoot<T>(SurrealObjectValue row, IHydrationSink sink, IReadOnlyList<Query.IIncludeNode> includes)
         where T : class, IEntity, new()
@@ -550,7 +492,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
 
         if (state.Entities.TryGetValue(id, out var existing))
         {
-            existing.HydratePartial(row, sink);
+            existing.Hydrate(row, sink);
         }
         else
         {
@@ -562,11 +504,9 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     }
 
     /// <summary>
-    /// Recursively hydrate nested includes for the partial-merge path. Like
-    /// <c>Query&lt;T&gt;.HydrateNested</c> but with dedup-on-tracked: child rows whose id
-    /// is already in the identity map get <see cref="IEntity.HydratePartial"/> instead
-    /// of the include's full-hydrate callback. Slice marking is identical to the
-    /// read-mode path.
+    /// Recursively hydrate nested includes. Existing tracked rows re-Hydrate over the same
+    /// instance (slice-widening; scalar clobber per the FetchAsync contract); brand-new
+    /// rows go through the include's generator-emitted hydrator.
     /// </summary>
     private void HydrateMergingNested(SurrealObjectValue row, IReadOnlyList<Query.IIncludeNode> nodes, IHydrationSink sink)
     {
@@ -592,7 +532,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                         if (HydrationValue.TryReadRecordId(childObj, "id", out var childId)
                             && state.Entities.TryGetValue(childId, out var existingChild))
                         {
-                            existingChild.HydratePartial(childObj, sink);
+                            existingChild.Hydrate(childObj, sink);
                         }
                         else
                         {
@@ -625,7 +565,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
                             if (HydrationValue.TryReadRecordId(targetObj, "id", out var targetId)
                                 && state.Entities.TryGetValue(targetId, out var existingTarget))
                             {
-                                existingTarget.HydratePartial(targetObj, sink);
+                                existingTarget.Hydrate(targetObj, sink);
                             }
                             else
                             {
@@ -645,62 +585,18 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     }
 
     /// <summary>
-    /// Single-field write. <paramref name="value"/> may be any scalar, an
-    /// <see cref="IRecordId"/>, or an <see cref="IEntity"/> — entity values are tracked
-    /// and substituted with their id before the command is recorded. <paramref name="kind"/>
-    /// tells the session which dict (Parents / References / nothing) to update.
+    /// Cascade-track a child entity into this session. Called from generator-emitted
+    /// <c>[Parent]</c> setters: when the user does <c>new Constraint { Design = design }</c>,
+    /// the Constraint's <c>Design</c> setter calls <c>design.Session?.AdoptIfUnbound(this)</c>
+    /// so the constraint joins the design's session and shows up in
+    /// <c>design.Constraints</c> at Save time. No-op when the child is already bound.
     /// </summary>
-    public void SetField(IRecordId owner, string field, object? value, FieldKind kind = FieldKind.Property)
+    public void AdoptIfUnbound(IEntity child)
     {
         ThrowIfClosed();
-        var ownerId = RecordId.From(owner);
-        // Entity → cascade-track + use its id; IRecordId → canonicalise; anything else
-        // passes through verbatim. Cascade-track is what makes `new Design { Details =
-        // new Details { … } }` work without an explicit Track on every fresh ref.
-        object? canonical = value;
-        if (value is IEntity entityValue)
-        {
-            Track(entityValue);
-            canonical = entityValue.Id;
-        }
-        else if (value is IRecordId recordValue)
-        {
-            canonical = RecordId.From(recordValue);
-        }
-
-        switch (kind)
-        {
-            case FieldKind.Parent:
-                state.Parents[ownerId] = (RecordId)canonical!;
-                break;
-            case FieldKind.Reference:
-                state.References[(ownerId, field)] = (RecordId)canonical!;
-                break;
-        }
-
-        // Per-field write flag: HydratePartial reads this to skip overwriting fields
-        // the user has touched since the initial load.
-        pendingFieldWrites.Add((ownerId, field));
-        Log.Append(Command.Set(ownerId, field, canonical));
-    }
-
-    /// <summary>Clears a single field. <paramref name="kind"/> picks the local-state dict to evict from.</summary>
-    public void UnsetField(IRecordId owner, string field, FieldKind kind = FieldKind.Property)
-    {
-        ThrowIfClosed();
-        var ownerId = RecordId.From(owner);
-        switch (kind)
-        {
-            case FieldKind.Parent:
-                state.Parents.Remove(ownerId);
-                break;
-            case FieldKind.Reference:
-                state.References.Remove((ownerId, field));
-                break;
-        }
-
-        pendingFieldWrites.Add((ownerId, field));
-        Log.Append(Command.Unset(ownerId, field));
+        ArgumentNullException.ThrowIfNull(child);
+        if (child.Session is not null) return;
+        Track(child);
     }
 
     /// <summary>
@@ -880,13 +776,13 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
 
     /// <summary>
     /// Auto-binds <paramref name="entity"/> for Save: binds the session into the entity's
-    /// <c>_session</c> field, replays any pre-bind buffered writes, and marks every slice
-    /// loaded (the user is asserting they own the entire state of this fresh entity).
-    /// Skips <c>Initialize</c> — the OnCreate hook pathway belongs to the legacy
-    /// Track-then-Commit flow; under the explicit-Save model the user constructs whole
-    /// entities explicitly. Crucially does <b>not</b> add the owner to the identity map
-    /// — that's <see cref="ISaveContext.MarkSaved"/>'s job, post-dispatch, so the
-    /// generator-emitted body's CREATE-vs-UPDATE check sees the entity as new.
+    /// <c>_session</c> field, runs <c>Initialize</c> (idempotently — the emitted body
+    /// guards each <c>OnCreate*</c> hook so already-set mandatory references aren't
+    /// re-minted), and marks every slice loaded (the user is asserting they own the
+    /// entire state of this fresh entity). Crucially does <b>not</b> add the owner to
+    /// the identity map — that's <see cref="ISaveContext.MarkSaved"/>'s job, post-
+    /// dispatch, so the generator-emitted body's CREATE-vs-UPDATE check sees the entity
+    /// as new.
     /// </summary>
     private void EnsureBoundForSave(IEntity entity)
     {
@@ -894,7 +790,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         if (entity.Session is null)
         {
             entity.Bind(this);
-            entity.Flush(this);
+            entity.Initialize(this);
             entity.MarkAllSlicesLoaded(this);
         }
     }
@@ -937,7 +833,7 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
 
         public void MarkSaved(IEntity entity)
         {
-            // Identity map registration (idempotent — Bind / SetField cascade may have
+            // Identity map registration (idempotent — Bind / Track cascade may have
             // added it already) plus the saved-this-pass flag that drives subsequent
             // IsTracked checks to "yes, in DB now".
             session.state.Entities[entity.Id] = entity;
@@ -1061,25 +957,16 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     public void Abandon()
     {
         Log.Clear();
-        pendingFieldWrites.Clear();
         closed = true;
     }
 
 
-    // ──────────────────────────── loader hooks ──────────────────────────────
-    //
-    // These bypass the dirty batch — loaded data is "the snapshot" and shouldn't appear
-    // as a write at the next commit. Generator-emitted loaders + entity <c>Hydrate</c>
-    // methods are the intended callers (and live in the consumer assembly, hence public);
-    // ordinary writes go through the Track/SetField/Relate surface.
-
     // ──────────────────────────── IHydrationSink (explicit-interface) ──────
     //
     // Loader-side write surface. Explicit-interface so domain code with a SurrealSession
-    // reference doesn't see Track / Parent / Reference / Edge in IntelliSense — getting
-    // at them requires a deliberate `(IHydrationSink)session` cast. The four ops keep
-    // the lifecycle invariant: closed sessions reject hydration too, since hydration is
-    // load-time and a closed session shouldn't be receiving any more state.
+    // reference doesn't see Track / Edge in IntelliSense — getting at them requires a
+    // deliberate `(IHydrationSink)session` cast. Closed sessions reject hydration too,
+    // since hydration is load-time and a closed session shouldn't be receiving more state.
 
     void IHydrationSink.Track(IEntity entity)
     {
@@ -1092,14 +979,12 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
             // A.Uses both targeting B, etc). The hydrator's `new T() + Hydrate` runs
             // per row and would conflict with the first-hit instance; we silently
             // drop the new one. The DB row is the same regardless of traversal path,
-            // so the existing instance already carries the right state. This also
-            // lets the surrounding loop (edge synthesis, nested traversal) keep going
-            // — the previous throw aborted everything after the first dup.
+            // so the existing instance already carries the right state.
             //
-            // Distinct from the public Track<T> path (line above), which DOES throw
-            // on instance conflict — user code holding two live instances for the
-            // same id is identity-map poison and we want to surface that loudly.
-            // Hydration dups are accidental and benign.
+            // Distinct from the public Track<T> path, which DOES throw on instance
+            // conflict — user code holding two live instances for the same id is
+            // identity-map poison and we want to surface that loudly. Hydration dups
+            // are accidental and benign.
             if (!ReferenceEquals(existing, entity))
             {
                 loadedAtStart.Add(entity.Id);
@@ -1112,18 +997,6 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
             entity.Bind(this);
         }
         loadedAtStart.Add(entity.Id);
-    }
-
-    void IHydrationSink.Parent(RecordId childId, RecordId parentId)
-    {
-        ThrowIfClosed();
-        state.Parents[childId] = parentId;
-    }
-
-    void IHydrationSink.Reference(RecordId ownerId, string fieldName, RecordId refId)
-    {
-        ThrowIfClosed();
-        state.References[(ownerId, fieldName)] = refId;
     }
 
     void IHydrationSink.Edge(RecordId source, string edgeKind, RecordId target)
@@ -1144,15 +1017,12 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
         set.Add(fieldName);
     }
 
-    bool IHydrationSink.HasPendingWrite(RecordId ownerId, string field)
-        => pendingFieldWrites.Contains((ownerId, field));
-
     // ──────────────────────────── private helpers ───────────────────────────
 
     /// <summary>
-    /// Append-to-log chokepoint for diagnostic-grade tracing of model commands. Pure
-    /// log; no state updates anymore. Sync write methods record their commands here
-    /// for visibility (and tests) but otherwise update state dicts directly.
+    /// Append-to-log chokepoint for diagnostic-grade tracing of model commands. Track
+    /// records a Create command here; Relate / Unrelate record their own. Property
+    /// setters do not go through this path under the explicit-Save model.
     /// </summary>
     private void Record(Command c)
     {
@@ -1160,34 +1030,15 @@ public sealed class SurrealSession(IReferenceRegistry referenceRegistry) : IHydr
     }
 
     /// <summary>
-    /// Wipes every in-memory mention of <paramref name="id"/> — the entity itself, any
-    /// parent link declaring this as the parent (children become locally orphaned),
-    /// references with this id as their value, and edges with this on either endpoint.
-    /// Keeps subsequent reads honest about what's gone.
+    /// Wipes every in-memory mention of <paramref name="id"/> — the entity itself and
+    /// any edges with this on either endpoint. Parent / reference back-resolution is
+    /// per-entity now (via <see cref="IEntity.GetParentId"/> + entity backing fields),
+    /// so deleted entities naturally drop out of <see cref="QueryChildren{T}"/> when
+    /// state.Entities loses them.
     /// </summary>
     private void CleanupLocalState(RecordId id)
     {
         state.Entities.Remove(id);
-        state.Parents.Remove(id);
-
-        foreach (var k in state.Parents.Where(kv => kv.Value == id).Select(kv => kv.Key).ToList())
-        {
-            state.Parents.Remove(k);
-        }
-
-        // Clear OUTBOUND references — entries where `id` is the owner. Otherwise a
-        // recreate-after-delete (Track of a fresh instance with the same id) would see
-        // the dead entity's optional refs bleed through GetReferenceOrDefault, since
-        // state.Entities[id] now hits the new instance.
-        //
-        // INBOUND references — entries where `id` is the target — are preserved on
-        // purpose. The commit planner reads the inbound graph to resolve
-        // [Reject] / [Unset] / [Cascade]; erasing those at session-side made the
-        // decisions unreliable.
-        foreach (var k in state.References.Keys.Where(k => k.Owner == id).ToList())
-        {
-            state.References.Remove(k);
-        }
 
         foreach (var k in state.Edges.Keys.Where(k => k.Source == id || k.Target == id).ToList())
         {

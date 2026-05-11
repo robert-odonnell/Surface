@@ -7,27 +7,29 @@ namespace Disruptor.Surface.Generator.Emit;
 
 /// <summary>
 /// Emits the implementing half of every partial property and method on a <c>[Table]</c>
-/// class. Reads are sync property bodies that hit the in-memory <c>SurrealSession</c>
-/// snapshot; writes are sync <c>void</c> methods that record into the session's dirty
-/// batch. Async only happens at the session boundary (load + commit) — nothing the
-/// generator emits returns <see cref="System.Threading.Tasks.Task"/>.
+/// class. Property setters are pure backing-field assignments — no Session interaction,
+/// no per-field dirty tracking. Save reads the entity's current state at dispatch time.
 /// <list type="bullet">
 ///   <item>[Id] — lazy-cached field; defaults to <c>{Name}Id.New()</c> on first access.</item>
-///   <item>[Property] — getter-only or get/set partial property; setters write the backing
-///         field then call <c>Session.SetField(this.Id, field, value)</c>.</item>
-///   <item>[Reference] — sync getter-only partial property; non-nullable maps to
-///         <c>Session.GetReference</c> (throws on miss), nullable to
-///         <c>GetReferenceOrDefault</c>. Mandatory references emit an <c>OnCreate{Name}</c>
-///         partial hook plus an entry in <c>IEntity.Initialize</c>. Settable references
-///         route through <c>SetField/UnsetField</c> with <c>FieldKind.Reference</c>.</item>
-///   <item>[Parent] — sync property; setter calls <c>SetField</c> with
-///         <c>FieldKind.Parent</c>.</item>
-///   <item>[Children] — sync getter-only partial property over <c>QueryChildren</c>.</item>
-///   <item>Forward/inverse relation property — sync collection from directional
-///         <c>QueryOutgoing</c> / <c>QueryIncoming</c> for same-aggregate edges, or
-///         <c>QueryRelatedIds</c> / <c>QueryInverseRelatedIds</c> for cross-aggregate
-///         edges. Relation writes go through <c>Session.Relate</c> and
-///         <c>Session.Unrelate</c> (one form, optional source/target for bulk).</item>
+///   <item>[Property] — getter-only or get/set partial property; setter writes the
+///         backing field, nothing else.</item>
+///   <item>[Reference] — sync property over <c>_{name}</c> entity ref + <c>_{name}Id</c>
+///         record id backing fields. Getter falls back to <c>Session.Get&lt;T&gt;(_id)</c>
+///         when the entity ref isn't locally cached (covers "loaded as id only" + "user
+///         loaded other aggregate separately"). Mandatory get-only references emit an
+///         <c>OnCreate{Name}</c> partial hook plus an entry in <c>IEntity.Initialize</c>
+///         that mints + assigns directly.</item>
+///   <item>[Parent] — sync property; same shape as Reference, plus the setter cascade-
+///         tracks the child into the parent's session via
+///         <c>parent.Session.AdoptIfUnbound(this)</c> so <c>parent.Children</c> sees the
+///         new child at Save time.</item>
+///   <item>[Children] — sync getter-only partial property over
+///         <c>Session.QueryChildren</c>.</item>
+///   <item>Forward/inverse relation property — sync collection from
+///         <c>Session.QueryOutgoing</c> / <c>QueryIncoming</c> for same-aggregate edges,
+///         or <c>QueryRelatedIds</c> / <c>QueryInverseRelatedIds</c> for cross-aggregate
+///         edges. Relation writes go through <c>Session.Relate</c> (sync, in-memory) or
+///         <c>Session.RelateAsync</c> (direct dispatch).</item>
 /// </list>
 /// </summary>
 internal static class PartialEmitter
@@ -46,8 +48,8 @@ internal static class PartialEmitter
 
         // Empty annotated tables are legal — the id anchor is always emitted, so a
         // [Table] with no partial members still gets IEntity scaffolding (Bind, Initialize,
-        // Hydrate, Flush, OnDeleting) and is fully Track-able / Load-able. Just an entity
-        // that carries nothing but its identity.
+        // Hydrate, OnDeleting) and is fully Track-able / Load-able. Just an entity that
+        // carries nothing but its identity.
         var partialProps = table.Properties.Where(p => p.IsPartial).ToArray();
 
         var builder = new StringBuilder()
@@ -116,6 +118,7 @@ internal static class PartialEmitter
         EmitIdAnchor(builder, memberIndent, table);
 
         var mandatoryRefs = new List<PropertyModel>();
+        PropertyModel? parentProp = null;
 
         foreach (var t in partialProps)
         {
@@ -125,6 +128,10 @@ internal static class PartialEmitter
             if (IsMandatoryReference(t))
             {
                 mandatoryRefs.Add(t);
+            }
+            if (t.Kinds.HasFlag(PropertyKind.Parent))
+            {
+                parentProp = t;
             }
         }
 
@@ -137,14 +144,8 @@ internal static class PartialEmitter
         builder.AppendLine();
         EmitHydrate(builder, memberIndent, table);
 
-        // HydratePartial — called by SurrealSession.FetchAsync<T> when a row arrives for
-        // an entity that's already tracked. Same per-field reads, gated on
-        // !sink.HasPendingWrite so the caller's uncommitted mutations survive a top-up.
-        builder.AppendLine();
-        EmitHydratePartial(builder, memberIndent, table);
-
-        // OnDeleting hook — invoked by Session.Delete(IEntity) before the entity's own
-        // delete command is queued. User can implement the simple-form partial method to
+        // OnDeleting hook — invoked by Session.DeleteAsync(IEntity) before the entity's
+        // own DELETE is dispatched. User can implement the simple-form partial method to
         // queue child deletes / clears.
         builder.AppendLine();
         EmitOnDeleting(builder, memberIndent);
@@ -156,10 +157,18 @@ internal static class PartialEmitter
         builder.AppendLine();
         EmitMarkAllSlicesLoaded(builder, memberIndent, table);
 
+        // GetParentId — emitted iff the entity has a [Parent] property. Default-interface
+        // returns null for tables without a parent. Used by SurrealSession.QueryChildren
+        // to match a child against its parent owner.
+        if (parentProp is not null)
+        {
+            builder.AppendLine();
+            EmitGetParentId(builder, memberIndent, parentProp);
+        }
+
         // SaveAsync — generator-emitted per-entity Save dispatch. Walks forward dependencies
-        // (Reference / Parent), then dispatches CREATE-or-UPSERT-with-CONTENT for this row,
-        // then MarkSaved. Children + relations are not auto-walked in the MVP — the user
-        // calls Save explicitly per child / per relation.
+        // (Reference / Parent) via backing fields, dispatches CREATE/UPDATE-with-CONTENT,
+        // recurses into new children, dispatches new outgoing relations.
         builder.AppendLine();
         EmitSaveAsync(builder, memberIndent, table);
 
@@ -178,14 +187,12 @@ internal static class PartialEmitter
     // ──────────────────────────── per-table preamble ─────────────────────────
 
     /// <summary>
-    /// Emits per-entity session plumbing: a private <c>_session</c> field, a private
-    /// <c>_pendingWrites</c> buffer for object-initializer values that arrive before the
-    /// entity is tracked, the explicit <c>IEntity.Session</c> getter (nullable),
-    /// <c>IEntity.Bind</c> (one-shot setter for <c>_session</c>), <c>IEntity.Flush</c>
-    /// (drains the buffer into the bound session), the protected <c>Session</c> property
-    /// for entity-body reads (throws when unbound — reading from an unbound entity is a
-    /// programmer error), and the <c>__WriteField</c> / <c>__ClearField</c> setter
-    /// helpers that buffer when unbound or route through the session when bound.
+    /// Emits per-entity session plumbing: a private <c>_session</c> field, the explicit
+    /// <c>IEntity.Session</c> getter (nullable), <c>IEntity.Bind</c> (one-shot setter for
+    /// <c>_session</c>), the protected <c>Session</c> property for entity-body reads
+    /// (throws when unbound — reading from an unbound entity is a programmer error), and
+    /// the <c>__EnsureSliceLoaded</c> guard the navigable read paths use to enforce
+    /// strict-with-escape.
     /// </summary>
     private static void WriteSessionPlumbing(StringBuilder builder, string indent)
     {
@@ -194,9 +201,6 @@ internal static class PartialEmitter
             .Append("private ")
             .Append(SessionType)
             .AppendLine("? _session;")
-            .Append(indent)
-            .Append("private global::System.Collections.Generic.List<(string Field, object? Value, global::Disruptor.Surface.Runtime.FieldKind Kind)>? _pendingWrites;")
-            .AppendLine()
             .AppendLine();
 
         builder
@@ -217,18 +221,6 @@ internal static class PartialEmitter
             .Append(indent).AppendLine("        throw new global::System.InvalidOperationException(\"Entity is already bound to a different session.\");")
             .Append(indent).AppendLine("    _session = session;")
             .Append(indent).AppendLine("}")
-            .AppendLine()
-            .Append(indent)
-            .Append("void ")
-            .Append(EntityInterface)
-            .Append(".Flush(")
-            .Append(SessionType)
-            .AppendLine(" session)")
-            .Append(indent).AppendLine("{")
-            .Append(indent).AppendLine("    if (_pendingWrites is null) return;")
-            .Append(indent).AppendLine($"    foreach (var (f, v, k) in _pendingWrites) session.SetField((({EntityInterface})this).Id, f, v, k);")
-            .Append(indent).AppendLine("    _pendingWrites = null;")
-            .Append(indent).AppendLine("}")
             .AppendLine();
 
         builder
@@ -238,24 +230,6 @@ internal static class PartialEmitter
             .AppendLine(" Session")
             .Append(indent)
             .AppendLine("    => _session ?? throw new global::System.InvalidOperationException(\"Entity is not bound to a session — call session.Track(...) or hydrate via Sessions.Load*Async first.\");")
-            .AppendLine();
-
-        builder
-            .Append(indent)
-            .Append("private void __WriteField(string field, object? value, global::Disruptor.Surface.Runtime.FieldKind kind = global::Disruptor.Surface.Runtime.FieldKind.Property)")
-            .AppendLine()
-            .Append(indent).AppendLine("{")
-            .Append(indent).AppendLine("    if (_session is null) (_pendingWrites ??= new()).Add((field, value, kind));")
-            .Append(indent).AppendLine($"    else _session.SetField((({EntityInterface})this).Id, field, value, kind);")
-            .Append(indent).AppendLine("}")
-            .AppendLine()
-            .Append(indent)
-            .Append("private void __ClearField(string field, global::Disruptor.Surface.Runtime.FieldKind kind = global::Disruptor.Surface.Runtime.FieldKind.Property)")
-            .AppendLine()
-            .Append(indent).AppendLine("{")
-            .Append(indent).AppendLine("    if (_session is null) _pendingWrites?.RemoveAll(p => p.Field == field);")
-            .Append(indent).AppendLine($"    else _session.UnsetField((({EntityInterface})this).Id, field, kind);")
-            .Append(indent).AppendLine("}")
             .AppendLine()
             // Slice guard — called by every navigable read path before walking the in-memory
             // cache. Reuses the protected Session accessor so unbound entities still get the
@@ -308,10 +282,9 @@ internal static class PartialEmitter
 
     /// <summary>
     /// <c>[Property]</c> on a property declaration: scalar columns go through
-    /// <see cref="EmitDataProperty"/> (backing field + setter routing through
-    /// <c>SetField</c>); inline ordered collections typed as <c>SurrealArray&lt;T&gt;</c>
-    /// go through <see cref="EmitSurrealArrayProperty"/> (lazy-cached wrapper that
-    /// notifies the workspace on every mutation).
+    /// <see cref="EmitDataProperty"/> (pure backing field); inline ordered collections
+    /// typed as <c>SurrealArray&lt;T&gt;</c> go through
+    /// <see cref="EmitSurrealArrayProperty"/> (lazy-cached wrapper).
     /// </summary>
     private static void EmitPropertyMember(StringBuilder builder, string indent, PropertyModel p)
     {
@@ -328,23 +301,16 @@ internal static class PartialEmitter
     /// <summary>
     /// Emits the lazy-cached wrapper for an inline <c>array&lt;object&gt;</c> column.
     /// The wrapper is created once per entity instance (never replaced), so any reference
-    /// the user holds stays valid as the list mutates. Mutations route through
-    /// <see>
-    ///     <cref>SurrealArray{T}</cref>
-    /// </see>
-    /// 's own notify path — the generator doesn't emit a
-    /// setter or any per-verb method.
+    /// the user holds stays valid as the list mutates. The writer callback is a no-op —
+    /// SurrealArray's mutations land directly in the entity's backing field, and Save
+    /// reads the wrapper at dispatch time.
     /// </summary>
     private static void EmitSurrealArrayProperty(StringBuilder builder, string indent, PropertyModel p)
     {
         var declaredType = p.Type.FullyQualifiedName;
         var access = FormatAccessibility(p.DeclaredAccessibility);
         var backing = $"_{ToCamel(p.Name)}";
-        var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
 
-        // The writer lambda routes through __WriteField — same path as scalar setters —
-        // so pre-bind mutations buffer in _pendingWrites and replay through Flush when
-        // Track binds the entity. Nothing reaches Session.SetField directly.
         builder
             .Append(indent)
             .Append("private ")
@@ -362,9 +328,7 @@ internal static class PartialEmitter
             .Append(backing)
             .Append(" ??= new ")
             .Append(declaredType)
-            .Append("(null, __items => __WriteField(")
-            .Append(fieldLit)
-            .AppendLine(", __items));");
+            .AppendLine("(null, _ => { });");
     }
 
     /// <summary>
@@ -399,10 +363,7 @@ internal static class PartialEmitter
     /// <para>
     /// The setter (when declared) refuses to mutate the anchor once the entity is bound
     /// to a session — by that point the entity lives in the session's identity map keyed
-    /// on the current id, and silently overwriting it would corrupt every dict. Pre-bind
-    /// sets are fine: the session hasn't adopted the entity yet, and the
-    /// <c>new Design { Id = knownId }</c> object-initializer pattern (handy for
-    /// constructing handles to look up in a freshly loaded workspace) keeps working.
+    /// on the current id, and silently overwriting it would corrupt every dict.
     /// </para>
     /// </summary>
     private static void EmitIdProperty(StringBuilder builder, string indent, PropertyModel p)
@@ -445,6 +406,11 @@ internal static class PartialEmitter
             .AppendLine("}");
     }
 
+    /// <summary>
+    /// Pure backing-field property: <c>get => _name; set => _name = value;</c>. No
+    /// Session call, no buffer, no command log entry. Save reads the backing field at
+    /// dispatch time.
+    /// </summary>
     private static void EmitDataProperty(StringBuilder builder, string indent, PropertyModel p)
     {
         var type = p.Type.FullyQualifiedName;
@@ -481,7 +447,6 @@ internal static class PartialEmitter
             return;
         }
 
-        var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
         builder
             .Append(indent)
             .Append(access)
@@ -491,39 +456,42 @@ internal static class PartialEmitter
             .AppendLine(p.Name)
             .Append(indent)
             .AppendLine("{")
-            .Append(indent)
-            .Append("    get => ")
-            .Append(backing)
-            .AppendLine(";")
-            .Append(indent)
-            .Append("    ")
-            .AppendLine(p.HasInitOnlySetter ? "init" : "set")
-            .Append(indent)
-            .AppendLine("    {")
-            .Append(indent)
-            .Append("        ")
-            .Append(backing)
-            .AppendLine(" = value;")
-            .Append(indent)
-            .Append("        __WriteField(")
-            .Append(fieldLit)
-            .AppendLine(", value);")
-            .Append(indent)
-            .AppendLine("    }")
+            .Append(indent).Append("    get => ").Append(backing).AppendLine(";")
+            .Append(indent).Append("    ").Append(p.HasInitOnlySetter ? "init" : "set").Append(" => ").Append(backing).AppendLine(" = value;")
             .Append(indent)
             .AppendLine("}");
     }
 
+    /// <summary>
+    /// Sync property body for <c>[Parent]</c>:
+    /// <list type="bullet">
+    ///   <item>Two backing fields: <c>_{name}</c> caches the parent entity ref;
+    ///         <c>_{name}Id</c> caches the parent's record id.</item>
+    ///   <item>Getter: returns <c>_{name}</c> if cached; otherwise falls back to
+    ///         <c>Session?.Get&lt;TParent&gt;(_{name}Id)</c> when an id is known.</item>
+    ///   <item>Setter: stores both backing fields; if the assigned parent has a session
+    ///         and <c>this</c> is unbound, calls
+    ///         <c>parent.Session.AdoptIfUnbound(this)</c> so this entity joins the
+    ///         parent's session — that's how a freshly constructed
+    ///         <c>new Constraint { Design = design }</c> shows up in
+    ///         <c>design.Constraints</c> when Save walks children.</item>
+    /// </list>
+    /// </summary>
     private static void EmitParentProperty(StringBuilder builder, string indent, PropertyModel p)
     {
         var declared = p.Type.FullyQualifiedName;
         var typeArg = StripNullable(declared);
         var access = FormatAccessibility(p.DeclaredAccessibility);
+        var nullable = p.Type.IsNullable;
         var sliceKey = SurrealNaming.ToFieldName(p.Name);
         var sliceKeyLit = Quote(sliceKey);
         var fetchHintLit = Quote($".Include{p.Name}() on the parent query");
+        var backing = $"_{ToCamel(p.Name)}";
+        var idBacking = $"_{ToCamel(p.Name)}Id";
 
         builder
+            .Append(indent).Append("private ").Append(typeArg).Append("? ").Append(backing).AppendLine(";")
+            .Append(indent).Append("private global::Disruptor.Surface.Runtime.RecordId? ").Append(idBacking).AppendLine(";")
             .Append(indent)
             .Append(access)
             .Append(" partial ")
@@ -531,24 +499,50 @@ internal static class PartialEmitter
             .Append(' ')
             .AppendLine(p.Name)
             .Append(indent)
-            .AppendLine("{")
-            .Append(indent)
-            .AppendLine("    get")
-            .Append(indent).AppendLine("    {")
-            .Append(indent).Append("        __EnsureSliceLoaded(").Append(sliceKeyLit).Append(", ").Append(fetchHintLit).AppendLine(");")
-            .Append(indent).Append("        return Session.GetParent<").Append(typeArg).AppendLine(">(this);")
-            .Append(indent).AppendLine("    }");
+            .AppendLine("{");
+
+        if (nullable)
+        {
+            builder
+                .Append(indent).AppendLine("    get")
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        __EnsureSliceLoaded(").Append(sliceKeyLit).Append(", ").Append(fetchHintLit).AppendLine(");")
+                .Append(indent).Append("        return ").Append(backing).Append(" ?? (").Append(idBacking)
+                    .Append(" is { } __id ? _session?.Get<").Append(typeArg).AppendLine(">(__id) : null);")
+                .Append(indent).AppendLine("    }");
+        }
+        else
+        {
+            // Non-nullable [Parent]: a parent should always exist for a tracked child.
+            // Throw if neither the entity ref nor the id is set, mirroring the mandatory
+            // [Reference] shape.
+            builder
+                .Append(indent).AppendLine("    get")
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        __EnsureSliceLoaded(").Append(sliceKeyLit).Append(", ").Append(fetchHintLit).AppendLine(");")
+                .Append(indent).Append("        var __resolved = ").Append(backing).Append(" ?? (").Append(idBacking)
+                    .Append(" is { } __id ? _session?.Get<").Append(typeArg).AppendLine(">(__id) : null);")
+                .Append(indent).Append("        return __resolved ?? throw new global::System.InvalidOperationException(\"Parent '")
+                    .Append(p.Name).AppendLine("' is not set.\");")
+                .Append(indent).AppendLine("    }");
+        }
 
         if (p.HasSetter || p.HasInitOnlySetter)
         {
             builder
-                .Append(indent)
-                .Append("    ")
-                .AppendLine(p.HasInitOnlySetter ? "init" : "set")
-                .Append(indent)
-                .Append("        => __WriteField(")
-                .Append(sliceKeyLit)
-                .AppendLine(", value, global::Disruptor.Surface.Runtime.FieldKind.Parent);");
+                .Append(indent).Append("    ").AppendLine(p.HasInitOnlySetter ? "init" : "set")
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        ").Append(backing).AppendLine(" = value;")
+                .Append(indent).Append("        ").Append(idBacking).AppendLine(nullable
+                    ? $" = value is null ? null : (({EntityInterface})value).Id;"
+                    : $" = (({EntityInterface})value).Id;")
+                // Cascade-track: assigning a parent that's bound to a session should pull
+                // this child into that session, so the parent's [Children] sees it at Save
+                // time. AdoptIfUnbound is a no-op when this entity already has a session.
+                // IEntity.Session is the explicit-impl public accessor; the parent's own
+                // `protected Session` would be inaccessible from this site.
+                .Append(indent).AppendLine($"        if (value is not null && (({EntityInterface})value).Session is {{ }} __ps) __ps.AdoptIfUnbound(this);")
+                .Append(indent).AppendLine("    }");
         }
 
         builder.Append(indent).AppendLine("}");
@@ -584,15 +578,16 @@ internal static class PartialEmitter
     /// <summary>
     /// Sync property body for <c>[Reference]</c>:
     /// <list type="bullet">
-    ///   <item>Get-only non-nullable → mandatory; <c>GetReference</c> (throws on miss).
-    ///         Pairs with the <c>OnCreate{Name}</c> hook the workspace runs from
-    ///         <see cref="EmitInitialize"/> when <c>Create&lt;T&gt;()</c> mints a fresh
-    ///         entity.</item>
-    ///   <item>Get-only nullable → optional; <c>GetReferenceOrDefault</c>.</item>
-    ///   <item>Get + set non-nullable → user controls init themselves; setter calls
-    ///         <c>SetField(..., FieldKind.Reference)</c>.</item>
-    ///   <item>Get + set nullable → setter branches: null calls <c>UnsetField</c>,
-    ///         non-null calls <c>SetField</c> — both with <c>FieldKind.Reference</c>.</item>
+    ///   <item>Two backing fields: <c>_{name}</c> caches the reference target entity;
+    ///         <c>_{name}Id</c> caches its record id.</item>
+    ///   <item>Mandatory get-only (non-nullable): getter returns <c>_{name}</c> directly,
+    ///         throwing if it isn't set. <c>Initialize</c> mints the target via the
+    ///         <c>OnCreate{Name}</c> hook for fresh-construct entities; loaders set it
+    ///         via inline expansion (<c>field.*</c>).</item>
+    ///   <item>Optional with set/init: setter stores both backing fields. Getter falls
+    ///         back to <c>Session?.Get&lt;T&gt;(_{name}Id)</c> when the entity ref isn't
+    ///         locally cached (covers "loaded as id only" + "user later loaded other
+    ///         aggregate separately and the entity is now in the identity map").</item>
     /// </list>
     /// </summary>
     private static void EmitReferenceProperty(StringBuilder builder, string indent, PropertyModel p)
@@ -600,49 +595,61 @@ internal static class PartialEmitter
         var declared = p.Type.FullyQualifiedName;
         var typeArg = StripNullable(declared);
         var access = FormatAccessibility(p.DeclaredAccessibility);
-        var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
+        var sliceKey = SurrealNaming.ToFieldName(p.Name);
+        var sliceKeyLit = Quote(sliceKey);
         var fetchHintLit = Quote($".Include{p.Name}() on the parent query");
         var nullable = p.Type.IsNullable;
-        var getMethod = nullable ? "GetReferenceOrDefault" : "GetReference";
+        var backing = $"_{ToCamel(p.Name)}";
+        var idBacking = $"_{ToCamel(p.Name)}Id";
 
         builder
+            .Append(indent).Append("private ").Append(typeArg).Append("? ").Append(backing).AppendLine(";")
+            .Append(indent).Append("private global::Disruptor.Surface.Runtime.RecordId? ").Append(idBacking).AppendLine(";")
             .Append(indent)
             .Append(access)
             .Append(" partial ")
             .Append(declared)
             .Append(' ')
             .AppendLine(p.Name)
-            .Append(indent).AppendLine("{")
-            .Append(indent).AppendLine("    get")
-            .Append(indent).AppendLine("    {")
-            .Append(indent).Append("        __EnsureSliceLoaded(").Append(fieldLit).Append(", ").Append(fetchHintLit).AppendLine(");")
-            .Append(indent).Append("        return Session.").Append(getMethod).Append('<').Append(typeArg)
-            .Append(">(this, ").Append(fieldLit).AppendLine(");")
-            .Append(indent).AppendLine("    }");
+            .Append(indent)
+            .AppendLine("{");
+
+        // Getter
+        if (!nullable)
+        {
+            // Mandatory: throw if neither the entity ref nor the id is set; otherwise
+            // resolve. Initialize mints + sets _{name}; inline loaders set both fields.
+            builder
+                .Append(indent).AppendLine("    get")
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        __EnsureSliceLoaded(").Append(sliceKeyLit).Append(", ").Append(fetchHintLit).AppendLine(");")
+                .Append(indent).Append("        var __resolved = ").Append(backing).Append(" ?? (").Append(idBacking)
+                    .Append(" is { } __id ? _session?.Get<").Append(typeArg).AppendLine(">(__id) : null);")
+                .Append(indent).Append("        return __resolved ?? throw new global::System.InvalidOperationException(\"Mandatory reference '")
+                    .Append(p.Name).AppendLine("' is not set.\");")
+                .Append(indent).AppendLine("    }");
+        }
+        else
+        {
+            builder
+                .Append(indent).AppendLine("    get")
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        __EnsureSliceLoaded(").Append(sliceKeyLit).Append(", ").Append(fetchHintLit).AppendLine(");")
+                .Append(indent).Append("        return ").Append(backing).Append(" ?? (").Append(idBacking)
+                    .Append(" is { } __id ? _session?.Get<").Append(typeArg).AppendLine(">(__id) : null);")
+                .Append(indent).AppendLine("    }");
+        }
 
         if (p.HasSetter || p.HasInitOnlySetter)
         {
             builder
-                .Append(indent)
-                .Append("    ")
-                .AppendLine(p.HasInitOnlySetter ? "init" : "set");
-
-            if (nullable)
-            {
-                builder
-                    .Append(indent).AppendLine("    {")
-                    .Append(indent).Append("        if (value is null) __ClearField(")
-                    .Append(fieldLit).AppendLine(", global::Disruptor.Surface.Runtime.FieldKind.Reference);")
-                    .Append(indent).Append("        else __WriteField(")
-                    .Append(fieldLit).AppendLine(", value, global::Disruptor.Surface.Runtime.FieldKind.Reference);")
-                    .Append(indent).AppendLine("    }");
-            }
-            else
-            {
-                builder
-                    .Append(indent).Append("        => __WriteField(")
-                    .Append(fieldLit).AppendLine(", value, global::Disruptor.Surface.Runtime.FieldKind.Reference);");
-            }
+                .Append(indent).Append("    ").AppendLine(p.HasInitOnlySetter ? "init" : "set")
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        ").Append(backing).AppendLine(" = value;")
+                .Append(indent).Append("        ").Append(idBacking).AppendLine(nullable
+                    ? $" = value is null ? null : (({EntityInterface})value).Id;"
+                    : $" = (({EntityInterface})value).Id;")
+                .Append(indent).AppendLine("    }");
         }
 
         builder.Append(indent).AppendLine("}");
@@ -803,13 +810,6 @@ internal static class PartialEmitter
         return (stripped, Quote(SurrealNaming.ToTableName(SurrealNaming.SimpleName(stripped))));
     }
 
-    // ──────────────────────────── relation default mutators ─────────────────
-    // Empty section — no default Add/Remove/Clear methods are emitted any more. The
-    // typed `Session.Relate<TKind>(...)` etc. is the canonical surface; users who want a
-    // domain-named verb write a one-line passthrough in their own partial:
-    //
-    //     public void Restricts(IRestrictedBy x) => Session.Relate<Restricts>(this, x);
-
     // ──────────────────────────── Initialize emission ────────────────────────
 
     private static bool IsMandatoryReference(PropertyModel p)
@@ -820,11 +820,14 @@ internal static class PartialEmitter
            && !p.HasInitOnlySetter;
 
     /// <summary>
-    /// Emits the <c>void IEntity.Initialize(SurrealSession)</c> impl that <c>Session.Track</c>
-    /// invokes immediately after a fresh entity is tracked. For each mandatory
-    /// <c>[Reference]</c> we also emit the <c>OnCreate{Name}</c> partial declaration so
-    /// the user supplies the seed logic, then mint the target, run the hook, and write
-    /// the reference. Entities without mandatory refs get an empty body.
+    /// Emits the <c>void IEntity.Initialize(SurrealSession)</c> impl that
+    /// <c>Session.Track</c> (and <c>EnsureBoundForSave</c>) invokes. For each mandatory
+    /// <c>[Reference]</c> we emit the <c>OnCreate{Name}</c> partial declaration so the
+    /// user supplies the seed logic; the body then mints the target, runs the hook, and
+    /// assigns it directly into the backing fields. Idempotent — guards each mint with
+    /// <c>if (_{name} is null)</c> so re-invocation (Track followed by SaveAsync's
+    /// auto-bind) doesn't re-mint already-set references. Entities without mandatory
+    /// refs get an empty body.
     /// </summary>
     private static void EmitInitialize(StringBuilder builder, string indent, List<PropertyModel> mandatoryRefs)
     {
@@ -832,8 +835,7 @@ internal static class PartialEmitter
         {
             var typeArg = StripNullable(p.Type.FullyQualifiedName);
             // Simple-form partial — no accessibility, no body required. If the user
-            // doesn't implement it, the call below is elided at compile time and
-            // the new entity just keeps its DEFAULT-clause field values.
+            // doesn't implement it, the call below is elided at compile time.
             builder
                 .Append(indent)
                 .Append("partial void OnCreate")
@@ -869,27 +871,16 @@ internal static class PartialEmitter
         foreach (var p in mandatoryRefs)
         {
             var typeArg = StripNullable(p.Type.FullyQualifiedName);
-            var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
-            var local = $"__{ToCamel(p.Name)}";
+            var backing = $"_{ToCamel(p.Name)}";
+            var idBacking = $"_{ToCamel(p.Name)}Id";
 
-            builder.Append(indent)
-                .Append("    var ")
-                .Append(local)
-                .Append(" = new ")
-                .Append(typeArg)
-                .AppendLine("();")
-                .Append(indent)
-                .Append("    OnCreate")
-                .Append(p.Name)
-                .Append('(')
-                .Append(local)
-                .AppendLine(");")
-                .Append(indent)
-                .Append($"    session.SetField((({EntityInterface})this).Id, ")
-                .Append(fieldLit)
-                .Append(", ")
-                .Append(local)
-                .AppendLine(", global::Disruptor.Surface.Runtime.FieldKind.Reference);");
+            builder
+                .Append(indent).Append("    if (").Append(backing).AppendLine(" is null)")
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        ").Append(backing).Append(" = new ").Append(typeArg).AppendLine("();")
+                .Append(indent).Append("        OnCreate").Append(p.Name).Append('(').Append(backing).AppendLine(");")
+                .Append(indent).Append("        ").Append(idBacking).Append(" = ((").Append(EntityInterface).Append(')').Append(backing).AppendLine(").Id;")
+                .Append(indent).AppendLine("    }");
         }
 
         builder
@@ -956,19 +947,35 @@ internal static class PartialEmitter
         builder.Append(indent).AppendLine("}");
     }
 
+    /// <summary>
+    /// Emits <c>RecordId? IEntity.GetParentId()</c> for entities with a <c>[Parent]</c>
+    /// property. Returns the parent's record id (if set) or <c>null</c>. Used by
+    /// <see cref="SurrealSession.QueryChildren{T}"/> to match a candidate child against
+    /// its parent owner. Tables without a <c>[Parent]</c> get the default-interface
+    /// no-op return null defined on <c>IEntity</c>.
+    /// </summary>
+    private static void EmitGetParentId(StringBuilder builder, string indent, PropertyModel parentProp)
+    {
+        var idBacking = $"_{ToCamel(parentProp.Name)}Id";
+        builder
+            .Append(indent)
+            .Append("global::Disruptor.Surface.Runtime.RecordId? ")
+            .Append(EntityInterface)
+            .Append(".GetParentId() => ")
+            .Append(idBacking)
+            .AppendLine(";");
+    }
+
     // ──────────────────────────── SaveAsync emission ────────────────────────
 
     /// <summary>
     /// Emits <c>IEntity.SaveAsync(ISaveContext, CancellationToken)</c> per <c>[Table]</c>.
-    /// MVP shape: walk forward dependencies (<c>[Reference]</c> / <c>[Parent]</c> targets
-    /// that aren't tracked yet → recurse via <c>ctx.SaveAsync</c>); build a content dict
-    /// from <c>[Property]</c> + <c>[Reference]</c> + <c>[Parent]</c> fields; dispatch
-    /// <c>CREATE record:id CONTENT { … }</c> or <c>UPSERT record:id CONTENT { … }</c>
-    /// based on whether the id is already in the identity map; <c>ctx.MarkSaved(this)</c>.
-    /// <para>
-    /// Skipped from auto-walk (deferred): <c>[Children]</c> recursion, relations,
-    /// <c>SurrealArray</c> properties.
-    /// </para>
+    /// Walks forward dependencies (<c>[Reference]</c> / <c>[Parent]</c> targets that
+    /// aren't tracked yet → recurse via <c>ctx.SaveAsync</c>); builds a content dict
+    /// from <c>[Property]</c> + <c>[Reference]</c> + <c>[Parent]</c> backing fields;
+    /// dispatches <c>CREATE</c> or <c>UPDATE</c> via SurrealCommandEmitter; recurses
+    /// into new children via the <c>[Children]</c> property accessor; dispatches new
+    /// outgoing relations via <see cref="SurrealSession.GetNewOutgoingEdges{TKind}"/>.
     /// </summary>
     private static void EmitSaveAsync(StringBuilder builder, string indent, TableModel table)
     {
@@ -985,10 +992,8 @@ internal static class PartialEmitter
             .AppendLine();
 
         // Forward dependency walk: [Reference] + [Parent], skip relation-role properties.
-        // [Reference]/[Parent] live in the session (state.References / state.Parents),
-        // not as backing fields, so we read through OrDefault session helpers. Reads
-        // require a bound session — SurrealSession.SaveAsync runs EnsureBoundForSave
-        // before calling this method, so they're safe.
+        // Backing fields hold the entity ref directly under the new pure-setter model, so
+        // the walk reads `_{name}` (the entity ref) rather than going through Session.
         var hasForwardDeps = false;
         foreach (var p in table.Properties)
         {
@@ -996,28 +1001,11 @@ internal static class PartialEmitter
                 && p.RelationRole == RelationRole.None;
             if (!isFwdDep) continue;
             hasForwardDeps = true;
-            var local = $"__dep_{ToCamel(p.Name)}";
-            var typeArg = StripNullable(p.Type.FullyQualifiedName);
-            // [Parent] reads from state.Parents (one parent per entity); [Reference]
-            // reads from state.References (per-field). Different dicts, different
-            // accessors. Both OrDefault to make missing-link a no-op rather than throw.
-            if (p.Kinds.HasFlag(PropertyKind.Parent))
-            {
-                builder
-                    .Append(indent).Append("    var ").Append(local)
-                    .Append(" = Session.GetParentOrDefault<").Append(typeArg).AppendLine(">(this);");
-            }
-            else
-            {
-                builder
-                    .Append(indent).Append("    var ").Append(local)
-                    .Append(" = Session.GetReferenceOrDefault<").Append(typeArg).Append(">(this, \"")
-                    .Append(SurrealNaming.ToFieldName(p.Name)).AppendLine("\");");
-            }
+            var backing = $"_{ToCamel(p.Name)}";
             builder
-                .Append(indent).Append("    if (").Append(local).Append(" is not null && !ctx.IsTracked(((")
-                .Append(EntityInterface).Append(')').Append(local).AppendLine(").Id))")
-                .Append(indent).Append("        await ctx.SaveAsync(").Append(local).AppendLine(", ct);");
+                .Append(indent).Append("    if (").Append(backing).Append(" is not null && !ctx.IsTracked(((")
+                .Append(EntityInterface).Append(')').Append(backing).AppendLine(").Id))")
+                .Append(indent).Append("        await ctx.SaveAsync(").Append(backing).AppendLine(", ct);");
         }
         if (hasForwardDeps) builder.AppendLine();
 
@@ -1035,25 +1023,24 @@ internal static class PartialEmitter
 
             if (p.Kinds.HasFlag(PropertyKind.Property))
             {
-                // Scalar [Property] uses the backing-field convention emitted by
-                // EmitDataProperty (private `_{camelName}` mirror of the partial property).
                 var backing = $"_{ToCamel(p.Name)}";
                 builder.Append(indent).Append("    __content[").Append(fieldLit).Append("] = ").Append(backing).AppendLine(";");
             }
             else if (p.Kinds.HasFlag(PropertyKind.Reference) || p.Kinds.HasFlag(PropertyKind.Parent))
             {
-                // Reuse the ref local read above for forward-dep walking.
-                var local = $"__dep_{ToCamel(p.Name)}";
+                // FK rendered from the cached id (or the entity's id if only the entity
+                // ref is set — e.g. user assigned but Save hasn't yet rebuilt the id).
+                var backing = $"_{ToCamel(p.Name)}";
+                var idBacking = $"_{ToCamel(p.Name)}Id";
                 builder
-                    .Append(indent).Append("    if (").Append(local).AppendLine(" is not null)")
-                    .Append(indent).Append("        __content[").Append(fieldLit).Append("] = ((").Append(EntityInterface).Append(')').Append(local).AppendLine(").Id;");
+                    .Append(indent).Append("    __content[").Append(fieldLit).Append("] = ").Append(idBacking)
+                    .Append(" ?? (").Append(backing).Append(" is null ? null : (object)((")
+                    .Append(EntityInterface).Append(')').Append(backing).AppendLine(").Id);");
             }
         }
         builder.AppendLine();
 
-        // Dispatch via the existing SurrealCommandEmitter so RecordId / scalar literals
-        // render with the same rules as CommitPlanner-built commands. CREATE for new ids;
-        // UPSERT for whole-entity replacement of existing ids.
+        // Dispatch via SurrealCommandEmitter — same render path as RelateAsync / DeleteAsync.
         builder
             .Append(indent).AppendLine("    var __cmd = __isNew")
             .Append(indent).AppendLine("        ? global::Disruptor.Surface.Runtime.Command.Create(__id, __content)")
@@ -1066,8 +1053,7 @@ internal static class PartialEmitter
 
         // Children walk: AFTER self-dispatch (children's [Parent] FK needs this row to
         // exist in the txn before their CREATE lands). For each [Children] collection,
-        // iterate via the property accessor (returns IReadOnlyCollection<T>); recurse
-        // into any not-yet-saved entries via ctx.SaveAsync.
+        // iterate via the property accessor; recurse into any not-yet-saved entries.
         foreach (var p in table.Properties)
         {
             if (!p.Kinds.HasFlag(PropertyKind.Children)) continue;
@@ -1083,18 +1069,11 @@ internal static class PartialEmitter
 
         // Outgoing relations dispatch: for each [ForwardRelation]-bearing property, ask
         // the session for new (post-load) outgoing edges of that kind and dispatch a
-        // RELATE per new edge. Inverse-relation properties don't dispatch — the FORWARD
-        // entity owns the RELATE. Edges with both endpoints saved get a deterministic
-        // edge id (RecordId.Idempotent) so re-runs collapse against the schema's
-        // UNIQUE INDEX.
+        // RELATE per new edge.
         foreach (var p in table.Properties)
         {
             if (p.RelationRole != RelationRole.ForwardRelation) continue;
             if (string.IsNullOrEmpty(p.RelationKindFullName)) continue;
-            // RelationKindFullName is the *attribute* class FQN (e.g.,
-            // Disruptor.Surface.Sample.Relations.RestrictsAttribute). The marker class
-            // (Disruptor.Surface.Sample.Relations.Restricts : IRelationKind) is the
-            // attribute name with the "Attribute" suffix stripped.
             var attrFqn = p.RelationKindFullName!;
             var lastDot = attrFqn.LastIndexOf('.');
             var attrNs = lastDot >= 0 ? attrFqn[..lastDot] : "";
@@ -1122,55 +1101,36 @@ internal static class PartialEmitter
     // ──────────────────────────── Hydrate emission ──────────────────────────
 
     /// <summary>
-    /// Emits <c>IEntity.Hydrate(JsonElement, SurrealSession)</c> for the table. Reads each
-    /// declared property from the JSON row:
+    /// Emits <c>IEntity.Hydrate(SurrealValue, IHydrationSink)</c> for the table. Each
+    /// declared property writes directly into the entity's backing field — no
+    /// <c>sink.Parent</c> / <c>sink.Reference</c> calls; the entity owns its own state.
     /// <list type="bullet">
-    ///   <item>[Id] → parses the record id string and sets the typed <c>_id</c> field.</item>
-    ///   <item>scalar [Property] → reads the field value and sets the backing field.</item>
-    ///   <item>[Reference] → reads the record id, calls <c>sink.Reference</c>.</item>
-    ///   <item>[Parent] → reads the record id, calls <c>sink.Parent</c>.</item>
+    ///   <item>[Id] → parses the record id and sets the typed <c>_id</c> field.</item>
+    ///   <item>scalar [Property] → reads the value and sets <c>_{name}</c>.</item>
+    ///   <item>[Reference] non-Inline → reads the id, sets <c>_{name}Id</c>.</item>
+    ///   <item>[Reference, Inline] → constructs the target via
+    ///         <see cref="HydrationValue.HydrateInlineReference{T}"/>, sets both
+    ///         <c>_{name}</c> and <c>_{name}Id</c>; falls back to id-only when the
+    ///         target was already tracked (multi-owner inline expansion).</item>
+    ///   <item>[Parent] → reads the id, sets <c>_{name}Id</c>.</item>
     /// </list>
     /// <c>SurrealArray</c> properties hydrate inline via <see cref="EmitHydrateSurrealArray"/>.
-    /// Forward/inverse relation edges are loaded separately by the per-aggregate loader's
-    /// edge queries. The sink parameter routes through <see cref="IHydrationSink"/> instead
-    /// of taking the bare session — keeps the four hydration ops out of the user-facing
-    /// session surface.
+    /// Forward/inverse relation edges are loaded separately by the per-aggregate loader.
     /// </summary>
     private static void EmitHydrate(StringBuilder builder, string indent, TableModel table)
-        => EmitHydrateBody(builder, indent, table, gated: false, methodName: "Hydrate");
-
-    private static void EmitHydratePartial(StringBuilder builder, string indent, TableModel table)
-        => EmitHydrateBody(builder, indent, table, gated: true, methodName: "HydratePartial");
-
-    /// <summary>
-    /// Emits the body of either <c>IEntity.Hydrate</c> or <c>IEntity.HydratePartial</c>.
-    /// When <paramref name="gated"/> is true, every per-field write is wrapped in a
-    /// <c>!sink.HasPendingWrite(__id, "field")</c> guard so a partial-merge Fetch never
-    /// clobbers user mutations made since the original load. The id read and the
-    /// <c>sink.Track</c> call are unconditional in both modes — id is immutable after
-    /// bind, and Track is idempotent for the same instance.
-    /// </summary>
-    private static void EmitHydrateBody(StringBuilder builder, string indent, TableModel table, bool gated, string methodName)
     {
         builder
             .Append(indent)
             .Append("void ")
             .Append(EntityInterface)
-            .Append('.').Append(methodName).AppendLine($"(global::Disruptor.Surreal.Values.SurrealValue row, {HydrationSinkType} sink)")
+            .AppendLine($".Hydrate(global::Disruptor.Surreal.Values.SurrealValue row, {HydrationSinkType} sink)")
             .Append(indent)
             .AppendLine("{");
 
-        // Hydrate is always invoked with an SurrealObjectValue (a row payload). Coerce once at
-        // the top so HydrationValue helpers (which take SurrealObjectValue) and per-field
-        // accesses can operate on the unwrapped object directly. Anything else is
-        // silently a no-op.
         builder
             .Append(indent)
             .AppendLine("    if (row is not global::Disruptor.Surreal.Values.SurrealObjectValue __obj) return;");
 
-        // The id anchor: {Name}Id wraps a validated string; pass the canonical RecordId
-        // value through directly. DB rows are trusted (we wrote them or Surreal returned
-        // them), so RecordIdFormat.Validate passes.
         var idType = $"global::{(string.IsNullOrEmpty(table.Namespace) ? table.Name : $"{table.Namespace}.{table.Name}")}Id";
         builder
             .Append(indent)
@@ -1184,35 +1144,26 @@ internal static class PartialEmitter
             .Append(indent)
             .AppendLine("    sink.Track(this);");
 
-        if (gated)
-        {
-            // Cache the canonical id once for the gating helper — avoids repeating the
-            // ((IEntity)this).Id cast in every per-field guard.
-            builder
-                .Append(indent)
-                .Append("    var __id = ((").Append(EntityInterface).AppendLine(")this).Id;");
-        }
-
         foreach (var p in table.Properties)
         {
             if (p.Kinds.HasFlag(PropertyKind.Property))
             {
                 if (p.Type.MetadataName == SurrealArrayMetadata)
                 {
-                    EmitHydrateSurrealArray(builder, indent, p, gated);
+                    EmitHydrateSurrealArray(builder, indent, p);
                 }
                 else
                 {
-                    EmitHydrateValueProperty(builder, indent, p, gated);
+                    EmitHydrateValueProperty(builder, indent, p);
                 }
             }
             else if (p.Kinds.HasFlag(PropertyKind.Reference))
             {
-                EmitHydrateReference(builder, indent, p, gated);
+                EmitHydrateReference(builder, indent, p);
             }
             else if (p.Kinds.HasFlag(PropertyKind.Parent))
             {
-                EmitHydrateParent(builder, indent, p, gated);
+                EmitHydrateParent(builder, indent, p);
             }
             // [Children] is computed via parentByChild reverse lookup — nothing to read here.
             // Forward/inverse relation properties are populated by the per-aggregate loader's
@@ -1225,44 +1176,21 @@ internal static class PartialEmitter
     }
 
     /// <summary>
-    /// Emits the open of a <c>HasPendingWrite</c> gate when <paramref name="gated"/> is
-    /// true; no-op otherwise. Returns the indent the gated body should use (4 spaces of
-    /// extra indent inside the guard, otherwise the existing indent).
-    /// </summary>
-    private static string OpenGate(StringBuilder builder, string indent, bool gated, string fieldLit)
-    {
-        if (!gated) return indent;
-        builder
-            .Append(indent).Append("    if (!sink.HasPendingWrite(__id, ").Append(fieldLit).AppendLine("))")
-            .Append(indent).AppendLine("    {");
-        return indent + "    ";
-    }
-
-    private static void CloseGate(StringBuilder builder, string indent, bool gated)
-    {
-        if (!gated) return;
-        builder.Append(indent).AppendLine("    }");
-    }
-
-    /// <summary>
     /// Hydrates any non-<c>SurrealArray</c> [Property] — scalar (int, bool, DateTime, …),
-    /// array (<c>int[]</c>, <c>List&lt;T&gt;</c>), record, dictionary, anything
-    /// <see cref="System.Text.Json.JsonSerializer"/> understands. String stays special-cased
+    /// array (<c>int[]</c>, <c>List&lt;T&gt;</c>), record. String stays special-cased
     /// so its empty-string fallback matches the schema's <c>DEFAULT ""</c> clause without
-    /// a round-trip through the serializer.
+    /// a round-trip through the converter.
     /// </summary>
-    private static void EmitHydrateValueProperty(StringBuilder builder, string indent, PropertyModel p, bool gated)
+    private static void EmitHydrateValueProperty(StringBuilder builder, string indent, PropertyModel p)
     {
         var backing = $"_{ToCamel(p.Name)}";
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
         var typeFqn = p.Type.FullyQualifiedName;
 
-        var inner = OpenGate(builder, indent, gated, fieldLit);
-
         if (typeFqn is "string" or "global::System.String" or "string?" or "global::System.String?")
         {
             builder
-                .Append(inner)
+                .Append(indent)
                 .Append("    ")
                 .Append(backing)
                 .Append(" = global::Disruptor.Surface.Runtime.HydrationValue.ReadString(__obj, ")
@@ -1271,13 +1199,9 @@ internal static class PartialEmitter
         }
         else
         {
-            // ReadOrDefault<T> returns the (possibly default!) T directly — assign without
-            // coalescing. Works for value types (returns default(T) when missing) and
-            // reference types (returns null! → matches the existing `_field = default!`
-            // initialisation).
             var deserialiseAs = StripNullable(typeFqn);
             builder
-                .Append(inner)
+                .Append(indent)
                 .Append("    ")
                 .Append(backing)
                 .Append(" = global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<")
@@ -1286,31 +1210,21 @@ internal static class PartialEmitter
                 .Append(fieldLit)
                 .AppendLine(");");
         }
-
-        CloseGate(builder, indent, gated);
     }
 
     /// <summary>
-    /// Hydrates a <c>SurrealArray&lt;T&gt;</c>-typed property: reads the JSON array, deserialises
-    /// each element into <c>T</c> via <see>
-    ///     <cref>System.Text.Json.JsonSerializer</cref>
-    /// </see>
-    /// using
-    /// <c>SurrealJson.SerializerOptions</c> (so the schema's snake_case field names match
-    /// the C# record properties), and pre-populates the backing field with a tracked list
-    /// initialised from the loaded items. Skips silently when the field is missing or the
-    /// value isn't an array — first read will then return an empty wrapper.
+    /// Hydrates a <c>SurrealArray&lt;T&gt;</c>-typed property: reads the SDK Value array
+    /// as a <c>List&lt;T&gt;</c> via <see cref="HydrationValue.ReadOrDefault{T}"/>, then
+    /// wraps in a fresh <c>SurrealArray&lt;T&gt;</c>. The wrapper's mutation callback is
+    /// a no-op — Save reads the wrapper at dispatch time.
     /// </summary>
-    private static void EmitHydrateSurrealArray(StringBuilder builder, string indent, PropertyModel p, bool gated)
+    private static void EmitHydrateSurrealArray(StringBuilder builder, string indent, PropertyModel p)
     {
         var backing = $"_{ToCamel(p.Name)}";
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
         var declaredType = p.Type.FullyQualifiedName;
         if (p.Type.TypeArguments.Count == 0)
         {
-            // Should be unreachable — `partial SurrealArray Foo { get; }` without a type
-            // argument doesn't compile. Escalate at runtime if it ever fires so we hear
-            // about it rather than silently leaving the wrapper null.
             builder
                 .Append(indent)
                 .Append("    throw new global::System.NotSupportedException(\"Hydrate: SurrealArray element type for property '")
@@ -1320,17 +1234,9 @@ internal static class PartialEmitter
         }
 
         var elementType = p.Type.TypeArguments[0].FullyQualifiedName;
-
         var localItems = $"__{ToCamel(p.Name)}Items";
-        var localElem = $"__{ToCamel(p.Name)}Elem";
 
-        var inner = OpenGate(builder, indent, gated, fieldLit);
-
-        // SurrealArray<T> hydration: read the field as a List<T> via HydrationValue's
-        // generic ReadOrDefault (handles SurrealListValue → List<T> and per-element record
-        // construction), then wrap in a new SurrealArray<T> bound to __WriteField for
-        // mutation propagation.
-        builder.Append(inner)
+        builder.Append(indent)
             .Append("    var ")
             .Append(localItems)
             .Append(" = global::Disruptor.Surface.Runtime.HydrationValue.ReadOrDefault<global::System.Collections.Generic.List<")
@@ -1338,66 +1244,61 @@ internal static class PartialEmitter
             .Append(">>(__obj, ")
             .Append(fieldLit)
             .AppendLine(");")
-            .Append(inner)
+            .Append(indent)
             .Append("    if (").Append(localItems).AppendLine(" is not null)")
-            .Append(inner).AppendLine("    {")
-            .Append(inner)
+            .Append(indent).AppendLine("    {")
+            .Append(indent)
             .Append("        ")
             .Append(backing)
             .Append(" = new ")
             .Append(declaredType)
             .Append('(')
             .Append(localItems)
-            .Append(", __items => __WriteField(")
-            .Append(fieldLit)
-            .AppendLine(", __items));")
-            .Append(inner).AppendLine("    }");
-
-        _ = localElem; // unused now; reserved name kept for diff-friendliness
-
-        CloseGate(builder, indent, gated);
+            .AppendLine(", _ => { });")
+            .Append(indent).AppendLine("    }");
     }
 
-    private static void EmitHydrateReference(StringBuilder builder, string indent, PropertyModel p, bool gated)
+    /// <summary>
+    /// Hydrates a <c>[Reference]</c> field. Inline form populates both the entity ref
+    /// and id backing fields; non-inline (id-only) populates just the id backing field.
+    /// The runtime's reference resolution falls back to <c>Session.Get&lt;T&gt;(id)</c>
+    /// on read when only the id is set.
+    /// </summary>
+    private static void EmitHydrateReference(StringBuilder builder, string indent, PropertyModel p)
     {
+        var backing = $"_{ToCamel(p.Name)}";
+        var idBacking = $"_{ToCamel(p.Name)}Id";
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
         var typeArg = StripNullable(p.Type.FullyQualifiedName);
 
-        var inner = OpenGate(builder, indent, gated, fieldLit);
-
-        // HydrationValue.HydrateReference<T> handles both the id-only and inline-record
-        // shapes — for the inline form (`field.*` projection) it constructs and hydrates
-        // the referenced entity from the same payload so reads can resolve it.
+        // Try inline first (returns the hydrated entity if the field is an inline object);
+        // fall back to id-only if it isn't inline. The if-let-then-else avoids two
+        // dictionary lookups for the common case where neither path matches.
+        var inlineLocal = $"__inline_{ToCamel(p.Name)}";
         builder
-            .Append(inner)
-            .Append("    global::Disruptor.Surface.Runtime.HydrationValue.HydrateReference<")
-            .Append(typeArg)
-            .Append(">(__obj, ")
-            .Append(fieldLit)
-            .AppendLine($", (({EntityInterface})this).Id, sink);");
-
-        CloseGate(builder, indent, gated);
+            .Append(indent).Append("    var ").Append(inlineLocal)
+            .Append(" = global::Disruptor.Surface.Runtime.HydrationValue.HydrateInlineReference<")
+            .Append(typeArg).Append(">(__obj, ").Append(fieldLit).AppendLine(", sink);")
+            .Append(indent).Append("    if (").Append(inlineLocal).AppendLine(" is not null)")
+            .Append(indent).AppendLine("    {")
+            .Append(indent).Append("        ").Append(backing).Append(" = ").Append(inlineLocal).AppendLine(";")
+            .Append(indent).Append("        ").Append(idBacking).Append(" = ((").Append(EntityInterface).Append(')').Append(inlineLocal).AppendLine(").Id;")
+            .Append(indent).AppendLine("    }")
+            .Append(indent).AppendLine("    else")
+            .Append(indent).AppendLine("    {")
+            .Append(indent).Append("        ").Append(idBacking).Append(" = global::Disruptor.Surface.Runtime.HydrationValue.TryReadReferenceId(__obj, ")
+            .Append(fieldLit).AppendLine(");")
+            .Append(indent).AppendLine("    }");
     }
 
-    private static void EmitHydrateParent(StringBuilder builder, string indent, PropertyModel p, bool gated)
+    private static void EmitHydrateParent(StringBuilder builder, string indent, PropertyModel p)
     {
+        var idBacking = $"_{ToCamel(p.Name)}Id";
         var fieldLit = Quote(SurrealNaming.ToFieldName(p.Name));
-
-        var inner = OpenGate(builder, indent, gated, fieldLit);
-
         builder
-            .Append(inner)
-            .Append("    if (global::Disruptor.Surface.Runtime.HydrationValue.TryReadRecordId(__obj, ")
-            .Append(fieldLit)
-            .Append(", out var __parent_")
-            .Append(ToCamel(p.Name))
-            .AppendLine("))")
-            .Append(inner)
-            .Append($"        sink.Parent((({EntityInterface})this).Id, __parent_")
-            .Append(ToCamel(p.Name))
-            .AppendLine(");");
-
-        CloseGate(builder, indent, gated);
+            .Append(indent).Append("    ").Append(idBacking)
+            .Append(" = global::Disruptor.Surface.Runtime.HydrationValue.TryReadReferenceId(__obj, ")
+            .Append(fieldLit).AppendLine(");");
     }
 
     // ──────────────────────────── helpers ────────────────────────────────────
