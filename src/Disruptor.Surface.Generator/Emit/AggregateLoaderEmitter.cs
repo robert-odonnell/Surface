@@ -385,9 +385,10 @@ internal static class AggregateLoaderEmitter
 
     private static void EmitHelpers(StringBuilder sb)
     {
-        sb.AppendLine("        /// <summary>Pull the first row out of a SurrealQueryResponse, or null when no row matched.</summary>");
+        sb.AppendLine("        /// <summary>Pull the first row out of a SurrealQueryResponse, or null when no row matched. Throws SurrealRpcException for any errored statement so DB failures don't masquerade as empty loads.</summary>");
         sb.AppendLine("        private static SurrealObjectValue? ExtractFirstResultRow(global::Disruptor.Surreal.SurrealQueryResponse response)");
         sb.AppendLine("        {");
+        sb.AppendLine("            response.EnsureSuccess();");
         sb.AppendLine("            for (var i = 0; i < response.Count; i++)");
         sb.AppendLine("            {");
         sb.AppendLine("                var stmt = response.Statements[i];");

@@ -87,7 +87,7 @@ internal static class IdsAsyncEmitter
 
             sb.Append(bodyIndent).AppendLine("var (sql, __bindings) = query.CompileIdsOnly();");
             sb.Append(bodyIndent).Append("var __response = await ").Append(paramName).AppendLine(".QueryAsync(sql, __bindings, ct);");
-            sb.Append(bodyIndent).AppendLine("var rows = __response.Count > 0 ? __response.Statements[0].Result : null;");
+            sb.Append(bodyIndent).AppendLine("var rows = __response.Count > 0 ? __response.Take(0) : null;");
             sb.AppendLine();
 
             sb.Append(bodyIndent).Append("var list = new ").Append(ListFqn).Append('<').Append(idFqn).AppendLine(">();");

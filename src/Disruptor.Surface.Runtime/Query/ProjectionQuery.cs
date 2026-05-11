@@ -87,7 +87,7 @@ public sealed class ProjectionQuery<T, TRow>
     {
         var (sql, bindings) = Compile();
         var response = await queryFn(sql, bindings, ct);
-        var rows = response.Count > 0 ? response.Statements[0].Result : null;
+        var rows = response.Count > 0 ? response.Take(0) : null;
 
         var list = new List<TRow>();
         if (rows is SurrealListValue arr)

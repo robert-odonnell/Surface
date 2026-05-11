@@ -461,6 +461,74 @@ public sealed class SurrealSessionTests
         Assert.Null(second.BoundSession);
     }
 
+    [Fact]
+    public void GetNewOutgoingEdges_ReturnsExplicitEdgeId_NotIdempotentDefault()
+    {
+        // Regression: earlier previews stored only (src, edge_table, tgt) → bool in the
+        // snapshot, so the explicit slug edge id passed to Relate<TKind>(...) was discarded
+        // before SaveAsync could dispatch. The generator's emitted RELATE then always
+        // resolved to an Idempotent edge id, silently overriding the user's intent.
+        var session = new SurrealSession();
+        var owner = new StubEntity(new RecordId("findings", "f"));
+        ((IHydrationSink)session).Track(owner);
+        var tgt = new RecordId("issues", "i");
+        var slug = new RecordId("stub_edge", "primary_call");
+
+        session.Relate<StubKind>(owner.Id, tgt, slug);
+
+        var pending = session.GetNewOutgoingEdges<StubKind>(owner).Single();
+        Assert.Equal(tgt, pending.Target);
+        Assert.Equal("stub_edge", pending.Edge.Table);
+        Assert.Equal("primary_call", pending.Edge.Value);
+        Assert.Null(pending.Payload);
+    }
+
+    [Fact]
+    public void GetNewOutgoingEdges_ReturnsPayload_AlongsideEdgeId()
+    {
+        // Regression: the payload-aware Relate overload buffered the payload only in the
+        // diagnostic CommandLog (explicitly documented as "not consumed by the per-entity
+        // Save dispatch path"). The generator's RELATE then went out without CONTENT,
+        // dropping the user's edge data on the floor.
+        var session = new SurrealSession();
+        var owner = new StubEntity(new RecordId("findings", "f"));
+        ((IHydrationSink)session).Track(owner);
+        var tgt = new RecordId("observations", "o");
+        var payload = new Dictionary<string, object?>
+        {
+            ["confidence"] = 0.92,
+            ["method"] = "static-analysis",
+        };
+
+        session.Relate<StubKind>(owner.Id, tgt, payload);
+
+        var pending = session.GetNewOutgoingEdges<StubKind>(owner).Single();
+        Assert.Equal(tgt, pending.Target);
+        Assert.NotNull(pending.Payload);
+        Assert.Equal(0.92, pending.Payload!["confidence"]);
+        Assert.Equal("static-analysis", pending.Payload["method"]);
+    }
+
+    [Fact]
+    public void GetNewOutgoingEdges_OmitsLoadedEdges_OnlyReturnsPostLoadAdditions()
+    {
+        // Snapshot diff: edges that were already on disk at load time are recorded in
+        // relationsAtStart (via IHydrationSink.Edge). They must NOT appear in the
+        // GetNewOutgoingEdges result, which only feeds the SaveAsync dispatcher's
+        // RELATE-this-new-edge loop.
+        var session = new SurrealSession();
+        var owner = new StubEntity(new RecordId("findings", "f"));
+        ((IHydrationSink)session).Track(owner);
+        var loadedTgt = new RecordId("issues", "old");
+        var newTgt = new RecordId("issues", "new");
+
+        ((IHydrationSink)session).Edge(owner.Id, "stub_edge", loadedTgt);
+        session.Relate<StubKind>(owner.Id, newTgt);
+
+        var pending = session.GetNewOutgoingEdges<StubKind>(owner);
+        Assert.Equal(newTgt, pending.Single().Target);
+    }
+
     /// <summary>Test-only entity that records the order of session-side hook calls.</summary>
     private sealed class StubEntity(RecordId id) : IEntity
     {

@@ -292,9 +292,13 @@ public sealed class SurfaceQuery<T>
         }
     }
 
-    /// <summary>Pull the rows portion out of a SurrealQueryResponse — the first statement's result.</summary>
+    /// <summary>
+    /// Pull the rows portion out of a SurrealQueryResponse — the first statement's result.
+    /// Calls <see cref="SurrealQueryResponse.Take"/>, which throws <see cref="SurrealRpcException"/>
+    /// when the statement is an ERR (so a real DB failure stops being a silent empty result).
+    /// </summary>
     internal static SurrealValue? ExtractRows(SurrealQueryResponse response)
-        => response.Count == 0 ? null : response.Statements[0].Result;
+        => response.Count == 0 ? null : response.Take(0);
 
     /// <summary>
     /// Recursively hydrate the included slices on a single row and mark each visited

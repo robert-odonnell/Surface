@@ -96,7 +96,8 @@ internal static class SchemaEmitter
         sb.Append(memberIndent).AppendLine("{");
         sb.Append(memberIndent).AppendLine("    foreach (var chunk in Schema)");
         sb.Append(memberIndent).AppendLine("    {");
-        sb.Append(memberIndent).AppendLine("        await db.QueryAsync(chunk, bindings: null, ct);");
+        sb.Append(memberIndent).AppendLine("        var __resp = await db.QueryAsync(chunk, bindings: null, ct);");
+        sb.Append(memberIndent).AppendLine("        __resp.EnsureSuccess();");
         sb.Append(memberIndent).AppendLine("    }");
         sb.Append(memberIndent).AppendLine("}");
         sb.AppendLine();
@@ -105,7 +106,8 @@ internal static class SchemaEmitter
         sb.Append(memberIndent).AppendLine("{");
         sb.Append(memberIndent).AppendLine("    foreach (var chunk in Schema)");
         sb.Append(memberIndent).AppendLine("    {");
-        sb.Append(memberIndent).AppendLine("        await tx.QueryAsync(chunk, bindings: null, ct);");
+        sb.Append(memberIndent).AppendLine("        var __resp = await tx.QueryAsync(chunk, bindings: null, ct);");
+        sb.Append(memberIndent).AppendLine("        __resp.EnsureSuccess();");
         sb.Append(memberIndent).AppendLine("    }");
         sb.Append(memberIndent).AppendLine("}");
         sb.Append(indent).AppendLine("}");

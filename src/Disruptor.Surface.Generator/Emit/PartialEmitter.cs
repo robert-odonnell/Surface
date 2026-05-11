@@ -1147,8 +1147,12 @@ internal static class PartialEmitter
 
         // Outgoing relations dispatch: for each [ForwardRelation]-bearing property, ask
         // the session for new (post-load) outgoing edges of that kind and dispatch a
-        // RELATE per new edge — reuses Session.RelateAsync<TKind>'s typed-CBOR path
-        // (Idempotent edge id with CBOR-bound endpoints, no string formatting).
+        // RELATE per new edge. Each PendingEdge carries Target + Edge + Payload as the
+        // user expressed it on the buffered Relate call — bare or with explicit edge or
+        // with payload — so we route to the matching RelateAsync overload. The payload
+        // branch picks the (src, tgt, edge, payload, tx) overload; the bare branch picks
+        // (src, tgt, edge, tx). Both preserve the user-supplied edge id (Random, Slug, or
+        // explicit/synthesised Idempotent).
         foreach (var p in table.Properties)
         {
             if (p.RelationRole != RelationRole.ForwardRelation)
@@ -1167,13 +1171,20 @@ internal static class PartialEmitter
             var attrName = lastDot >= 0 ? attrFqn[(lastDot + 1)..] : attrFqn;
             var markerName = SurrealNaming.StripAttributeSuffix(attrName);
             var markerFqn = string.IsNullOrEmpty(attrNs) ? $"global::{markerName}" : $"global::{attrNs}.{markerName}";
-            var targetLocal = $"__rel_{ToCamel(p.Name)}";
+            var pendingLocal = $"__rel_{ToCamel(p.Name)}";
             builder
                 .AppendLine()
-                .Append(indent).Append("    foreach (var ").Append(targetLocal)
+                .Append(indent).Append("    foreach (var ").Append(pendingLocal)
                 .Append(" in Session.GetNewOutgoingEdges<").Append(markerFqn).AppendLine(">(this))")
-                .Append(indent).Append("        await Session.RelateAsync<").Append(markerFqn).Append(">(__id, ")
-                .Append(targetLocal).AppendLine(", ctx.Transaction, ct);");
+                .Append(indent).AppendLine("    {")
+                .Append(indent).Append("        if (").Append(pendingLocal).AppendLine(".Payload is null)")
+                .Append(indent).Append("            await Session.RelateAsync<").Append(markerFqn).Append(">(__id, ")
+                .Append(pendingLocal).Append(".Target, ").Append(pendingLocal).AppendLine(".Edge, ctx.Transaction, ct);")
+                .Append(indent).AppendLine("        else")
+                .Append(indent).Append("            await Session.RelateAsync<").Append(markerFqn).Append(">(__id, ")
+                .Append(pendingLocal).Append(".Target, ").Append(pendingLocal).Append(".Edge, ")
+                .Append(pendingLocal).AppendLine(".Payload, ctx.Transaction, ct);")
+                .Append(indent).AppendLine("    }");
         }
 
         builder.Append(indent).AppendLine("}");

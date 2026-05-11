@@ -153,7 +153,7 @@ public sealed class SurfaceEdgeQuery<TIn, TOut>
     {
         var (sql, bindings) = SurfaceEdgeQueryCompiler.Compile(edgeTable, inFilter, outFilter, extra, orderClauses, limitCount, startAt);
         var response = await queryFn(sql, bindings, ct);
-        var rows = response.Count > 0 ? response.Statements[0].Result : null;
+        var rows = response.Count > 0 ? response.Take(0) : null;
 
         var list = new List<EdgeRow>();
         if (rows is SurrealListValue arr)
