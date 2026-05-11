@@ -167,7 +167,9 @@ public static class HydrationValue
 
     /// <summary>
     /// Coerce a <see cref="SurrealValue"/> into the target CLR type. Supports primitives,
-    /// nullable wrappers, and arrays / List&lt;T&gt; of primitives. Record / POCO
+    /// nullable wrappers, arrays / List&lt;T&gt; of primitives, and any
+    /// <see cref="IRecordId"/> target (canonical <see cref="RecordId"/> or a
+    /// generator-emitted <c>{Name}Id</c> readonly record struct). Record / POCO
     /// hydration is no longer routed through here — generator-emitted Hydrate bodies
     /// build records typed-and-direct (see <see cref="PartialEmitter"/>'s element
     /// collection handling), eliminating the reflection path that used to live here.
@@ -176,6 +178,22 @@ public static class HydrationValue
     {
         // Strip Nullable<T> wrapping once.
         var underlying = Nullable.GetUnderlyingType(targetType) ?? targetType;
+
+        // IRecordId target (RecordId itself or any generated {Name}Id). Route through
+        // ReadRecordId so every wire form (typed CBOR record id, "table:value" string,
+        // inline object with an "id" field) lands on the same canonical RecordId, then
+        // construct the typed id via its (string Value) primary ctor when needed. Table
+        // mismatch is not checked here — the {Name}Id ctor validates Value format only.
+        if (typeof(IRecordId).IsAssignableFrom(underlying))
+        {
+            var rid = ReadRecordId(v);
+            if (underlying == typeof(RecordId))
+            {
+                return rid;
+            }
+
+            return Activator.CreateInstance(underlying, rid.Value)!;
+        }
 
         switch (v)
         {

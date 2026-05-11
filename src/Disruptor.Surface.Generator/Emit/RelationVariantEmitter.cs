@@ -218,7 +218,8 @@ internal static class RelationVariantEmitter
                 EmitEnumerateReferences(writer, variant);
 
                 // SetReferenceTo — only meaningful for nullable [In] / [Out] (rare; non-nullable
-                // endpoints can't be unset). Empty switch when nothing is nullable.
+                // endpoints can't be unset). When no endpoint is nullable, the body stays
+                // empty (no switch is opened) since required endpoints never enter Unset.
                 EmitSetReferenceTo(writer, variant);
 
                 // SaveAsync — dispatches INSERT RELATION INTO {edge} $_content [ON DUPLICATE KEY
@@ -482,8 +483,9 @@ internal static class RelationVariantEmitter
     /// <summary>
     /// Emits <c>void IEntity.SetReferenceTo(string, RecordId?)</c>. Only nullable
     /// <c>[In]</c> / <c>[Out]</c> endpoints contribute switch cases; non-nullable
-    /// endpoints are mandatory and aren't part of the Unset phase. Most variants get an
-    /// empty switch since both endpoints are required.
+    /// endpoints are mandatory and aren't part of the Unset phase. When both endpoints
+    /// are non-nullable the method body stays empty (no switch is opened) — required
+    /// edge endpoints can't be unset, and an empty switch would trip CS1522.
     /// </summary>
     private static void EmitSetReferenceTo(CodeWriter writer, RelationVariantModel variant)
     {
@@ -493,13 +495,10 @@ internal static class RelationVariantEmitter
         {
             if (!hasNullableEndpoint)
             {
-                // Skip the switch when no case will be emitted — both endpoints non-nullable
-                // means there's nothing to unset, and an empty switch would trip CS1522.
                 return;
             }
 
-            writer.Line("switch (fieldName)");
-            using (writer.BracedBlock())
+            using (writer.Switch("fieldName"))
             {
                 EmitSetReferenceCase(writer, variant.In, fieldName: "in");
                 EmitSetReferenceCase(writer, variant.Out, fieldName: "out");
@@ -521,8 +520,7 @@ internal static class RelationVariantEmitter
         {
             var idBacking = $"_{ToCamel(p.Name)}Id";
             var entityBacking = $"_{ToCamel(p.Name)}";
-            writer.Line($"case {fieldLit}:");
-            using (writer.Indent())
+            using (writer.Case(fieldLit))
             {
                 writer.Line($"{idBacking} = value;");
                 writer.Line($"{entityBacking} = null;");
@@ -534,8 +532,7 @@ internal static class RelationVariantEmitter
             // Typed-id endpoint: clear the backing field. Nullable typed-id is uncommon
             // but legal — the user's `[In] partial OwnerId? Source { get; set; }`.
             var backing = $"_{ToCamel(p.Name)}";
-            writer.Line($"case {fieldLit}:");
-            using (writer.Indent())
+            using (writer.Case(fieldLit))
             {
                 writer.Line($"{backing} = null;");
                 writer.Line("break;");

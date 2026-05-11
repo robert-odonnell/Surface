@@ -789,24 +789,20 @@ internal static class PartialEmitter
     private static void EmitSetReferenceTo(CodeWriter writer, IReadOnlyList<PropertyModel> unsetableProps)
     {
         using (writer.Block($"void {Namespaces.EntityInterface}.SetReferenceTo(string fieldName, global::Disruptor.Surface.Runtime.RecordId? value)"))
+        using (writer.Switch("fieldName"))
         {
-            using (writer.Block("switch (fieldName)"))
+            foreach (var p in unsetableProps)
             {
-                foreach (var p in unsetableProps)
+                var idBacking = $"_{ToCamel(p.Name)}Id";
+                var entityBacking = $"_{ToCamel(p.Name)}";
+                var fieldNameLit = Quote(SurrealNaming.ToFieldName(p.Name));
+                using (writer.Case(fieldNameLit))
                 {
-                    var idBacking = $"_{ToCamel(p.Name)}Id";
-                    var entityBacking = $"_{ToCamel(p.Name)}";
-                    var fieldNameLit = Quote(SurrealNaming.ToFieldName(p.Name));
-                    writer.Line($"case {fieldNameLit}:");
-                    using (writer.Indent())
-                    {
-                        writer.Line($"{idBacking} = value;");
-                        writer.Line($"{entityBacking} = null;");
-                        writer.Line("break;");
-                    }
+                    writer.Line($"{idBacking} = value;");
+                    writer.Line($"{entityBacking} = null;");
+                    writer.Line("break;");
                 }
             }
-
         }
     }
 

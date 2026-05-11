@@ -79,6 +79,15 @@ internal static class SurfaceQueryCompiler
     /// <summary>
     /// Build the SurrealQL + bindings for an id-only selection:
     /// <c>SELECT id FROM table …</c>. Includes are not supported (flat by definition).
+    /// <para>
+    /// When <paramref name="orderClauses"/> reference fields other than <c>id</c>, those
+    /// field names are added to the projection (<c>SELECT id, name, … FROM …</c>) — the
+    /// SurrealDB 3.x parser rejects <c>ORDER BY x</c> when <c>x</c> isn't in the
+    /// selection with <c>Missing order idiom `x` in statement selection</c>. The reader
+    /// path (<c>{Table}QueryIds.IdsAsync</c>) only consumes the <c>id</c> field from
+    /// each row, so the extra columns are wire-only and do not surface in the typed
+    /// result list.
+    /// </para>
     /// </summary>
     public static (string Sql, SurrealObject Bindings) CompileIdsOnly(
         string table,
@@ -90,7 +99,19 @@ internal static class SurfaceQueryCompiler
     {
         var b = new Builder();
         var sb = new StringBuilder();
-        sb.Append("SELECT id FROM ").Append(table.Identifier());
+        sb.Append("SELECT id");
+        if (orderClauses is { Count: > 0 })
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal) { "id" };
+            foreach (var clause in orderClauses)
+            {
+                if (seen.Add(clause.Field))
+                {
+                    sb.Append(", ").Append(clause.Field.Identifier());
+                }
+            }
+        }
+        sb.Append(" FROM ").Append(table.Identifier());
         b.AppendWhereOrderLimitStart(sb, filter, pinnedId, orderClauses, limit, start);
         sb.Append(';');
         return (sb.ToString(), b.Bindings);

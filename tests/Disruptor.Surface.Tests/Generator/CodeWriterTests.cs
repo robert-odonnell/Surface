@@ -160,6 +160,99 @@ public sealed class CodeWriterTests
     }
 
     [Fact]
+    public void Switch_WrapsScrutineeInParens()
+    {
+        var writer = new CodeWriter();
+
+        using (writer.Switch("fieldName"))
+        {
+            writer.Line("// nothing");
+        }
+
+        Assert.Equal(Expected(
+            "switch (fieldName)",
+            "{",
+            "    // nothing",
+            "}"), writer.ToString());
+    }
+
+    [Fact]
+    public void Switch_EmptyScrutinee_Throws()
+    {
+        var writer = new CodeWriter();
+
+        Assert.Throws<ArgumentException>(() => writer.Switch(""));
+        Assert.Throws<ArgumentException>(() => writer.Switch("   "));
+    }
+
+    [Fact]
+    public void Case_EmitsLabelAndIndentsArmBody()
+    {
+        var writer = new CodeWriter();
+
+        using (writer.Switch("kind"))
+        {
+            using (writer.Case("\"a\""))
+            {
+                writer.Line("DoA();");
+                writer.Line("break;");
+            }
+
+            using (writer.Case("\"b\""))
+            {
+                writer.Line("DoB();");
+                writer.Line("break;");
+            }
+        }
+
+        Assert.Equal(Expected(
+            "switch (kind)",
+            "{",
+            "    case \"a\":",
+            "        DoA();",
+            "        break;",
+            "    case \"b\":",
+            "        DoB();",
+            "        break;",
+            "}"), writer.ToString());
+    }
+
+    [Fact]
+    public void Case_EmptyLabel_Throws()
+    {
+        var writer = new CodeWriter();
+
+        Assert.Throws<ArgumentException>(() => writer.Case(""));
+        Assert.Throws<ArgumentException>(() => writer.Case("   "));
+    }
+
+    [Fact]
+    public void Switch_GeneratedSource_ParsesAsCSharp()
+    {
+        var writer = new CodeWriter();
+
+        writer.Header();
+        using (writer.Namespace("M"))
+        using (writer.Block("public static class Demo"))
+        using (writer.Block("public static void Dispatch(string kind)"))
+        using (writer.Switch("kind"))
+        {
+            using (writer.Case("\"a\""))
+            {
+                writer.Line("return;");
+            }
+
+            using (writer.Case("\"b\""))
+            {
+                writer.Line("return;");
+            }
+        }
+
+        var tree = CSharpSyntaxTree.ParseText(writer.ToString(), new CSharpParseOptions(LanguageVersion.Preview));
+        Assert.DoesNotContain(tree.GetDiagnostics(), d => d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
     public void GeneratedSource_ParsesAsCSharp()
     {
         var writer = new CodeWriter();

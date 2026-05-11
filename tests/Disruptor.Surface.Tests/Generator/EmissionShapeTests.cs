@@ -1129,10 +1129,11 @@ public sealed class EmissionShapeTests
         Assert.Contains("yield return (\"in\", _sourceId);", src);
         Assert.Contains("yield return (\"out\", _targetId);", src);
 
-        // SetReferenceTo emits an empty switch when both endpoints are non-nullable
-        // (the typical case — edge endpoints can't be unset).
+        // SetReferenceTo: when both endpoints are non-nullable (the typical case — edge
+        // endpoints can't be unset), the method body stays empty. The switch itself is
+        // not opened, since `switch (x) { }` would trip CS1522 in the generated source.
         Assert.Contains(".SetReferenceTo(string fieldName, global::Disruptor.Surface.Runtime.RecordId? value)", src);
-        // No `case "in":` / `case "out":` for non-nullable endpoints.
+        Assert.DoesNotContain("switch (fieldName)", src);
         Assert.DoesNotContain("case \"in\":", src);
         Assert.DoesNotContain("case \"out\":", src);
     }

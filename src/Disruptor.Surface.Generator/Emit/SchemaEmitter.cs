@@ -76,21 +76,17 @@ internal static class SchemaEmitter
             {
                 writer.Line("public static System.Collections.Generic.IReadOnlyList<string> Schema => DisruptorSurfaceSchema._chunks;");
                 using (writer.Block("public static async global::System.Threading.Tasks.Task ApplySchemaAsync(global::Disruptor.Surreal.SurrealClient db, global::System.Threading.CancellationToken ct = default)"))
+                using (writer.Block("foreach (var chunk in Schema)"))
                 {
-                    using (writer.Block("foreach (var chunk in Schema)"))
-                    {
-                        writer.Line("var __resp = await db.QueryAsync(chunk, bindings: null, ct);");
-                        writer.Line("__resp.EnsureSuccess();");
-                    }
+                    writer.Line("var __resp = await db.QueryAsync(chunk, bindings: null, ct);");
+                    writer.Line("__resp.EnsureSuccess();");
                 }
 
                 using (writer.Block("public static async global::System.Threading.Tasks.Task ApplySchemaAsync(global::Disruptor.Surreal.SurrealTransaction tx, global::System.Threading.CancellationToken ct = default)"))
+                using (writer.Block("foreach (var chunk in Schema)"))
                 {
-                    using (writer.Block("foreach (var chunk in Schema)"))
-                    {
-                        writer.Line("var __resp = await tx.QueryAsync(chunk, bindings: null, ct);");
-                        writer.Line("__resp.EnsureSuccess();");
-                    }
+                    writer.Line("var __resp = await tx.QueryAsync(chunk, bindings: null, ct);");
+                    writer.Line("__resp.EnsureSuccess();");
                 }
             }
 
@@ -392,15 +388,11 @@ internal static class SchemaEmitter
             _ => (null, null),
         };
 
-        if (raw is null)
-        {
-            return (null, null);
-        }
-        if (type.IsNullable)
-        {
-            return ($"option<{raw}>", null);
-        }
-        return (raw, def);
+        return raw is not null 
+            ? type.IsNullable 
+                ? ($"option<{raw}>", null) 
+                : (raw, def) 
+            : (null, null);
     }
 
     private static string ReferenceDeleteClause(ReferenceDeletePolicy policy) => policy switch
@@ -475,35 +467,37 @@ internal static class SchemaEmitter
         // SCHEMAFULL path requires a stable column set and multiple variants would
         // disagree on shape. Multi-variant kinds fall through with no DEFINE FIELD; the
         // SCHEMALESS table accepts each variant's payload at write time.
-        if (variantsForKind.Count == 1)
+        if (variantsForKind.Count != 1)
         {
-            foreach (var p in variantsForKind[0].PayloadProperties)
+            return;
+        }
+
+        foreach (var p in variantsForKind[0].PayloadProperties)
+        {
+            if (p.Role != RelationVariantPropertyRole.Property)
             {
-                if (p.Role != RelationVariantPropertyRole.Property)
-                {
-                    // Defensive: PayloadProperties only ever holds Property-role entries
-                    // by construction, but skipping non-Property keeps the emitter robust
-                    // against any future role expansion.
-                    continue;
-                }
-
-                var (fieldType, fieldDefault) = MapScalarType(p.Type);
-                if (fieldType is null)
-                {
-                    continue;
-                }
-
-                sb.Append("DEFINE FIELD IF NOT EXISTS ").Append(p.FieldName)
-                  .Append(" ON ").Append(edgeName)
-                  .Append(" TYPE ").Append(fieldType);
-
-                if (fieldDefault is not null)
-                {
-                    sb.Append(" DEFAULT ").Append(fieldDefault);
-                }
-
-                sb.AppendLine(";");
+                // Defensive: PayloadProperties only ever holds Property-role entries
+                // by construction, but skipping non-Property keeps the emitter robust
+                // against any future role expansion.
+                continue;
             }
+
+            var (fieldType, fieldDefault) = MapScalarType(p.Type);
+            if (fieldType is null)
+            {
+                continue;
+            }
+
+            sb.Append("DEFINE FIELD IF NOT EXISTS ").Append(p.FieldName)
+                .Append(" ON ").Append(edgeName)
+                .Append(" TYPE ").Append(fieldType);
+
+            if (fieldDefault is not null)
+            {
+                sb.Append(" DEFAULT ").Append(fieldDefault);
+            }
+
+            sb.AppendLine(";");
         }
     }
 

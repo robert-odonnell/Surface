@@ -705,6 +705,9 @@ public sealed class SurfaceQueryCompilerTests
     [Fact]
     public void CompileIdsOnly_WithWhereOrderLimitStart_RendersCanonicalClauseOrder()
     {
+        // SurrealDB 3.x rejects `SELECT id ... ORDER BY x` with "Missing order idiom"
+        // when `x` is not in the projection. CompileIdsOnly adds ordered fields to the
+        // SELECT for parser compatibility; the IdsAsync reader still consumes only `id`.
         var (sql, bindings) = new SurfaceQuery<TestTable>("symbols")
             .Where(new PropertyExpr<string>("kind").Eq("method"))
             .OrderBy(new PropertyExpr<string>("name"))
@@ -713,9 +716,50 @@ public sealed class SurfaceQueryCompilerTests
             .CompileIdsOnly();
 
         Assert.Equal(
-            "SELECT id FROM symbols WHERE kind = $_p0 ORDER BY name ASC LIMIT 20 START 40;",
+            "SELECT id, name FROM symbols WHERE kind = $_p0 ORDER BY name ASC LIMIT 20 START 40;",
             sql);
         Assert.Equal(new Surreal.Values.StringSurrealValue("method"), bindings["_p0"]);
+    }
+
+    [Fact]
+    public void CompileIdsOnly_OrderedByMultipleNonIdFields_IncludesEachInProjection()
+    {
+        // The CodeIndex repro: SELECT id FROM code_symbols ... ORDER BY qualified_name,
+        // file_path, line — parser rejects when none are in the projection. After the
+        // fix, all three land in SELECT in the same order the user requested them.
+        var (sql, _) = new SurfaceQuery<TestTable>("code_symbols")
+            .OrderBy(new PropertyExpr<string>("qualified_name"))
+            .ThenBy(new PropertyExpr<string>("file_path"))
+            .ThenBy(new PropertyExpr<int>("line"))
+            .CompileIdsOnly();
+
+        Assert.Equal(
+            "SELECT id, qualified_name, file_path, line FROM code_symbols ORDER BY qualified_name ASC, file_path ASC, line ASC;",
+            sql);
+    }
+
+    [Fact]
+    public void CompileIdsOnly_OrderedById_DoesNotDuplicateIdInProjection()
+    {
+        // Defensive: ordering by `id` itself must not emit `SELECT id, id FROM …`.
+        var (sql, _) = new SurfaceQuery<TestTable>("symbols")
+            .OrderBy(new PropertyExpr<RecordId>("id"))
+            .CompileIdsOnly();
+
+        Assert.Equal("SELECT id FROM symbols ORDER BY id ASC;", sql);
+    }
+
+    [Fact]
+    public void CompileIdsOnly_RepeatedOrderField_IsDeduplicated()
+    {
+        // A nonsensical but parser-legal `ORDER BY name ASC, name DESC` should still
+        // produce `SELECT id, name FROM …` — one field, one column.
+        var (sql, _) = new SurfaceQuery<TestTable>("symbols")
+            .OrderBy(new PropertyExpr<string>("name"))
+            .ThenBy(new PropertyExpr<string>("name"), OrderDirection.Descending)
+            .CompileIdsOnly();
+
+        Assert.Equal("SELECT id, name FROM symbols ORDER BY name ASC, name DESC;", sql);
     }
 
     [Fact]

@@ -450,19 +450,7 @@ internal static class TraversalBuilderEmitter
                 k.Direction == RelationDirection.Inverse && k.PairedForwardFullName == forwardKindFullName);
             wanted = inverse?.FullName;
         }
-        if (wanted is null)
-        {
-            return false;
-        }
-
-        foreach (var p in table.Properties)
-        {
-            if (p.RelationRole == role && p.RelationKindFullName == wanted)
-            {
-                return true;
-            }
-        }
-        return false;
+        return wanted is not null && table.Properties.Any(p => p.RelationRole == role && p.RelationKindFullName == wanted);
     }
 
     /// <summary>
