@@ -26,7 +26,9 @@ internal static class RelationLinker
         ImmutableArray<RelationKindModel> forwardKinds,
         ImmutableArray<RelationKindModel> inverseKinds,
         ImmutableArray<CompositionRootModel> compositionRoots,
-        ImmutableArray<RelationVariantModel> relationVariants)
+        ImmutableArray<RelationVariantModel> relationVariants,
+        ImmutableArray<UnionInterfaceCandidate> unionInterfaceCandidates,
+        ImmutableArray<UnionMembershipCandidate> unionMembershipCandidates)
     {
         var tableFullNames = new HashSet<string>();
         foreach (var t in tables)
@@ -53,6 +55,7 @@ internal static class RelationLinker
         }
 
         var unions = ComputeUnions(linked, forwardKinds, inverseKinds);
+        var unionEndpoints = ComputeUnionEndpoints(linked, unionInterfaceCandidates, unionMembershipCandidates);
         var (aggregates, conflicts) = ComputeAggregates(linked);
         var cascadeCycles = ComputeCascadeCycles(linked);
 
@@ -61,10 +64,118 @@ internal static class RelationLinker
             RelationKinds: combinedKinds.ToImmutable(),
             RelationVariants: new EquatableArray<RelationVariantModel>(linkedVariants.ToImmutable()),
             Unions: new EquatableArray<RelationUnion>(unions),
+            UnionEndpoints: new EquatableArray<UnionEndpointModel>(unionEndpoints),
             Aggregates: new EquatableArray<AggregateModel>(aggregates),
             AggregateConflicts: new EquatableArray<string>(conflicts),
             CascadeCycles: new EquatableArray<string>(cascadeCycles),
             CompositionRoots: new EquatableArray<CompositionRootModel>(compositionRoots));
+    }
+
+    /// <summary>
+    /// Combines union-interface candidates (interfaces attributed with anything deriving
+    /// from <c>In&lt;TKind&gt;</c> / <c>Out&lt;TKind&gt;</c>) with membership candidates
+    /// (partial <c>I{Name}RecordId</c> decls extending other interfaces) into final
+    /// <see cref="UnionEndpointModel"/>s. For each membership candidate, each base FQN is
+    /// checked against the known union interfaces; matches enrol the marker's table in
+    /// that union. The marker→table resolution strips the <c>I</c>-prefix and
+    /// <c>RecordId</c>-suffix and looks up the resulting simple name against the table
+    /// catalogue, preferring same-namespace matches.
+    /// </summary>
+    private static List<UnionEndpointModel> ComputeUnionEndpoints(
+        ImmutableArray<TableModel> tables,
+        ImmutableArray<UnionInterfaceCandidate> unionInterfaceCandidates,
+        ImmutableArray<UnionMembershipCandidate> unionMembershipCandidates)
+    {
+        if (unionInterfaceCandidates.Length == 0)
+        {
+            return [];
+        }
+
+        // Per-interface accumulator. Keyed by interface FQN; value is the interface
+        // candidate + sorted set of member table FQNs we've matched so far.
+        var byInterface = new Dictionary<string, (UnionInterfaceCandidate Candidate, SortedSet<string> Members)>(StringComparer.Ordinal);
+        foreach (var c in unionInterfaceCandidates)
+        {
+            // Dedupe: same interface attributed twice (rare; harmless) collapses to one
+            // entry. The first wins; later ones contribute nothing new.
+            if (!byInterface.ContainsKey(c.InterfaceFullName))
+            {
+                byInterface[c.InterfaceFullName] = (c, new SortedSet<string>(StringComparer.Ordinal));
+            }
+        }
+
+        foreach (var membership in unionMembershipCandidates)
+        {
+            var tableFqn = ResolveMarkerToTable(membership.MarkerInterfaceFullName, tables);
+            if (tableFqn is null)
+            {
+                continue;
+            }
+
+            foreach (var baseFqn in membership.BaseFullNames)
+            {
+                if (byInterface.TryGetValue(baseFqn, out var entry))
+                {
+                    entry.Members.Add(tableFqn);
+                }
+            }
+        }
+
+        var result = new List<UnionEndpointModel>();
+        foreach (var entry in byInterface.Values)
+        {
+            result.Add(new UnionEndpointModel(
+                InterfaceFullName: entry.Candidate.InterfaceFullName,
+                KindFullName: entry.Candidate.KindFullName,
+                Direction: entry.Candidate.Direction,
+                MemberTableFullNames: new EquatableArray<string>(entry.Members.ToList())));
+        }
+
+        result.Sort((a, b) => StringComparer.Ordinal.Compare(a.InterfaceFullName, b.InterfaceFullName));
+        return result;
+    }
+
+    /// <summary>
+    /// Resolves a per-table marker interface FQN (e.g. <c>M.IConstraintRecordId</c>) to
+    /// the FQN of the <c>[Table]</c> it markers. Strips the leading <c>I</c> and trailing
+    /// <c>RecordId</c> from the simple name and prefers a same-namespace table match;
+    /// falls back to the first cross-namespace match by simple name. Returns null when
+    /// no table matches the stripped name.
+    /// </summary>
+    private static string? ResolveMarkerToTable(string markerFullName, ImmutableArray<TableModel> tables)
+    {
+        var lastDot = markerFullName.LastIndexOf('.');
+        var markerNamespace = lastDot >= 0 ? markerFullName[..lastDot] : string.Empty;
+        var markerSimpleName = lastDot >= 0 ? markerFullName[(lastDot + 1)..] : markerFullName;
+
+        if (!markerSimpleName.StartsWith("I")
+            || !markerSimpleName.EndsWith("RecordId")
+            || markerSimpleName.Length <= "IRecordId".Length)
+        {
+            return null;
+        }
+
+        var tableSimpleName = markerSimpleName[1..^"RecordId".Length];
+
+        TableModel? sameNamespaceMatch = null;
+        TableModel? anyMatch = null;
+        foreach (var t in tables)
+        {
+            if (t.Name != tableSimpleName)
+            {
+                continue;
+            }
+
+            if (string.Equals(t.Namespace, markerNamespace, StringComparison.Ordinal))
+            {
+                sameNamespaceMatch = t;
+                break;
+            }
+
+            anyMatch ??= t;
+        }
+
+        return (sameNamespaceMatch ?? anyMatch)?.FullName;
     }
 
     private static RelationVariantModel RewriteVariant(RelationVariantModel variant, HashSet<string> tableFullNames)

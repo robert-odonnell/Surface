@@ -28,4 +28,10 @@ internal static class AnnotationsMetadata
     public const string InverseRelation      = $"{Namespace}.InverseRelation`1";
     public const string In                   = $"{Namespace}.InAttribute";
     public const string Out                  = $"{Namespace}.OutAttribute";
+
+    // Union-endpoint attribute bases — declared as `public class FooAttribute : Out<TKind>`
+    // by users and applied to a partial interface that derives from IRecordId. The `1
+    // suffix denotes the generic-type arity (one type parameter, the forward kind).
+    public const string InUnionBase          = $"{Namespace}.In`1";
+    public const string OutUnionBase         = $"{Namespace}.Out`1";
 }

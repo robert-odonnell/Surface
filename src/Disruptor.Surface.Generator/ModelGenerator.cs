@@ -53,18 +53,40 @@ public sealed class ModelGenerator : IIncrementalGenerator
             .Where(static c => c is not null)
             .Select(static (c, _) => c!);
 
+        // Union endpoint discovery — two passes feed the linker. Pass (a) finds interfaces
+        // attributed with anything deriving from In<TKind>/Out<TKind> (the union itself).
+        // Pass (b) finds partial I{Name}RecordId decls with a non-empty base list (the
+        // per-table opt-ins). The linker stitches them into UnionEndpointModels.
+        var unionInterfaceCandidates = context.SyntaxProvider
+            .CreateSyntaxProvider(
+                predicate: UnionEndpointExtractor.IsInterfaceWithAttributeList,
+                transform: static (ctx, ct) => UnionEndpointExtractor.TryExtractUnionInterface(ctx, ct))
+            .Where(static u => u is not null)
+            .Select(static (u, _) => u!);
+
+        var unionMembershipCandidates = context.SyntaxProvider
+            .CreateSyntaxProvider(
+                predicate: UnionEndpointExtractor.IsPerTableMarkerWithBases,
+                transform: static (ctx, ct) => UnionEndpointExtractor.TryExtractMembership(ctx, ct))
+            .Where(static m => m is not null)
+            .Select(static (m, _) => m!);
+
         var graph = tables.Collect()
             .Combine(forwardKinds.Collect())
             .Combine(inverseKinds.Collect())
             .Combine(compositionRoots.Collect())
             .Combine(relationVariants.Collect())
+            .Combine(unionInterfaceCandidates.Collect())
+            .Combine(unionMembershipCandidates.Collect())
             .Select(static (combined, _) =>
                 RelationLinker.Build(
-                    combined.Left.Left.Left.Left,
-                    combined.Left.Left.Left.Right,
-                    combined.Left.Left.Right,
-                    combined.Left.Right,
-                    combined.Right));
+                    combined.Left.Left.Left.Left.Left.Left,    // tables
+                    combined.Left.Left.Left.Left.Left.Right,   // forwardKinds
+                    combined.Left.Left.Left.Left.Right,        // inverseKinds
+                    combined.Left.Left.Left.Right,             // compositionRoots
+                    combined.Left.Left.Right,                  // relationVariants
+                    combined.Left.Right,                       // unionInterfaceCandidates
+                    combined.Right));                          // unionMembershipCandidates
 
         context.RegisterSourceOutput(graph, static (spc, g) => Emit(spc, g));
     }

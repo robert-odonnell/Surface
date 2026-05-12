@@ -17,11 +17,36 @@ public sealed record ModelGraph(
     EquatableArray<RelationKindModel> RelationKinds,
     EquatableArray<RelationVariantModel> RelationVariants,
     EquatableArray<RelationUnion> Unions,
+    EquatableArray<UnionEndpointModel> UnionEndpoints,
     EquatableArray<AggregateModel> Aggregates,
     EquatableArray<string> AggregateConflicts,
     EquatableArray<string> CascadeCycles,
     EquatableArray<CompositionRootModel> CompositionRoots)
 {
+    /// <summary>
+    /// Returns the user-declared union endpoint matching <paramref name="interfaceFullName"/>,
+    /// or null if the FQN doesn't name a known union interface. Variant emitters call this
+    /// to decide whether an <c>[In]</c> / <c>[Out]</c> property typed to an interface is a
+    /// union endpoint (multi-table) versus a plain entity / typed-id endpoint.
+    /// </summary>
+    public UnionEndpointModel? FindUnionEndpoint(string? interfaceFullName)
+    {
+        if (interfaceFullName is null)
+        {
+            return null;
+        }
+
+        foreach (var union in UnionEndpoints)
+        {
+            if (union.InterfaceFullName == interfaceFullName)
+            {
+                return union;
+            }
+        }
+
+        return null;
+    }
+
     public IReadOnlyDictionary<string, TableModel> BuildTableIndex()
         => Tables.ToDictionary(t => t.FullName);
 
