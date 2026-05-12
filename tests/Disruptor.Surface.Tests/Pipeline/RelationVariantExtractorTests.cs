@@ -118,7 +118,7 @@ public sealed class RelationVariantExtractorTests
     }
 
     [Fact]
-    public void Missing_In_Returns_Null()
+    public void Missing_In_Passes_Through_For_Linker_Lift()
     {
         const string fixture = Preamble + """
 
@@ -132,11 +132,15 @@ public sealed class RelationVariantExtractorTests
         var cls = compilation.GetTypeByMetadataName("M.MissingIn");
         Assert.NotNull(cls);
 
-        Assert.Null(RelationVariantExtractor.TryExtractFromSymbol(cls!, CancellationToken.None));
+        var model = RelationVariantExtractor.TryExtractFromSymbol(cls!, CancellationToken.None);
+        Assert.NotNull(model);
+        Assert.Null(model!.In);
+        Assert.NotNull(model.Out);
+        Assert.Equal("Target", model.Out!.Name);
     }
 
     [Fact]
-    public void Missing_Out_Returns_Null()
+    public void Missing_Out_Passes_Through_For_Linker_Lift()
     {
         const string fixture = Preamble + """
 
@@ -150,7 +154,11 @@ public sealed class RelationVariantExtractorTests
         var cls = compilation.GetTypeByMetadataName("M.MissingOut");
         Assert.NotNull(cls);
 
-        Assert.Null(RelationVariantExtractor.TryExtractFromSymbol(cls!, CancellationToken.None));
+        var model = RelationVariantExtractor.TryExtractFromSymbol(cls!, CancellationToken.None);
+        Assert.NotNull(model);
+        Assert.NotNull(model!.In);
+        Assert.Equal("Source", model.In!.Name);
+        Assert.Null(model.Out);
     }
 
     [Fact]

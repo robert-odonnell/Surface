@@ -21,9 +21,9 @@ namespace Disruptor.Surface.Generator.Pipeline;
 /// semantic model to confirm the attribute's ancestry and walks the class's members.
 /// </para>
 /// <para>
-/// Malformed shapes (missing <c>[In]</c> / <c>[Out]</c>, multiple of either, multiple
-/// <c>[Id]</c>) return <c>null</c>. Phase 1b leaves the corresponding diagnostics for a
-/// later phase.
+/// Malformed shapes with multiple <c>[In]</c> / <c>[Out]</c> / <c>[Id]</c> members return
+/// <c>null</c>. Missing endpoints are allowed through so the linker can lift them from
+/// annotated shared-shape interfaces.
 /// </para>
 /// </summary>
 internal static class RelationVariantExtractor
@@ -126,14 +126,9 @@ internal static class RelationVariantExtractor
             }
         }
 
-        // Required shape when the variant declares its own annotated members: exactly one
-        // [In], exactly one [Out], at most one [Id]. The empty case (zero own annotated
-        // members) is intentionally allowed through — the linker will try to lift In/Out
-        // and payload from a matching annotated shared-shape interface (preview.56). Half-
-        // populated declarations (only [In], or two [Out]s, etc.) still bail; the variant
-        // is dropped silently as before, which keeps the malformed-input contract.
-        var hasOwnAnnotatedMembers = inCount > 0 || outCount > 0 || idCount > 0 || payloadBuilder.Count > 0;
-        if (hasOwnAnnotatedMembers && (inCount != 1 || outCount != 1 || idCount > 1))
+        // Multiple endpoint/id roles are always ambiguous. Missing roles are allowed
+        // through; RelationLinker may fill them from annotated shared-shape interfaces.
+        if (inCount > 1 || outCount > 1 || idCount > 1)
         {
             return null;
         }

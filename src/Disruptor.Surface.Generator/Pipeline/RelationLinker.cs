@@ -84,15 +84,11 @@ internal static class RelationLinker
     }
 
     /// <summary>
-    /// preview.56 — fills in <see cref="RelationVariantModel.In"/> / <see cref="RelationVariantModel.Out"/> /
-    /// <see cref="RelationVariantModel.Id"/> / <see cref="RelationVariantModel.PayloadProperties"/>
-    /// from a matching annotated shared-shape interface candidate when the variant
-    /// declares zero own annotated members. The variant's
-    /// <see cref="RelationVariantModel.ImplementedInterfaceFullNames"/> are matched against
-    /// candidates carrying lifted props (i.e. interfaces whose own members carry
-    /// <c>[In]</c> / <c>[Out]</c> / <c>[Property]</c> / <c>[Id]</c>); a single match wins
-    /// and contributes its lifted shape. Multiple annotated matches make the lift
-    /// ambiguous; the variant is dropped to keep the contract one-source-of-truth.
+    /// preview.56+ — fills in or augments <see cref="RelationVariantModel.In"/> /
+    /// <see cref="RelationVariantModel.Out"/> / <see cref="RelationVariantModel.Id"/> /
+    /// <see cref="RelationVariantModel.PayloadProperties"/> from annotated shared-shape
+    /// interfaces. Local variant members win; compatible interface fragments merge; real
+    /// conflicts drop the variant to keep the contract one-source-of-truth.
     /// <para>
     /// Variants that don't need a lift (their own annotated members already produced a
     /// non-null In/Out at extraction time) pass through unchanged. The result is
@@ -125,83 +121,107 @@ internal static class RelationLinker
         var builder = ImmutableArray.CreateBuilder<RelationVariantModel>(variants.Length);
         foreach (var variant in variants)
         {
-            // Already populated — variant declared its own [In]/[Out]/[Property] members
-            // and the extractor produced a fully-shaped model. Pass through; the lift
-            // path is opt-in via "empty body, base list points at an annotated interface".
-            if (variant.In is not null && variant.Out is not null)
-            {
-                builder.Add(variant);
-                continue;
-            }
+            var merged = variant;
+            var conflicted = false;
 
-            // Find every annotated candidate the variant lists in its base chain. Multiple
-            // annotated matches make the lift ambiguous (which interface's payload wins?);
-            // drop the variant rather than picking one arbitrarily. A single match is the
-            // contract: that interface contributes In/Out/Id/Payload.
-            SharedShapeInterfaceCandidate? lift = null;
-            var ambiguous = false;
-            foreach (var ifaceFqn in variant.ImplementedInterfaceFullNames)
+            foreach (var ifaceFqn in variant.ImplementedInterfaceFullNames.AsImmutableArray().Sort(StringComparer.Ordinal))
             {
                 if (!annotatedByFqn.TryGetValue(ifaceFqn, out var candidate))
                 {
                     continue;
                 }
-                if (lift is null)
+
+                if (!TryMergeLift(merged, candidate, tableFullNames, out merged))
                 {
-                    lift = candidate;
-                }
-                else
-                {
-                    ambiguous = true;
+                    conflicted = true;
                     break;
                 }
             }
 
-            if (ambiguous || lift is null)
-            {
-                // No clear lift source — silently drop, matching the existing fail-soft
-                // contract the extractor used when In/Out couldn't be resolved.
-                continue;
-            }
-
-            // Lifted props originate on interface members that don't see the same
-            // type-rewrite pass linkedTables got. Re-run RewriteType so any TypeRef
-            // pointing at a [Table] gets IsTableType=true (the rewrite knows the table
-            // catalogue we built earlier in Build).
-            var rewrittenIn = lift.LiftedIn is null
-                ? null
-                : lift.LiftedIn with { Type = RewriteType(lift.LiftedIn.Type, tableFullNames) };
-            var rewrittenOut = lift.LiftedOut is null
-                ? null
-                : lift.LiftedOut with { Type = RewriteType(lift.LiftedOut.Type, tableFullNames) };
-            var rewrittenId = lift.LiftedId is null
-                ? null
-                : lift.LiftedId with { Type = RewriteType(lift.LiftedId.Type, tableFullNames) };
-
-            var rewrittenPayload = ImmutableArray.CreateBuilder<RelationVariantPropertyModel>(lift.LiftedPayload.Count);
-            foreach (var p in lift.LiftedPayload)
-            {
-                rewrittenPayload.Add(p with { Type = RewriteType(p.Type, tableFullNames) });
-            }
-
-            // Lift wins only when both endpoints are present. A half-annotated interface
-            // (e.g. [In] declared but [Out] missing) leaves the variant unsalvageable.
-            if (rewrittenIn is null || rewrittenOut is null)
+            if (conflicted || merged.In is null || merged.Out is null)
             {
                 continue;
             }
 
-            builder.Add(variant with
-            {
-                In = rewrittenIn,
-                Out = rewrittenOut,
-                Id = rewrittenId ?? variant.Id,
-                PayloadProperties = new EquatableArray<RelationVariantPropertyModel>(rewrittenPayload.ToImmutable()),
-            });
+            builder.Add(merged);
         }
 
         return builder.ToImmutable();
     }
+
+    private static bool TryMergeLift(
+        RelationVariantModel variant,
+        SharedShapeInterfaceCandidate lift,
+        HashSet<string> tableFullNames,
+        out RelationVariantModel merged)
+    {
+        merged = variant;
+
+        if (!TryMergeSingular(merged.In, RewriteLifted(lift.LiftedIn, tableFullNames), out var mergedIn)
+            || !TryMergeSingular(merged.Out, RewriteLifted(lift.LiftedOut, tableFullNames), out var mergedOut)
+            || !TryMergeSingular(merged.Id, RewriteLifted(lift.LiftedId, tableFullNames), out var mergedId))
+        {
+            return false;
+        }
+
+        var payload = ImmutableArray.CreateBuilder<RelationVariantPropertyModel>();
+        payload.AddRange(merged.PayloadProperties.AsImmutableArray());
+        foreach (var p in lift.LiftedPayload)
+        {
+            var rewritten = p with { Type = RewriteType(p.Type, tableFullNames) };
+            var existingIndex = -1;
+            for (var i = 0; i < payload.Count; i++)
+            {
+                if (string.Equals(payload[i].Name, rewritten.Name, StringComparison.Ordinal))
+                {
+                    existingIndex = i;
+                    break;
+                }
+            }
+
+            if (existingIndex < 0)
+            {
+                payload.Add(rewritten);
+                continue;
+            }
+
+            if (!CompatibleProperty(payload[existingIndex], rewritten))
+            {
+                return false;
+            }
+        }
+
+        merged = merged with
+        {
+            In = mergedIn,
+            Out = mergedOut,
+            Id = mergedId,
+            PayloadProperties = new EquatableArray<RelationVariantPropertyModel>(payload.ToImmutable()),
+        };
+        return true;
+    }
+
+    private static RelationVariantPropertyModel? RewriteLifted(RelationVariantPropertyModel? property, HashSet<string> tableFullNames)
+        => property is null
+            ? null
+            : property with { Type = RewriteType(property.Type, tableFullNames) };
+
+    private static bool TryMergeSingular(
+        RelationVariantPropertyModel? current,
+        RelationVariantPropertyModel? lifted,
+        out RelationVariantPropertyModel? merged)
+    {
+        merged = current ?? lifted;
+        return current is null
+               || lifted is null
+               || CompatibleProperty(current, lifted);
+    }
+
+    private static bool CompatibleProperty(RelationVariantPropertyModel a, RelationVariantPropertyModel b)
+        => a.Role == b.Role
+           && string.Equals(a.Name, b.Name, StringComparison.Ordinal)
+           && string.Equals(a.Type.FullyQualifiedName, b.Type.FullyQualifiedName, StringComparison.Ordinal)
+           && a.Type.IsNullable == b.Type.IsNullable;
 
     /// <summary>
     /// Per shared-shape interface candidate, collect every variant that lists the

@@ -2081,11 +2081,11 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
-    public void Lift_AmbiguousAcrossMultipleAnnotatedInterfaces_DropsVariant()
+    public void Lift_InheritedPayloadInterfaceMembers_AreMerged()
     {
-        // A variant inheriting from two annotated shared-shape interfaces can't pick
-        // a single source of truth — the linker drops it silently rather than picking
-        // arbitrarily. (Same fail-soft contract as the original missing-In/Out path.)
+        // Payload can live on an ordinary base contract; the shared-shape relation
+        // interface contributes endpoints and inherits the payload. The lift walks the
+        // interface closure, so the empty variant still gets Confidence.
         var source = """
             using Disruptor.Surface.Annotations;
             using Disruptor.Surface.Runtime;
@@ -2099,6 +2099,139 @@ public sealed class EmissionShapeTests
                 [Property] public partial string Fqn { get; set; }
             }
 
+            public interface IEdgePayload {
+                [Property] string Confidence { get; set; }
+            }
+
+            public partial interface ICodeSymbolEdge : IEdgePayload, IRelationVariant {
+                [In]  CodeSymbolId Source { get; set; }
+                [Out] CodeSymbolId Target { get; set; }
+            }
+
+            [Calls]
+            public partial class CallsRelation : ICodeSymbolEdge;
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, compileDiags) = GeneratorHarness.Run(source);
+        Assert.Empty(compileDiags);
+
+        var variant = GeneratorHarness.FindGeneratedFile(result, "CallsRelation.RelationVariant.g.cs");
+        Assert.NotNull(variant);
+        Assert.Contains("public string Confidence", variant!.ToString());
+    }
+
+    [Fact]
+    public void Lift_CompatibleLayeredSharedShapeInterfaces_AreMerged()
+    {
+        // Multiple annotated relation-shape interfaces are fine when they contribute
+        // compatible pieces of one shape. This keeps "endpoint shape" and "payload
+        // shape" reusable without forcing every variant to repeat either one.
+        var source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+
+            public sealed class CallsAttribute : ForwardRelation;
+
+            [Table, AggregateRoot]
+            public partial class CodeSymbol {
+                [Id]       public partial CodeSymbolId Id { get; set; }
+                [Property] public partial string Fqn { get; set; }
+            }
+
+            public partial interface IEdgePayload : IRelationVariant {
+                [Property] string Confidence { get; set; }
+            }
+
+            public partial interface ICodeSymbolEdge : IEdgePayload {
+                [In]  CodeSymbolId Source { get; set; }
+                [Out] CodeSymbolId Target { get; set; }
+            }
+
+            [Calls]
+            public partial class CallsRelation : ICodeSymbolEdge;
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, compileDiags) = GeneratorHarness.Run(source);
+        Assert.Empty(compileDiags);
+
+        var variant = GeneratorHarness.FindGeneratedFile(result, "CallsRelation.RelationVariant.g.cs");
+        Assert.NotNull(variant);
+        var src = variant!.ToString();
+        Assert.Contains("public global::M.CodeSymbolId Source", src);
+        Assert.Contains("public string Confidence", src);
+    }
+
+    [Fact]
+    public void Lift_LocalPayloadCombinesWithSharedEndpoints()
+    {
+        // A variant can lift the common endpoint/payload shape and still add one
+        // per-variant payload field. Local members keep their partial implementation.
+        var source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+
+            public sealed class CallsAttribute : ForwardRelation;
+
+            [Table, AggregateRoot]
+            public partial class CodeSymbol {
+                [Id]       public partial CodeSymbolId Id { get; set; }
+                [Property] public partial string Fqn { get; set; }
+            }
+
+            public partial interface ICodeSymbolEdge : IRelationVariant {
+                [In]       CodeSymbolId Source { get; set; }
+                [Out]      CodeSymbolId Target { get; set; }
+                [Property] string Confidence { get; set; }
+            }
+
+            [Calls]
+            public partial class CallsRelation : ICodeSymbolEdge {
+                [Property] public partial string Notes { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, compileDiags) = GeneratorHarness.Run(source);
+        Assert.Empty(compileDiags);
+
+        var variant = GeneratorHarness.FindGeneratedFile(result, "CallsRelation.RelationVariant.g.cs");
+        Assert.NotNull(variant);
+        var src = variant!.ToString();
+        Assert.Contains("public global::M.CodeSymbolId Source", src);
+        Assert.Contains("public string Confidence", src);
+        Assert.Contains("public partial string Notes", src);
+    }
+
+    [Fact]
+    public void Lift_ConflictingAnnotatedInterfaces_DropsVariant()
+    {
+        // Compatible fragments merge, but conflicting endpoint contracts still fail
+        // closed. The linker must not guess which Source type defines the edge table.
+        var source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+
+            public sealed class CallsAttribute : ForwardRelation;
+
+            [Table, AggregateRoot]
+            public partial class CodeSymbol {
+                [Id]       public partial CodeSymbolId Id { get; set; }
+                [Property] public partial string Fqn { get; set; }
+            }
+
+            [Table]
+            public partial class OtherSymbol {
+                [Id] public partial OtherSymbolId Id { get; set; }
+            }
+
             public partial interface ICodeSymbolEdgeA : IRelationVariant {
                 [In]       CodeSymbolId Source { get; set; }
                 [Out]      CodeSymbolId Target { get; set; }
@@ -2106,12 +2239,12 @@ public sealed class EmissionShapeTests
             }
 
             public partial interface ICodeSymbolEdgeB : IRelationVariant {
-                [In]       CodeSymbolId Source { get; set; }
+                [In]       OtherSymbolId Source { get; set; }
                 [Out]      CodeSymbolId Target { get; set; }
                 [Property] string Reason { get; set; }
             }
 
-            // Two annotated lift sources → ambiguity → variant dropped.
+            // Conflicting Source endpoint types → variant dropped.
             [Calls]
             public partial class CallsRelation : ICodeSymbolEdgeA, ICodeSymbolEdgeB;
 

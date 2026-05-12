@@ -117,7 +117,7 @@ When working in `Disruptor.Surface.Sample/Models` (or any consumer):
 - **Relation variants (preview.51).** Edge mutations go through variant classes — annotate a class with the relation kind (e.g. `[Restricts]`), name endpoints with `[In]` / `[Out]` (entity for within-aggregate, typed id for foreign-aggregate), and optional `[Property]` payload members. The variant **is** an `IEntity`. To create an edge: `await session.SaveAsync(new ConstraintRestrictsUserStory { Source = constraint, Target = userStory }, tx)`. Multi-variant kinds get `SCHEMALESS` edge tables (each variant's payload coexists on the same table); single-variant kinds keep `SCHEMAFULL`. `Session.UnrelateAsync<TKind>(src?, tgt?, tx)` survives for edge deletion (bulk and pair-wise).
 - **Union-endpoint variants (preview.54).** A variant's `[In]` / `[Out]` can be a user-declared union interface, accepting any participating table's typed id. Declare the union as a parameterless attribute deriving from `In<TKind>` / `Out<TKind>` (`public sealed class FooTargetAttribute : Out<RestrictsAttribute>`), apply it to a partial interface deriving from `IRecordId` (`[FooTarget] public partial interface IFooTarget : IRecordId`), and enrol each participating `[Table]` via a per-table partial (`partial interface IConstraintRecordId : IFooTarget`). The variant then types the endpoint as the union interface (`[Out] partial IFooTarget Target { get; set; }`). One variant covers every union member — no per-target duplication. The hydration dispatcher's `(in.tb, out.tb)` switch Cartesian-expands over union members; the schema's `FROM` / `TO` clause expands too. Diagnostics: CG031 (kind mismatch — union pinned to one kind applied to a variant of another), CG032 (dead union — interface attributed but no per-table marker enrols any table).
 - **Shared-shape relation interfaces (preview.55).** When several relation kinds share the same `(Source, Target, payload)` shape, declare a `partial interface I... : IRelationVariant` capturing it and add it to each variant's base list. The generator emits a static factory onto the interface: `static I Create<TKind>(Action<I> init) where TKind : IRelationKind`, dispatching on `typeof(TKind)` to instantiate the right concrete variant. Construction goes from a hand-maintained switch to one expression: `var edge = IMyContract.Create<Calls>(e => { e.Source = s; e.Target = t; … })`. Polymorphic queries across the contributing kinds are deliberately NOT generated — per-kind dispatch on the read side remains a user concern (the limit is intentional; kinds remain distinct edge tables). Diagnostics: CG033 (interface must be partial), CG035 (no implementing variants — dead interface).
-- **Annotated shared-shape lift (preview.56).** When the shared-shape interface itself carries `[In]` / `[Out]` / `[Property]` / `[Id]` on its members, variants with an empty body (`[Calls] partial class CallsRelation : IMyContract;`) collapse the per-variant `[In]/[Out]/[Property] partial T Source/Target/Payload { get; set; }` boilerplate. The linker copies the interface's annotated shape into any variant whose own annotated members are empty; the variant emit picks up the lifted props as full (non-partial) auto-property declarations on the variant class, which satisfy the interface contract via partial-class declaration merging. Variants that declare their own attributed partial members keep precedence — the lift only fills null endpoints. Multiple annotated shared-shape interfaces on one variant make the lift ambiguous; the variant is dropped silently (same fail-soft contract as the existing missing-In/Out path). Unannotated shared-shape interfaces (the preview.55 default) leave the lift inert — empty-body variants under them produce no emit.
+- **Annotated shared-shape lift (preview.56).** When the shared-shape interface itself carries `[In]` / `[Out]` / `[Property]` / `[Id]` on its members, variants can collapse the per-variant `[In]/[Out]/[Property] partial T Source/Target/Payload { get; set; }` boilerplate down to `[Calls] partial class CallsRelation : IMyContract;`. The linker walks every annotated shared-shape interface in the variant's base chain (transitive closure), merging them with the variant's own self-declared members on a per-role/per-name basis. Local self-declared members win wherever they overlap; non-overlapping interface contributions add; overlapping pieces must agree on Role + Name + Type + nullability or the variant fails closed (silent drop, matching the existing malformed-input contract). The interface closure also walks each shared-shape's own base interfaces — payload shape can live on a separate `IPayload : IRelationVariant` and an endpoint shape on `IEdge : IPayload`, and a variant `: IEdge` gets the composed result. The variant emit picks up lifted props as full (non-partial) auto-property declarations satisfying the interface contract via partial-class declaration merging; self-declared members keep their `partial` keyword. Unannotated shared-shape interfaces (the preview.55 default) leave the lift inert.
 - **Union interfaces** — emitted automatically per relation kind whose target/source set has 2+ members. Naming: target side uses the inverse attribute name (`I{InverseName}` → `IRestrictedBy`); source side uses the singularised forward attribute name (`I{Singularize(ForwardName)}` → `IRestrict`). Each entity union has a parallel id-side union (`I{InverseName}Id` → `IRestrictedById`).
 - The `{Name}Id.Value` is a `string`, validated to be either a Ulid stringification (auto-minted by `New()`) or a short lower_snake_case slug (≤32 chars). Use the slug form sparingly — for stable-named records (singletons, config rows). Anything else should be a Ulid.
 
@@ -172,6 +172,52 @@ The Sample project's classes (`Design`, `Constraint`, `Epic`, `Feature`, `UserSt
 ## Engineering log
 
 Newest first. One or two lines per preview. "Substantive" means architecture / behaviour / new public surface; polish (renames, doc edits, formatting) is omitted.
+
+### preview.57 — annotated shared-shape lift: closure walk + per-property merge (DONE 2026-05-13)
+
+preview.56 shipped the lift as a strict "exactly one annotated source" rule with all-or-nothing variant bodies. preview.57 relaxes both axes so the same machinery composes:
+
+- **Closure walk on the interface side.** `SharedShapeExtractor.TryExtract` now lifts model attributes from `iface.AllInterfaces` (the transitive base closure) plus the interface itself, sorted by FQN for deterministic order. An endpoint shape can live on `IEdge : IRelationVariant`, payload on `IPayload : IRelationVariant`, and a third `ICombined : IEdge, IPayload` composes both. `SamePropertyIdentity` (Role + Name + Type FQN) dedupes a property declared at multiple levels of the chain so the merge doesn't double-add.
+- **Per-property merge on the variant side.** `RelationLinker.LiftVariantsFromSharedShape` walks every annotated shared-shape candidate the variant implements (sorted by FQN), threading each through `TryMergeLift` → `TryMergeSingular` / `CompatibleProperty`. Local self-declared members win for overlapping roles; non-overlapping interface contributions accumulate; overlapping pieces must agree on Role + Name + Type FQN + `IsNullable` or the variant fails closed (silent drop, same fail-soft contract as malformed input).
+- **Extractor relaxation.** `RelationVariantExtractor` only drops a variant on multiplicity violation (`>1` of a role) now — half-populated variants (only `[In]`, no `[Out]`, or vice versa) pass through with one endpoint null for the linker to fill from an interface contribution.
+
+Three patterns that didn't compose in preview.56 now do:
+
+```csharp
+// 1. Payload-only base contract (doesn't need to derive from IRelationVariant
+//    — the closure walk picks up its [Property] declarations regardless):
+public interface IEdgePayload {
+    [Property] string Confidence { get; set; }
+}
+public partial interface ICodeSymbolEdge : IEdgePayload, IRelationVariant {
+    [In]  CodeSymbolId Source { get; set; }
+    [Out] CodeSymbolId Target { get; set; }
+}
+[Calls] public partial class CallsRelation : ICodeSymbolEdge;
+
+// 2. Layered IRelationVariant interfaces — payload contract on the base, endpoints
+//    on the derived:
+public partial interface IEdgePayload : IRelationVariant {
+    [Property] string Confidence { get; set; }
+}
+public partial interface ICodeSymbolEdge : IEdgePayload {
+    [In]  CodeSymbolId Source { get; set; }
+    [Out] CodeSymbolId Target { get; set; }
+}
+[Calls] public partial class CallsRelation : ICodeSymbolEdge;
+
+// 3. Variant adds its own per-variant payload while lifting endpoints + shared
+//    payload from the interface:
+[Calls] public partial class CallsRelation : ICodeSymbolEdge {
+    [Property] public partial string Notes { get; set; }
+}
+```
+
+Fail-closed semantics preserved: two annotated interfaces with truly incompatible Source types (`CodeSymbolId` vs `OtherSymbolId`) still drop the variant — the test that exercised "ambiguity drops" in preview.56 was repurposed as "conflict drops" with genuinely conflicting endpoint contracts.
+
+Tests: **283/283 green** (280 prior + 3 net new for the merge cases). The preview.56 "multi-interface ambiguity drops" test became preview.57's "conflicting endpoint types drop" test; the original "missing-In/Out returns null" extractor tests were renamed to "passes through for linker lift" and assert the partial-model shape that now reaches the linker.
+
+Known rough edge / future work: when the merge fails (incompatible Role / Name / Type / IsNullable across two contributions), the variant is currently dropped silently — matching the existing malformed-input contract but offering no diagnostic. The natural follow-up is a `CG036`-style diagnostic ("shared-shape lift conflict") naming the variant, the conflicting interfaces, and the role/property where they disagree, so users hitting the failure mode get a clear pointer to the offending pair instead of a missing-emit symptom.
 
 ### preview.56 — annotated shared-shape lift onto empty-body variants (DONE 2026-05-12)
 

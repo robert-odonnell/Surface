@@ -104,47 +104,70 @@ internal static class SharedShapeExtractor
             return null;
         }
 
-        // Walk the interface's own properties for [In] / [Out] / [Id] / [Property]
-        // attributes. When the interface declares its endpoints/payload, variants opting
-        // in via base list alone (preview.56) inherit the shape — RelationLinker copies
-        // these into any variant whose own annotated members are empty so the variant
-        // body collapses to `[Calls] partial class CallsRelation : ICodeSymbolEdge;`.
-        // Interfaces that stay attribute-free (the preview.55 spike shape) leave all four
-        // fields null and the lift path is skipped — the variants under them remain
-        // self-describing per the original design.
+        // Walk the interface and its inherited interface members for [In] / [Out] /
+        // [Id] / [Property] attributes. When the interface declares its endpoints or
+        // inherits a payload contract, variants opting in via base list alone inherit
+        // the composed shape — RelationLinker copies these into any variant whose own
+        // annotated members do not provide the same role.
+        //
+        // The current merge is intentionally conservative: first declaration for a role
+        // wins, identical payload names are de-duped, and harder conflicts are left for
+        // the linker / C# compiler rather than guessed here.
         RelationVariantPropertyModel? liftedIn = null;
         RelationVariantPropertyModel? liftedOut = null;
         RelationVariantPropertyModel? liftedId = null;
         var liftedPayload = ImmutableArray.CreateBuilder<RelationVariantPropertyModel>();
-        foreach (var member in iface.GetMembers())
+
+        var liftSources = ImmutableArray.CreateBuilder<INamedTypeSymbol>();
+        foreach (var baseIface in iface.AllInterfaces)
         {
-            ct.ThrowIfCancellationRequested();
-            if (member is not IPropertySymbol p)
+            var baseFqn = TableExtractor.NormaliseFullName(baseIface);
+            if (baseFqn is AnnotationsMetadata.RelationVariantInterface
+                or AnnotationsMetadata.EntityInterface
+                or AnnotationsMetadata.RecordIdInterface)
             {
                 continue;
             }
+            liftSources.Add(baseIface);
+        }
+        liftSources.Add(iface);
 
-            var role = RelationVariantExtractor.ResolveRole(p.GetAttributes());
-            if (role == RelationVariantPropertyRole.None)
+        foreach (var sourceIface in liftSources.ToImmutable().Sort((a, b) =>
+                     StringComparer.Ordinal.Compare(TableExtractor.NormaliseFullName(a), TableExtractor.NormaliseFullName(b))))
+        {
+            foreach (var member in sourceIface.GetMembers())
             {
-                continue;
-            }
+                ct.ThrowIfCancellationRequested();
+                if (member is not IPropertySymbol p)
+                {
+                    continue;
+                }
 
-            var pm = RelationVariantExtractor.BuildProperty(p, role);
-            switch (role)
-            {
-                case RelationVariantPropertyRole.In:
-                    liftedIn ??= pm;
-                    break;
-                case RelationVariantPropertyRole.Out:
-                    liftedOut ??= pm;
-                    break;
-                case RelationVariantPropertyRole.Id:
-                    liftedId ??= pm;
-                    break;
-                case RelationVariantPropertyRole.Property:
-                    liftedPayload.Add(pm);
-                    break;
+                var role = RelationVariantExtractor.ResolveRole(p.GetAttributes());
+                if (role == RelationVariantPropertyRole.None)
+                {
+                    continue;
+                }
+
+                var pm = RelationVariantExtractor.BuildProperty(p, role);
+                switch (role)
+                {
+                    case RelationVariantPropertyRole.In:
+                        liftedIn ??= pm;
+                        break;
+                    case RelationVariantPropertyRole.Out:
+                        liftedOut ??= pm;
+                        break;
+                    case RelationVariantPropertyRole.Id:
+                        liftedId ??= pm;
+                        break;
+                    case RelationVariantPropertyRole.Property:
+                        if (!liftedPayload.Any(existing => SamePropertyIdentity(existing, pm)))
+                        {
+                            liftedPayload.Add(pm);
+                        }
+                        break;
+                }
             }
         }
 
@@ -159,4 +182,9 @@ internal static class SharedShapeExtractor
             LiftedId: liftedId,
             LiftedPayload: new EquatableArray<RelationVariantPropertyModel>(liftedPayload.ToImmutable()));
     }
+
+    private static bool SamePropertyIdentity(RelationVariantPropertyModel a, RelationVariantPropertyModel b)
+        => a.Role == b.Role
+           && string.Equals(a.Name, b.Name, StringComparison.Ordinal)
+           && string.Equals(a.Type.FullyQualifiedName, b.Type.FullyQualifiedName, StringComparison.Ordinal);
 }
