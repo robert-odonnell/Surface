@@ -71,6 +71,17 @@ public sealed class ModelGenerator : IIncrementalGenerator
             .Where(static m => m is not null)
             .Select(static (m, _) => m!);
 
+        // Shared-shape interfaces: user-declared interfaces deriving from IRelationVariant
+        // gain a generated static Create<TKind> factory so relation rows can be constructed
+        // by kind without hand-maintaining a switch. Union-endpoint interfaces (derived
+        // from IRecordId) are filtered out by the extractor.
+        var sharedShapeCandidates = context.SyntaxProvider
+            .CreateSyntaxProvider(
+                predicate: SharedShapeExtractor.IsInterfaceWithBaseList,
+                transform: static (ctx, ct) => SharedShapeExtractor.TryExtract(ctx, ct))
+            .Where(static s => s is not null)
+            .Select(static (s, _) => s!);
+
         var graph = tables.Collect()
             .Combine(forwardKinds.Collect())
             .Combine(inverseKinds.Collect())
@@ -78,15 +89,17 @@ public sealed class ModelGenerator : IIncrementalGenerator
             .Combine(relationVariants.Collect())
             .Combine(unionInterfaceCandidates.Collect())
             .Combine(unionMembershipCandidates.Collect())
+            .Combine(sharedShapeCandidates.Collect())
             .Select(static (combined, _) =>
                 RelationLinker.Build(
-                    combined.Left.Left.Left.Left.Left.Left,    // tables
-                    combined.Left.Left.Left.Left.Left.Right,   // forwardKinds
-                    combined.Left.Left.Left.Left.Right,        // inverseKinds
-                    combined.Left.Left.Left.Right,             // compositionRoots
-                    combined.Left.Left.Right,                  // relationVariants
-                    combined.Left.Right,                       // unionInterfaceCandidates
-                    combined.Right));                          // unionMembershipCandidates
+                    combined.Left.Left.Left.Left.Left.Left.Left,    // tables
+                    combined.Left.Left.Left.Left.Left.Left.Right,   // forwardKinds
+                    combined.Left.Left.Left.Left.Left.Right,        // inverseKinds
+                    combined.Left.Left.Left.Left.Right,             // compositionRoots
+                    combined.Left.Left.Left.Right,                  // relationVariants
+                    combined.Left.Left.Right,                       // unionInterfaceCandidates
+                    combined.Left.Right,                            // unionMembershipCandidates
+                    combined.Right));                               // sharedShapeCandidates
 
         context.RegisterSourceOutput(graph, static (spc, g) => Emit(spc, g));
     }
@@ -528,6 +541,33 @@ public sealed class ModelGenerator : IIncrementalGenerator
         // backing fields, Hydrate / SaveAsync. Per-kind sidecars (variant marker interface,
         // hydration dispatcher) emit alongside.
         RelationVariantEmitter.Emit(spc, graph);
+
+        // CG033 — shared-shape interface must be declared partial to receive the
+        // emitted static Create<TKind> factory fragment. CG035 — interface attributed
+        // as a shared shape (derived from IRelationVariant) but no variant implements
+        // it; warning, not error (the interface still functions as a marker type).
+        foreach (var shape in graph.SharedShapes)
+        {
+            if (!shape.IsPartial)
+            {
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.SharedShapeMustBePartial,
+                    Location.None,
+                    shape.InterfaceFullName));
+            }
+
+            if (shape.IsPartial && shape.Variants.Count == 0)
+            {
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.SharedShapeHasNoVariants,
+                    Location.None,
+                    shape.InterfaceFullName));
+            }
+        }
+
+        // Per-shared-shape interface: emit a partial fragment carrying a typed
+        // Create<TKind>(Action<I> init) factory keyed off the per-kind marker class.
+        SharedShapeEmitter.Emit(spc, graph);
     }
 
     private static TypeRef UnwrapTask(TypeRef t) => t.FullyQualifiedName.StartsWith("global::System.Threading.Tasks.Task<") && t.TypeArguments.Count > 0

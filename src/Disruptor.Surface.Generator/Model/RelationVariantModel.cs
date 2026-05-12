@@ -45,6 +45,7 @@ public enum RelationVariantPropertyRole
 /// <param name="PayloadProperties">Zero or more <c>[Property]</c>-annotated members carrying edge payload.</param>
 /// <param name="IsPartial">Whether the class itself is declared <c>partial</c> (required to receive emitted IEntity members).</param>
 /// <param name="DeclaredAccessibility">Class-level accessibility — emitted IEntity members match.</param>
+/// <param name="ImplementedInterfaceFullNames">User-declared interfaces the variant implements (FQNs without <c>global::</c>). Used to match the variant into <see cref="SharedShapeModel"/>s — interfaces deriving from <c>Disruptor.Surface.Runtime.IRelationVariant</c> are shared-shape contracts.</param>
 public sealed record RelationVariantModel(
     string FullName,
     string Namespace,
@@ -55,4 +56,5 @@ public sealed record RelationVariantModel(
     RelationVariantPropertyModel? Id,
     EquatableArray<RelationVariantPropertyModel> PayloadProperties,
     bool IsPartial,
-    string DeclaredAccessibility);
+    string DeclaredAccessibility,
+    EquatableArray<string> ImplementedInterfaceFullNames);

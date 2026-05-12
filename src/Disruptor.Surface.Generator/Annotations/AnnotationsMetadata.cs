@@ -34,4 +34,10 @@ internal static class AnnotationsMetadata
     // suffix denotes the generic-type arity (one type parameter, the forward kind).
     public const string InUnionBase          = $"{Namespace}.In`1";
     public const string OutUnionBase         = $"{Namespace}.Out`1";
+
+    // Runtime marker the generator-emitted relation variants implement and that
+    // user-declared "shared-shape" interfaces extend to opt into the typed surface
+    // (static Create<TKind> factory + polymorphic query terminals). Lives in
+    // Disruptor.Surface.Runtime alongside IEntity.
+    public const string RelationVariantInterface = "Disruptor.Surface.Runtime.IRelationVariant";
 }

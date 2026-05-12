@@ -137,6 +137,24 @@ internal static class RelationVariantExtractor
         var ns = cls.ContainingNamespace?.ToDisplayString() ?? string.Empty;
         var fullName = TableExtractor.NormaliseFullName(cls);
 
+        // Capture user-declared interface implementations so the shared-shape linker can
+        // bucket this variant under any user-declared interface deriving from
+        // IRelationVariant. cls.AllInterfaces unrolls the transitive set; we filter out
+        // the runtime-side IRelationVariant + IEntity (every variant has them, never a
+        // shared-shape contract by themselves) and any framework types.
+        var implementedInterfacesBuilder = ImmutableArray.CreateBuilder<string>();
+        foreach (var iface in cls.AllInterfaces)
+        {
+            var ifaceFqn = TableExtractor.NormaliseFullName(iface);
+            if (ifaceFqn is "Disruptor.Surface.Runtime.IRelationVariant"
+                         or "Disruptor.Surface.Runtime.IEntity"
+                         or "Disruptor.Surface.Runtime.IRecordId")
+            {
+                continue;
+            }
+            implementedInterfacesBuilder.Add(ifaceFqn);
+        }
+
         return new RelationVariantModel(
             FullName: fullName,
             Namespace: ns,
@@ -147,7 +165,8 @@ internal static class RelationVariantExtractor
             Id: idProp,
             PayloadProperties: payloadBuilder.ToImmutable(),
             IsPartial: IsDeclaredPartial(cls, ct),
-            DeclaredAccessibility: cls.DeclaredAccessibility.ToString());
+            DeclaredAccessibility: cls.DeclaredAccessibility.ToString(),
+            ImplementedInterfaceFullNames: new EquatableArray<string>(implementedInterfacesBuilder.ToImmutable()));
     }
 
     private static RelationVariantPropertyModel BuildProperty(IPropertySymbol p, RelationVariantPropertyRole role)

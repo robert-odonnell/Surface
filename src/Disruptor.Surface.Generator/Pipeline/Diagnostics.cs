@@ -197,4 +197,20 @@ internal static class Diagnostics
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor SharedShapeMustBePartial = new(
+        id: "CG033",
+        title: "Shared-shape relation interface must be partial",
+        messageFormat: "Interface '{0}' derives from IRelationVariant and is treated as a shared-shape contract; declare it partial so the generator can emit the static Create<TKind> factory fragment onto it",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor SharedShapeHasNoVariants = new(
+        id: "CG035",
+        title: "Shared-shape relation interface has no implementing variants",
+        messageFormat: "Interface '{0}' derives from IRelationVariant but no relation variant class lists it as a base; the generated Create<TKind> factory would have nothing to dispatch to",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
 }

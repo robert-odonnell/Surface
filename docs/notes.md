@@ -116,6 +116,7 @@ When working in `Disruptor.Surface.Sample/Models` (or any consumer):
 - **Forward/inverse relations** — declare an attribute pair like `RestrictsAttribute : ForwardRelation` + `RestrictedByAttribute : InverseRelation<RestrictsAttribute>`. The generator emits a sibling `Restricts : IRelationKind` marker class. **Within-aggregate** entity-side read collections: declare as `IReadOnlyCollection<IEntity>`. **Cross-aggregate**: declare as `IReadOnlyCollection<IRecordId>`. There is no sync `Relate` and no buffered intent for `SaveAsync` to drain (preview.45 ripped the relation write buffer out — substrate owns concurrency).
 - **Relation variants (preview.51).** Edge mutations go through variant classes — annotate a class with the relation kind (e.g. `[Restricts]`), name endpoints with `[In]` / `[Out]` (entity for within-aggregate, typed id for foreign-aggregate), and optional `[Property]` payload members. The variant **is** an `IEntity`. To create an edge: `await session.SaveAsync(new ConstraintRestrictsUserStory { Source = constraint, Target = userStory }, tx)`. Multi-variant kinds get `SCHEMALESS` edge tables (each variant's payload coexists on the same table); single-variant kinds keep `SCHEMAFULL`. `Session.UnrelateAsync<TKind>(src?, tgt?, tx)` survives for edge deletion (bulk and pair-wise).
 - **Union-endpoint variants (preview.54).** A variant's `[In]` / `[Out]` can be a user-declared union interface, accepting any participating table's typed id. Declare the union as a parameterless attribute deriving from `In<TKind>` / `Out<TKind>` (`public sealed class FooTargetAttribute : Out<RestrictsAttribute>`), apply it to a partial interface deriving from `IRecordId` (`[FooTarget] public partial interface IFooTarget : IRecordId`), and enrol each participating `[Table]` via a per-table partial (`partial interface IConstraintRecordId : IFooTarget`). The variant then types the endpoint as the union interface (`[Out] partial IFooTarget Target { get; set; }`). One variant covers every union member — no per-target duplication. The hydration dispatcher's `(in.tb, out.tb)` switch Cartesian-expands over union members; the schema's `FROM` / `TO` clause expands too. Diagnostics: CG031 (kind mismatch — union pinned to one kind applied to a variant of another), CG032 (dead union — interface attributed but no per-table marker enrols any table).
+- **Shared-shape relation interfaces (preview.55).** When several relation kinds share the same `(Source, Target, payload)` shape, declare a `partial interface I... : IRelationVariant` capturing it and add it to each variant's base list. The generator emits a static factory onto the interface: `static I Create<TKind>(Action<I> init) where TKind : IRelationKind`, dispatching on `typeof(TKind)` to instantiate the right concrete variant. Construction goes from a hand-maintained switch to one expression: `var edge = IMyContract.Create<Calls>(e => { e.Source = s; e.Target = t; … })`. Polymorphic queries across the contributing kinds are deliberately NOT generated — per-kind dispatch on the read side remains a user concern (the limit is intentional; kinds remain distinct edge tables). Diagnostics: CG033 (interface must be partial), CG035 (no implementing variants — dead interface).
 - **Union interfaces** — emitted automatically per relation kind whose target/source set has 2+ members. Naming: target side uses the inverse attribute name (`I{InverseName}` → `IRestrictedBy`); source side uses the singularised forward attribute name (`I{Singularize(ForwardName)}` → `IRestrict`). Each entity union has a parallel id-side union (`I{InverseName}Id` → `IRestrictedById`).
 - The `{Name}Id.Value` is a `string`, validated to be either a Ulid stringification (auto-minted by `New()`) or a short lower_snake_case slug (≤32 chars). Use the slug form sparingly — for stable-named records (singletons, config rows). Anything else should be a Ulid.
 
@@ -170,6 +171,38 @@ The Sample project's classes (`Design`, `Constraint`, `Epic`, `Feature`, `UserSt
 ## Engineering log
 
 Newest first. One or two lines per preview. "Substantive" means architecture / behaviour / new public surface; polish (renames, doc edits, formatting) is omitted.
+
+### preview.55 — shared-shape relation interfaces with kind-keyed Create&lt;TKind&gt; factory (DONE 2026-05-12)
+
+User-declared interfaces deriving from `IRelationVariant` are recognised as "shared-shape contracts" over relation variants whose endpoint+payload shape match. The generator emits a static factory onto each such (partial) interface, removing the hand-maintained switch from variant construction call sites:
+
+```csharp
+public partial interface ICodeSymbolEdge : IRelationVariant {
+    CodeSymbolId Source { get; set; }
+    CodeSymbolId Target { get; set; }
+    string Confidence { get; set; }
+}
+
+[Calls]      public partial class CallsRelation      : ICodeSymbolEdge { /* [In], [Out], [Property] */ }
+[References] public partial class ReferencesRelation : ICodeSymbolEdge { /* same shape */ }
+
+// Call site:
+var edge = ICodeSymbolEdge.Create<Calls>(e => { e.Source = s; e.Target = t; e.Confidence = "high"; });
+```
+
+What the generator does:
+- `SharedShapeExtractor` discovers partial interfaces whose transitive base chain includes `Disruptor.Surface.Runtime.IRelationVariant`. Excludes the runtime interface itself and union-endpoint interfaces (those derive from `IRecordId`).
+- `RelationVariantExtractor` now captures the variant's `ImplementedInterfaceFullNames` (filtering out the runtime markers) so the linker can match variants to shared-shape contracts.
+- `RelationLinker.ComputeSharedShapes` builds one `SharedShapeModel` per candidate, listing every implementing variant with `(VariantFqn, KindMarkerFqn, EdgeName)`. Common source/target endpoint types across variants are computed but not consumed by the emitter; they're held for future use.
+- `SharedShapeEmitter` emits a partial fragment of the interface carrying `static {I} Create<TKind>(System.Action<{I}> init) where TKind : IRelationKind` — an if-chain dispatching on `typeof(TKind)` to `new ConcreteVariant()`, then running the user's initialiser before returning the instance.
+
+Scope (deliberately narrow per design conversation): generator help is **kind-keyed construction only**. The polymorphic query surface across kinds stays a user-side concern — relation kinds remain distinct edge tables, and querying still requires per-kind dispatch (`session.QueryVariantsOutgoingAsync<TVariant>` per kind, concatenate). The shared-shape interface gives `IEnumerable<I>` uniform handling on the read side, but the generator doesn't synthesise "all variants of these kinds" reads.
+
+Diagnostics:
+- **CG033** — shared-shape interface not declared `partial`. Error; the generator can't graft the static method otherwise.
+- **CG035** — partial shared-shape interface with zero implementing variants. Warning; the interface still functions as a marker type, but the factory has nothing to dispatch to.
+
+Sample: the existing `Spike/` subdirectory (added when scoping this feature) drove the design and now ships as the working example — `ICodeSymbolEdge` over `CallsRelation` + `ReferencesRelation`, both on the new `CodeSymbol` aggregate. 5 new `EmissionShapeTests` cover the interface satisfaction property, factory dispatch, unknown-kind throw, CG033, CG035. **274/274 green** (270 prior + 4 net new; one existing spike test got refocused into the partial-property-satisfaction check).
 
 ### preview.54 — union endpoints on relation variants (DONE 2026-05-12)
 

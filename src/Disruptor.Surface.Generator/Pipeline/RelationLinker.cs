@@ -28,7 +28,8 @@ internal static class RelationLinker
         ImmutableArray<CompositionRootModel> compositionRoots,
         ImmutableArray<RelationVariantModel> relationVariants,
         ImmutableArray<UnionInterfaceCandidate> unionInterfaceCandidates,
-        ImmutableArray<UnionMembershipCandidate> unionMembershipCandidates)
+        ImmutableArray<UnionMembershipCandidate> unionMembershipCandidates,
+        ImmutableArray<SharedShapeInterfaceCandidate> sharedShapeCandidates)
     {
         var tableFullNames = new HashSet<string>();
         foreach (var t in tables)
@@ -53,22 +54,145 @@ internal static class RelationLinker
         {
             linkedVariants.Add(RewriteVariant(variant, tableFullNames));
         }
+        var linkedVariantsImmutable = linkedVariants.ToImmutable();
 
         var unions = ComputeUnions(linked, forwardKinds, inverseKinds);
         var unionEndpoints = ComputeUnionEndpoints(linked, unionInterfaceCandidates, unionMembershipCandidates);
+        var sharedShapes = ComputeSharedShapes(sharedShapeCandidates, linkedVariantsImmutable, forwardKinds, inverseKinds);
         var (aggregates, conflicts) = ComputeAggregates(linked);
         var cascadeCycles = ComputeCascadeCycles(linked);
 
         return new ModelGraph(
             Tables: linked,
             RelationKinds: combinedKinds.ToImmutable(),
-            RelationVariants: new EquatableArray<RelationVariantModel>(linkedVariants.ToImmutable()),
+            RelationVariants: new EquatableArray<RelationVariantModel>(linkedVariantsImmutable),
             Unions: new EquatableArray<RelationUnion>(unions),
             UnionEndpoints: new EquatableArray<UnionEndpointModel>(unionEndpoints),
+            SharedShapes: new EquatableArray<SharedShapeModel>(sharedShapes),
             Aggregates: new EquatableArray<AggregateModel>(aggregates),
             AggregateConflicts: new EquatableArray<string>(conflicts),
             CascadeCycles: new EquatableArray<string>(cascadeCycles),
             CompositionRoots: new EquatableArray<CompositionRootModel>(compositionRoots));
+    }
+
+    /// <summary>
+    /// Per shared-shape interface candidate, collect every variant that lists the
+    /// interface in its <see cref="RelationVariantModel.ImplementedInterfaceFullNames"/>.
+    /// Each enrolled variant contributes a <see cref="SharedShapeVariantBinding"/>
+    /// carrying the variant FQN, the per-kind marker class FQN (the <c>TKind</c>
+    /// argument the emitted factory will switch on), and the edge name (for SurrealQL
+    /// generation in the query terminals).
+    /// <para>
+    /// Source / target endpoint type FQNs are the common type across all member variants.
+    /// When variants disagree, both fields are left <c>null</c>; the query terminals are
+    /// then suppressed and CG034 surfaces the disagreement to the user.
+    /// </para>
+    /// </summary>
+    private static List<SharedShapeModel> ComputeSharedShapes(
+        ImmutableArray<SharedShapeInterfaceCandidate> candidates,
+        ImmutableArray<RelationVariantModel> variants,
+        ImmutableArray<RelationKindModel> forwardKinds,
+        ImmutableArray<RelationKindModel> inverseKinds)
+    {
+        if (candidates.Length == 0)
+        {
+            return [];
+        }
+
+        // Index forward kinds by FQN — we look up the variant's kind attribute (which
+        // may be the forward attribute or the inverse) and walk to the forward to get
+        // the kind marker name + edge name.
+        var forwardByFqn = new Dictionary<string, RelationKindModel>(StringComparer.Ordinal);
+        foreach (var k in forwardKinds)
+        {
+            forwardByFqn[k.FullName] = k;
+        }
+        var forwardForInverseByFqn = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var inv in inverseKinds)
+        {
+            if (inv.PairedForwardFullName is { } paired)
+            {
+                forwardForInverseByFqn[inv.FullName] = paired;
+            }
+        }
+
+        var result = new List<SharedShapeModel>();
+        foreach (var candidate in candidates)
+        {
+            var enrolled = new List<SharedShapeVariantBinding>();
+            string? commonSource = null;
+            string? commonTarget = null;
+            var sourceConsistent = true;
+            var targetConsistent = true;
+
+            foreach (var variant in variants)
+            {
+                if (!variant.ImplementedInterfaceFullNames.Any(i => i == candidate.InterfaceFullName))
+                {
+                    continue;
+                }
+
+                // Resolve to the forward kind so we know the marker class FQN + edge name.
+                string? forwardFqn = forwardByFqn.ContainsKey(variant.KindAttributeFqn)
+                    ? variant.KindAttributeFqn
+                    : forwardForInverseByFqn.TryGetValue(variant.KindAttributeFqn, out var pf) ? pf : null;
+                if (forwardFqn is null || !forwardByFqn.TryGetValue(forwardFqn, out var forward))
+                {
+                    continue;
+                }
+
+                var markerName = SurrealNaming.StripAttributeSuffix(forward.Name);
+                var markerFqn = string.IsNullOrEmpty(forward.Namespace)
+                    ? $"global::{markerName}"
+                    : $"global::{forward.Namespace}.{markerName}";
+                var edgeName = SurrealNaming.ToEdgeName(forward.Name);
+
+                enrolled.Add(new SharedShapeVariantBinding(
+                    VariantFullName: variant.FullName,
+                    KindMarkerFullName: markerFqn,
+                    EdgeName: edgeName));
+
+                // Track common endpoint types — null sentinel means "no expectation
+                // yet", first variant pins, subsequent variants must agree.
+                var srcFqn = variant.In.Type.FullyQualifiedName;
+                var tgtFqn = variant.Out.Type.FullyQualifiedName;
+
+                if (commonSource is null && sourceConsistent && enrolled.Count == 1)
+                {
+                    commonSource = srcFqn;
+                }
+                else if (commonSource is not null && !string.Equals(commonSource, srcFqn, StringComparison.Ordinal))
+                {
+                    sourceConsistent = false;
+                    commonSource = null;
+                }
+
+                if (commonTarget is null && targetConsistent && enrolled.Count == 1)
+                {
+                    commonTarget = tgtFqn;
+                }
+                else if (commonTarget is not null && !string.Equals(commonTarget, tgtFqn, StringComparison.Ordinal))
+                {
+                    targetConsistent = false;
+                    commonTarget = null;
+                }
+            }
+
+            enrolled.Sort((a, b) => StringComparer.Ordinal.Compare(a.VariantFullName, b.VariantFullName));
+
+            result.Add(new SharedShapeModel(
+                InterfaceFullName: candidate.InterfaceFullName,
+                Namespace: candidate.Namespace,
+                Name: candidate.Name,
+                IsPartial: candidate.IsPartial,
+                DeclaredAccessibility: candidate.DeclaredAccessibility,
+                SourceTypeFullyQualifiedName: sourceConsistent ? commonSource : null,
+                TargetTypeFullyQualifiedName: targetConsistent ? commonTarget : null,
+                Variants: new EquatableArray<SharedShapeVariantBinding>(enrolled)));
+        }
+
+        result.Sort((a, b) => StringComparer.Ordinal.Compare(a.InterfaceFullName, b.InterfaceFullName));
+        return result;
     }
 
     /// <summary>

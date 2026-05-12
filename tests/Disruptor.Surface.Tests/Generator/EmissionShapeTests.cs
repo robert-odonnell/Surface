@@ -1669,6 +1669,227 @@ public sealed class EmissionShapeTests
         Assert.Contains(runDiags, d => d.Id == "CG031");
     }
 
+    // ─── shared-shape relation interface (preview.55): user-declared interface +
+    //     generated kind-keyed Create<TKind> factory ───────────────────────────────
+
+    private const string SharedShapeSpike = """
+        using Disruptor.Surface.Annotations;
+        using Disruptor.Surface.Runtime;
+        namespace M;
+
+        public sealed class CallsAttribute      : ForwardRelation;
+        public sealed class ReferencesAttribute : ForwardRelation;
+
+        [Table, AggregateRoot]
+        public partial class CodeSymbol {
+            [Id]       public partial CodeSymbolId Id { get; set; }
+            [Property] public partial string Fqn { get; set; }
+        }
+
+        // User-declared shared contract: `partial` is required so the generator can
+        // graft `static Create<TKind>` onto it.
+        public partial interface ICodeSymbolEdge : IRelationVariant {
+            CodeSymbolId Source { get; set; }
+            CodeSymbolId Target { get; set; }
+            string Confidence { get; set; }
+        }
+
+        [Calls]
+        public partial class CallsRelation : ICodeSymbolEdge {
+            [In]       public partial CodeSymbolId Source { get; set; }
+            [Out]      public partial CodeSymbolId Target { get; set; }
+            [Property] public partial string Confidence { get; set; }
+        }
+
+        [References]
+        public partial class ReferencesRelation : ICodeSymbolEdge {
+            [In]       public partial CodeSymbolId Source { get; set; }
+            [Out]      public partial CodeSymbolId Target { get; set; }
+            [Property] public partial string Confidence { get; set; }
+        }
+
+        [CompositionRoot] public partial class Workspace { }
+        """;
+
+    [Fact]
+    public void SharedShape_PartialPropertiesSatisfyInterfaceContract()
+    {
+        // Every implementing variant carries Source / Target / Confidence partial
+        // properties whose accessor shape matches the interface; partial class
+        // declaration merging folds the user's `: ICodeSymbolEdge` with the
+        // generator's `: IEntity, IRelationVariant` into one final type.
+        var asm = GeneratorHarness.CompileAndLoad(SharedShapeSpike);
+
+        var shared = asm.GetType("M.ICodeSymbolEdge", throwOnError: true)!;
+        var callsT = asm.GetType("M.CallsRelation", throwOnError: true)!;
+        var refsT  = asm.GetType("M.ReferencesRelation", throwOnError: true)!;
+        Assert.True(shared.IsAssignableFrom(callsT));
+        Assert.True(shared.IsAssignableFrom(refsT));
+
+        var codeSymbolId = asm.GetType("M.CodeSymbolId", throwOnError: true)!;
+        var src = Activator.CreateInstance(codeSymbolId, "01HZ0000000000000000000001")!;
+        var tgt = Activator.CreateInstance(codeSymbolId, "01HZ0000000000000000000002")!;
+
+        var calls = Activator.CreateInstance(callsT)!;
+        shared.GetProperty("Source")!.SetValue(calls, src);
+        shared.GetProperty("Target")!.SetValue(calls, tgt);
+        shared.GetProperty("Confidence")!.SetValue(calls, "high");
+
+        Assert.Equal(src, shared.GetProperty("Source")!.GetValue(calls));
+        Assert.Equal(tgt, shared.GetProperty("Target")!.GetValue(calls));
+        Assert.Equal("high", shared.GetProperty("Confidence")!.GetValue(calls));
+    }
+
+    [Fact]
+    public void SharedShape_EmitsStaticCreateFactory_DispatchedByKindMarker()
+    {
+        // Generator-emitted `ICodeSymbolEdge.Create<TKind>(init)` instantiates the
+        // right concrete variant based on the typed kind argument, then runs the
+        // user's initialiser. This is the kind-keyed dispatch that removes the
+        // hand-maintained switch from call sites.
+        var asm = GeneratorHarness.CompileAndLoad(SharedShapeSpike);
+
+        var shared = asm.GetType("M.ICodeSymbolEdge", throwOnError: true)!;
+        var callsT = asm.GetType("M.CallsRelation", throwOnError: true)!;
+        var refsT  = asm.GetType("M.ReferencesRelation", throwOnError: true)!;
+        var callsK = asm.GetType("M.Calls", throwOnError: true)!;
+        var refsK  = asm.GetType("M.References", throwOnError: true)!;
+        var codeSymbolId = asm.GetType("M.CodeSymbolId", throwOnError: true)!;
+
+        var src = Activator.CreateInstance(codeSymbolId, "01HZ0000000000000000000001")!;
+        var tgt = Activator.CreateInstance(codeSymbolId, "01HZ0000000000000000000002")!;
+
+        var actionT = typeof(Action<>).MakeGenericType(shared);
+        var sourceProp = shared.GetProperty("Source")!;
+        var targetProp = shared.GetProperty("Target")!;
+        var confidenceProp = shared.GetProperty("Confidence")!;
+
+        Action<object?> init = e =>
+        {
+            sourceProp.SetValue(e, src);
+            targetProp.SetValue(e, tgt);
+            confidenceProp.SetValue(e, "high");
+        };
+        var typedInit = Delegate.CreateDelegate(actionT, init.Target!, init.Method);
+
+        var create = shared.GetMethod("Create", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
+
+        var callsEdge = create.MakeGenericMethod(callsK).Invoke(null, [typedInit])!;
+        Assert.IsType(callsT, callsEdge);
+        Assert.Equal(src, sourceProp.GetValue(callsEdge));
+        Assert.Equal("high", confidenceProp.GetValue(callsEdge));
+
+        var refsEdge = create.MakeGenericMethod(refsK).Invoke(null, [typedInit])!;
+        Assert.IsType(refsT, refsEdge);
+    }
+
+    [Fact]
+    public void SharedShape_Create_ThrowsForUnregisteredKind()
+    {
+        // Calling Create<TKind> with a kind whose variant doesn't implement the
+        // shared interface must fail loudly — the generated dispatch's final else
+        // branch throws ArgumentException with a clear message.
+        var source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+
+            namespace M {
+                public sealed class CallsAttribute : ForwardRelation;
+                public sealed class FooAttribute   : ForwardRelation;
+
+                [Table, AggregateRoot]
+                public partial class CodeSymbol {
+                    [Id]       public partial CodeSymbolId Id { get; set; }
+                    [Property] public partial string Fqn { get; set; }
+                }
+
+                public partial interface ICodeSymbolEdge : IRelationVariant {
+                    CodeSymbolId Source { get; set; }
+                    CodeSymbolId Target { get; set; }
+                }
+
+                [Calls]
+                public partial class CallsRelation : ICodeSymbolEdge {
+                    [In]  public partial CodeSymbolId Source { get; set; }
+                    [Out] public partial CodeSymbolId Target { get; set; }
+                }
+
+                // Standalone variant of an unrelated kind — does NOT implement ICodeSymbolEdge,
+                // so passing Foo to Create<TKind> hits the else-arm throw.
+                [Foo]
+                public partial class StandaloneRelation {
+                    [In]  public partial CodeSymbolId Source { get; set; }
+                    [Out] public partial CodeSymbolId Target { get; set; }
+                }
+
+                [CompositionRoot] public partial class Workspace { }
+            }
+            """;
+        var asm = GeneratorHarness.CompileAndLoad(source);
+
+        var shared = asm.GetType("M.ICodeSymbolEdge", throwOnError: true)!;
+        var fooK   = asm.GetType("M.Foo", throwOnError: true)!;
+
+        var actionT = typeof(Action<>).MakeGenericType(shared);
+        var noop = Delegate.CreateDelegate(actionT, ((Action<object?>)(_ => { })).Target!, ((Action<object?>)(_ => { })).Method);
+
+        var create = shared.GetMethod("Create", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
+        var ex = Assert.Throws<System.Reflection.TargetInvocationException>(
+            () => create.MakeGenericMethod(fooK).Invoke(null, [noop]));
+        Assert.IsType<ArgumentException>(ex.InnerException);
+    }
+
+    [Fact]
+    public void SharedShape_NonPartialInterface_FiresCG033()
+    {
+        // Without `partial`, the generator can't graft the static factory fragment;
+        // emission is skipped and CG033 surfaces the contract requirement.
+        var source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+
+            public sealed class CallsAttribute : ForwardRelation;
+
+            [Table, AggregateRoot] public partial class A { [Id] public partial AId Id { get; set; } }
+
+            public interface IBareContract : IRelationVariant {
+                AId Source { get; set; }
+                AId Target { get; set; }
+            }
+
+            [Calls] public partial class CallsRelation : IBareContract {
+                [In]  public partial AId Source { get; set; }
+                [Out] public partial AId Target { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (_, _, runDiags, _) = GeneratorHarness.Run(source);
+        Assert.Contains(runDiags, d => d.Id == "CG033");
+    }
+
+    [Fact]
+    public void SharedShape_NoImplementingVariants_FiresCG035()
+    {
+        // A partial interface deriving from IRelationVariant with no implementing
+        // variant is dead. Warning, not error — the interface still resolves as a
+        // type and could be filled in later.
+        var source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+
+            public partial interface IDeadContract : IRelationVariant { }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (_, _, runDiags, _) = GeneratorHarness.Run(source);
+        Assert.Contains(runDiags, d => d.Id == "CG035");
+    }
+
     [Fact]
     public void UnionEndpoint_DeadUnion_FiresCG032AsWarning()
     {

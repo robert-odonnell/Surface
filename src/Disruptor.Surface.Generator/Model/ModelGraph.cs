@@ -18,6 +18,7 @@ public sealed record ModelGraph(
     EquatableArray<RelationVariantModel> RelationVariants,
     EquatableArray<RelationUnion> Unions,
     EquatableArray<UnionEndpointModel> UnionEndpoints,
+    EquatableArray<SharedShapeModel> SharedShapes,
     EquatableArray<AggregateModel> Aggregates,
     EquatableArray<string> AggregateConflicts,
     EquatableArray<string> CascadeCycles,
