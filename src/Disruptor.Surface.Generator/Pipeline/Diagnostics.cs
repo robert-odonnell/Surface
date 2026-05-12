@@ -181,4 +181,20 @@ internal static class Diagnostics
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor UnionEndpointKindMismatch = new(
+        id: "CG031",
+        title: "Union endpoint is pinned to a different relation kind than the variant declares",
+        messageFormat: "Variant '{0}' carries [{1}] but its [{2}] endpoint property is typed to union interface '{3}' which is pinned to kind '{4}'; the union's In<TKind> / Out<TKind> base parameter must match the variant's kind",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor DeadUnionEndpoint = new(
+        id: "CG032",
+        title: "Union endpoint interface has no member tables",
+        messageFormat: "Union endpoint interface '{0}' is attributed for kind '{1}' but no per-table marker (partial interface I{{Name}}RecordId : {0}) enrols any [Table] in the union; the union is unreachable",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
 }

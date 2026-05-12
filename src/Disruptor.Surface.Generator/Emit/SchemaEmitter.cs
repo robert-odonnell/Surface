@@ -553,10 +553,34 @@ internal static class SchemaEmitter
         // in the FROM / TO list.
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var result = new List<TableModel>();
+        var tablesByFullName = graph.BuildTableIndex();
 
         foreach (var variant in variantsForKind)
         {
             var endpoint = takeIn ? variant.In : variant.Out;
+
+            // Union endpoint: every participating member table contributes to FROM/TO
+            // so a single variant covers all union members at the schema level. The
+            // edge table's TYPE RELATION clause needs the full set so the substrate
+            // accepts an INSERT RELATION from any participating source/target.
+            var unionInterfaceFqn = StripGlobalAndNullable(endpoint.Type.FullyQualifiedName);
+            var union = graph.FindUnionEndpoint(unionInterfaceFqn);
+            if (union is not null)
+            {
+                foreach (var memberFqn in union.MemberTableFullNames)
+                {
+                    if (!tablesByFullName.TryGetValue(memberFqn, out var memberTable))
+                    {
+                        continue;
+                    }
+                    if (seen.Add(memberTable.FullName))
+                    {
+                        result.Add(memberTable);
+                    }
+                }
+                continue;
+            }
+
             var resolved = ResolveEndpointTable(graph, endpoint.Type);
             if (resolved is null)
             {
@@ -579,6 +603,19 @@ internal static class SchemaEmitter
 
         result.Sort((a, b) => StringComparer.Ordinal.Compare(a.Name, b.Name));
         return result;
+    }
+
+    private static string StripGlobalAndNullable(string fqn)
+    {
+        if (fqn.StartsWith("global::", StringComparison.Ordinal))
+        {
+            fqn = fqn["global::".Length..];
+        }
+        if (fqn.EndsWith("?", StringComparison.Ordinal))
+        {
+            fqn = fqn[..^1];
+        }
+        return fqn;
     }
 
     /// <summary>

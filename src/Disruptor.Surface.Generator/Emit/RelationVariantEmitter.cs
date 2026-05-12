@@ -39,6 +39,12 @@ internal static class RelationVariantEmitter
         // user code the extractor sees as proper INamedTypeSymbols.
         var typedIdNamespaces = BuildTypedIdNamespaceLookup(graph);
 
+        // Union-endpoint lookup keyed by the union interface's FQN (without global:: prefix
+        // or trailing ?). Each variant property's declared FQN is checked against this map
+        // to decide whether [In]/[Out] is a record-type-union endpoint vs an entity-typed
+        // or typed-id-typed endpoint.
+        var unionLookup = BuildUnionEndpointLookup(graph);
+
         // Group variants by their kind attribute FQN (e.g. all [Restricts] variants
         // together). Per-kind sidecars (variant marker interface, hydration dispatcher)
         // emit once per kind.
@@ -78,7 +84,15 @@ internal static class RelationVariantEmitter
                     continue;
                 }
 
-                EmitVariant(spc, variant, forward, variants.Count, typedIdNamespaces);
+                // CG031 — union endpoint's TKind binding must match the variant's kind.
+                // The check is per-endpoint: each [In]/[Out] property typed to a union
+                // interface carries an implicit kind via the In<TKind>/Out<TKind> base
+                // its attribute derived from. A mismatch here means the user attached
+                // (e.g.) [Foo] : Out<RestrictsAttribute> to a variant marked [Validates].
+                ReportUnionKindMismatch(spc, variant, "In", variant.In, forward, unionLookup);
+                ReportUnionKindMismatch(spc, variant, "Out", variant.Out, forward, unionLookup);
+
+                EmitVariant(spc, variant, forward, variants.Count, typedIdNamespaces, unionLookup, graph);
             }
 
             // Per-kind variant marker interface — only for multi-variant kinds. Single-
@@ -88,8 +102,113 @@ internal static class RelationVariantEmitter
                 EmitVariantMarkerInterface(spc, forward);
             }
 
-            EmitHydrationDispatcher(spc, forward, variants);
+            EmitHydrationDispatcher(spc, forward, variants, unionLookup, graph);
         }
+    }
+
+    /// <summary>
+    /// CG031 — reports a <see cref="Diagnostics.UnionEndpointKindMismatch"/> when an
+    /// endpoint property is typed to a union whose <see cref="UnionEndpointModel.KindFullName"/>
+    /// doesn't equal the variant's forward kind. The union's kind is captured at extraction
+    /// from the <c>In&lt;TKind&gt;</c> / <c>Out&lt;TKind&gt;</c> generic base of the user's
+    /// attribute; the variant's forward kind is whichever <c>RelationAttribute</c>-derived
+    /// attribute is applied to the class (walked to its forward partner when the inverse
+    /// is what's on the class). A mismatch makes the resulting schema and runtime
+    /// semantically inconsistent: the variant lives on one edge table but the union promises
+    /// a different one.
+    /// </summary>
+    private static void ReportUnionKindMismatch(
+        SourceProductionContext spc,
+        RelationVariantModel variant,
+        string role,
+        RelationVariantPropertyModel endpoint,
+        RelationKindModel forward,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
+    {
+        var union = ResolveUnionEndpoint(endpoint, unionLookup);
+        if (union is null)
+        {
+            return;
+        }
+
+        if (string.Equals(union.KindFullName, forward.FullName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        spc.ReportDiagnostic(Diagnostic.Create(
+            Diagnostics.UnionEndpointKindMismatch,
+            Location.None,
+            variant.FullName,
+            SurrealNaming.StripAttributeSuffix(forward.Name),
+            role,
+            union.InterfaceFullName,
+            union.KindFullName));
+    }
+
+    /// <summary>
+    /// Builds an FQN → <see cref="UnionEndpointModel"/> lookup keyed by interface full name
+    /// (no <c>global::</c> prefix, no trailing <c>?</c>). Empty when the compilation declares
+    /// no record-type-union endpoint interfaces — the existing entity / typed-id code paths
+    /// cover every variant in that case.
+    /// </summary>
+    private static Dictionary<string, UnionEndpointModel> BuildUnionEndpointLookup(ModelGraph graph)
+    {
+        var lookup = new Dictionary<string, UnionEndpointModel>(StringComparer.Ordinal);
+        foreach (var union in graph.UnionEndpoints)
+        {
+            lookup[union.InterfaceFullName] = union;
+        }
+        return lookup;
+    }
+
+    /// <summary>
+    /// Maps a variant endpoint property to the union it points at, or null when the
+    /// declared type isn't a known union interface. Strips <c>global::</c> + <c>?</c> from
+    /// the FQN before consulting <paramref name="unionLookup"/>; the lookup keys are
+    /// raw FQNs as <see cref="TableExtractor.NormaliseFullName"/> produces them.
+    /// </summary>
+    private static UnionEndpointModel? ResolveUnionEndpoint(
+        RelationVariantPropertyModel p,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
+    {
+        if (unionLookup.Count == 0)
+        {
+            return null;
+        }
+
+        var fqn = StripNullable(p.Type.FullyQualifiedName);
+        if (fqn.StartsWith("global::", StringComparison.Ordinal))
+        {
+            fqn = fqn["global::".Length..];
+        }
+        return unionLookup.TryGetValue(fqn, out var union) ? union : null;
+    }
+
+    /// <summary>
+    /// Resolves union member tables into the (snake_case table name, fully-qualified
+    /// <c>{Name}Id</c> type) pairs the emitter needs for hydrate-switches and
+    /// dispatcher-table enumeration. Skips members whose table FQN is missing from the
+    /// table index (defensive — the linker normally wouldn't emit one).
+    /// </summary>
+    private static List<(string TableName, string TypedIdFqn)> BuildUnionMembers(
+        UnionEndpointModel union,
+        IReadOnlyDictionary<string, TableModel> tablesByFullName)
+    {
+        var result = new List<(string, string)>();
+        foreach (var memberFqn in union.MemberTableFullNames)
+        {
+            if (!tablesByFullName.TryGetValue(memberFqn, out var table))
+            {
+                continue;
+            }
+
+            var idFqn = string.IsNullOrEmpty(table.Namespace)
+                ? $"global::{table.Name}Id"
+                : $"global::{table.Namespace}.{table.Name}Id";
+            result.Add((SurrealNaming.ToTableName(table.Name), idFqn));
+        }
+        return result;
     }
 
     /// <summary>
@@ -158,7 +277,9 @@ internal static class RelationVariantEmitter
         RelationVariantModel variant,
         RelationKindModel forward,
         int totalVariantsInKind,
-        IReadOnlyDictionary<string, string> typedIdNamespaces)
+        IReadOnlyDictionary<string, string> typedIdNamespaces,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup,
+        ModelGraph graph)
     {
         var markerName = SurrealNaming.StripAttributeSuffix(forward.Name);
         var idTypeFqn = ResolveKindIdFqn(forward, markerName);
@@ -195,8 +316,8 @@ internal static class RelationVariantEmitter
 
                 // Endpoint + payload properties — backing fields + property bodies. [In] / [Out]
                 // are required endpoints (one each); [Property] members carry the typed payload.
-                EmitEndpointProperty(writer, variant.In, typedIdNamespaces);
-                EmitEndpointProperty(writer, variant.Out, typedIdNamespaces);
+                EmitEndpointProperty(writer, variant.In, typedIdNamespaces, unionLookup);
+                EmitEndpointProperty(writer, variant.Out, typedIdNamespaces, unionLookup);
 
                 foreach (var p in variant.PayloadProperties)
                 {
@@ -206,7 +327,7 @@ internal static class RelationVariantEmitter
                 // Hydrate — parses the loaded edge row (id / in / out / payload fields) into
                 // backing fields. Per-variant Hydrate doesn't discriminate; the per-kind dispatcher
                 // picks the right variant class first based on (in.tb, out.tb).
-                EmitHydrate(writer, variant, idTypeFqn, typedIdNamespaces);
+                EmitHydrate(writer, variant, idTypeFqn, typedIdNamespaces, unionLookup, graph);
 
                 // EnumerateReferences — yields ("in", inId) and ("out", outId). Variants don't
                 // need IReferenceRegistry registration: the substrate's TYPE RELATION ENFORCED
@@ -215,17 +336,17 @@ internal static class RelationVariantEmitter
                 // existing endpoint walk. SurrealSession.MarkSaved + CleanupLocalState use this
                 // method (via the IRelationVariant marker) to mirror the variant's own edge
                 // tuple in/out of the read-side index.
-                EmitEnumerateReferences(writer, variant);
+                EmitEnumerateReferences(writer, variant, unionLookup);
 
                 // SetReferenceTo — only meaningful for nullable [In] / [Out] (rare; non-nullable
                 // endpoints can't be unset). When no endpoint is nullable, the body stays
                 // empty (no switch is opened) since required endpoints never enter Unset.
-                EmitSetReferenceTo(writer, variant);
+                EmitSetReferenceTo(writer, variant, unionLookup);
 
                 // SaveAsync — dispatches INSERT RELATION INTO {edge} $_content [ON DUPLICATE KEY
                 // UPDATE …] against the user's transaction. Forward-deps walk for entity-typed
-                // endpoints; pure pass-through for typed-id endpoints.
-                EmitSaveAsync(writer, variant, forward);
+                // endpoints; pure pass-through for typed-id and union endpoints (id-only).
+                EmitSaveAsync(writer, variant, forward, unionLookup);
 
                 // Initialize / OnDeleting / MarkAllSlicesLoaded — IEntity contract completion.
                 // Variants have no mandatory-reference seeding (endpoints are required at
@@ -264,7 +385,8 @@ internal static class RelationVariantEmitter
     /// </summary>
     private static void EmitEndpointProperty(
         CodeWriter writer, RelationVariantPropertyModel p,
-        IReadOnlyDictionary<string, string> typedIdNamespaces)
+        IReadOnlyDictionary<string, string> typedIdNamespaces,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
     {
         // For typed-id endpoints (cross-aggregate), the extractor's snapshot of the user's
         // signature came back as a bare error-type name (`ReviewId`) because Roslyn
@@ -274,10 +396,41 @@ internal static class RelationVariantEmitter
         // passes because the user's bare-name decl resolves to the SAME type symbol at
         // body-compile time. Entity-typed endpoints already arrive fully qualified.
         var declared = ResolveEndpointTypeFqn(p.Type.FullyQualifiedName, typedIdNamespaces);
-        var typeArg = StripNullable(declared);
         var access = FormatAccessibility(p.DeclaredAccessibility);
         var nullable = p.Type.IsNullable;
         var backing = $"_{ToCamel(p.Name)}";
+        var union = ResolveUnionEndpoint(p, unionLookup);
+
+        if (union is not null)
+        {
+            // Union endpoint (multi-table id-only): backing field is the union interface,
+            // pure pass-through getter / setter. Hydrate switches on the loaded row's
+            // table to construct the matching {Name}Id and stores it through the interface
+            // — the union extends IRecordId so the field accepts any participating typed
+            // id. No Session interaction, no entity ref cache — symmetric with the
+            // typed-id endpoint shape modulo the type being an interface, not a struct.
+            writer.Line("#pragma warning disable CS0649");
+            writer.Line(nullable
+                ? $"private {declared} {backing};"
+                : $"private {declared} {backing} = default!;");
+            writer.Line("#pragma warning restore CS0649");
+
+            if (!p.HasSetter && !p.HasInitOnlySetter)
+            {
+                writer.Line($"{access} partial {declared} {p.Name} => {backing};");
+                return;
+            }
+
+            writer.Line($"{access} partial {declared} {p.Name}");
+            using (writer.BracedBlock())
+            {
+                writer.Line($"get => {backing};");
+                writer.Line($"{(p.HasInitOnlySetter ? "init" : "set")} => {backing} = value;");
+            }
+            return;
+        }
+
+        var typeArg = StripNullable(declared);
 
         if (p.Type.IsTableType)
         {
@@ -353,7 +506,9 @@ internal static class RelationVariantEmitter
     /// </summary>
     private static void EmitHydrate(
         CodeWriter writer, RelationVariantModel variant, string idTypeFqn,
-        IReadOnlyDictionary<string, string> typedIdNamespaces)
+        IReadOnlyDictionary<string, string> typedIdNamespaces,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup,
+        ModelGraph graph)
     {
         using (writer.Block($"void {Namespaces.EntityInterface}.Hydrate(global::Disruptor.Surreal.Values.SurrealValue row, {Namespaces.HydrationSinkType} sink)"))
         {
@@ -367,9 +522,11 @@ internal static class RelationVariantEmitter
 
             // [In] / [Out] endpoints: the edge row's "in" / "out" fields carry the endpoint
             // ids. Entity-typed endpoints set the cached id backing field (resolved via
-            // Session.Get on read); typed-id endpoints wrap into the typed id struct.
-            EmitHydrateEndpoint(writer, variant.In, fieldName: "in", typedIdNamespaces);
-            EmitHydrateEndpoint(writer, variant.Out, fieldName: "out", typedIdNamespaces);
+            // Session.Get on read); typed-id endpoints wrap into the typed id struct;
+            // union endpoints switch on the loaded row's table.
+            var tablesByFullName = graph.BuildTableIndex();
+            EmitHydrateEndpoint(writer, variant.In, fieldName: "in", typedIdNamespaces, unionLookup, tablesByFullName);
+            EmitHydrateEndpoint(writer, variant.Out, fieldName: "out", typedIdNamespaces, unionLookup, tablesByFullName);
 
             // [Property] payload members: same scalar-read shape as PartialEmitter.
             foreach (var p in variant.PayloadProperties)
@@ -381,10 +538,44 @@ internal static class RelationVariantEmitter
 
     private static void EmitHydrateEndpoint(
         CodeWriter writer, RelationVariantPropertyModel p, string fieldName,
-        IReadOnlyDictionary<string, string> typedIdNamespaces)
+        IReadOnlyDictionary<string, string> typedIdNamespaces,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup,
+        IReadOnlyDictionary<string, TableModel> tablesByFullName)
     {
         var backing = $"_{ToCamel(p.Name)}";
         var fieldLit = Quote(fieldName);
+        var union = ResolveUnionEndpoint(p, unionLookup);
+
+        if (union is not null)
+        {
+            // Union endpoint: read the endpoint id, then dispatch on its table to
+            // construct the participating {Name}Id and store it through the union
+            // interface. Unknown tables fail fast — the substrate's TYPE RELATION
+            // ENFORCED ... FROM/TO clause guarantees this won't fire for properly
+            // schema'd data, but defensive throw beats silently nulling the field.
+            var members = BuildUnionMembers(union, tablesByFullName);
+            var unionFqn = StripNullable(p.Type.FullyQualifiedName);
+            using (writer.BracedBlock())
+            {
+                writer.Line($"if (__obj.Object.TryGetValue({fieldLit}, out var __ev))");
+                using (writer.BracedBlock())
+                {
+                    writer.Line("var __rid = global::Disruptor.Surface.Runtime.HydrationValue.ReadRecordId(__ev);");
+                    writer.Line($"{backing} = __rid.Table switch");
+                    writer.Line("{");
+                    using (writer.Indent())
+                    {
+                        foreach (var (tableName, idFqn) in members)
+                        {
+                            writer.Line($"{Quote(tableName)} => ({unionFqn})new {idFqn}(__rid.Value),");
+                        }
+                        writer.Line($"_ => throw new global::System.InvalidOperationException($\"Unknown table '{{__rid.Table}}' for union endpoint '{p.Name}'.\"),");
+                    }
+                    writer.Line("};");
+                }
+            }
+            return;
+        }
 
         if (p.Type.IsTableType)
         {
@@ -451,18 +642,36 @@ internal static class RelationVariantEmitter
     /// own <c>(in, edge, out)</c> tuple in and out of the read-side edge index.
     /// </para>
     /// </summary>
-    private static void EmitEnumerateReferences(CodeWriter writer, RelationVariantModel variant)
+    private static void EmitEnumerateReferences(
+        CodeWriter writer, RelationVariantModel variant,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
     {
         using (writer.Block($"global::System.Collections.Generic.IEnumerable<(string FieldName, global::Disruptor.Surface.Runtime.RecordId? Target)> {Namespaces.EntityInterface}.EnumerateReferences()"))
         {
-            EmitEnumerateReferenceEntry(writer, variant.In, fieldName: "in");
-            EmitEnumerateReferenceEntry(writer, variant.Out, fieldName: "out");
+            EmitEnumerateReferenceEntry(writer, variant.In, fieldName: "in", unionLookup);
+            EmitEnumerateReferenceEntry(writer, variant.Out, fieldName: "out", unionLookup);
         }
     }
 
-    private static void EmitEnumerateReferenceEntry(CodeWriter writer, RelationVariantPropertyModel p, string fieldName)
+    private static void EmitEnumerateReferenceEntry(
+        CodeWriter writer, RelationVariantPropertyModel p, string fieldName,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
     {
         var fieldLit = Quote(fieldName);
+        var union = ResolveUnionEndpoint(p, unionLookup);
+        if (union is not null)
+        {
+            // Union endpoint: backing field is the union interface (extends IRecordId).
+            // No implicit operator to RecordId on an interface, so collapse via the
+            // explicit RecordId.From(IRecordId) helper. Mandatory unions guard for an
+            // unset (null) backing field with a `is { } v` check — EnumerateReferences
+            // is called on hydrated/saved variants in practice, but defensive yields
+            // (null, null) keep the iteration shape stable.
+            var backing = $"_{ToCamel(p.Name)}";
+            writer.Line($"yield return ({fieldLit}, {backing} is {{ }} __v_{ToCamel(p.Name)} ? global::Disruptor.Surface.Runtime.RecordId.From(__v_{ToCamel(p.Name)}) : (global::Disruptor.Surface.Runtime.RecordId?)null);");
+            return;
+        }
+
         if (p.Type.IsTableType)
         {
             // Entity-typed: the cached id backing field is already RecordId?.
@@ -487,7 +696,9 @@ internal static class RelationVariantEmitter
     /// are non-nullable the method body stays empty (no switch is opened) — required
     /// edge endpoints can't be unset, and an empty switch would trip CS1522.
     /// </summary>
-    private static void EmitSetReferenceTo(CodeWriter writer, RelationVariantModel variant)
+    private static void EmitSetReferenceTo(
+        CodeWriter writer, RelationVariantModel variant,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
     {
         var hasNullableEndpoint = variant.In.Type.IsNullable || variant.Out.Type.IsNullable;
 
@@ -500,13 +711,15 @@ internal static class RelationVariantEmitter
 
             using (writer.Switch("fieldName"))
             {
-                EmitSetReferenceCase(writer, variant.In, fieldName: "in");
-                EmitSetReferenceCase(writer, variant.Out, fieldName: "out");
+                EmitSetReferenceCase(writer, variant.In, fieldName: "in", unionLookup);
+                EmitSetReferenceCase(writer, variant.Out, fieldName: "out", unionLookup);
             }
         }
     }
 
-    private static void EmitSetReferenceCase(CodeWriter writer, RelationVariantPropertyModel p, string fieldName)
+    private static void EmitSetReferenceCase(
+        CodeWriter writer, RelationVariantPropertyModel p, string fieldName,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
     {
         if (!p.Type.IsNullable)
         {
@@ -516,6 +729,20 @@ internal static class RelationVariantEmitter
         }
 
         var fieldLit = Quote(fieldName);
+        var union = ResolveUnionEndpoint(p, unionLookup);
+        if (union is not null)
+        {
+            // Union endpoint: clear the single union-interface backing field. Mirrors
+            // the typed-id branch — neither carries an entity-ref cache to invalidate.
+            var backing = $"_{ToCamel(p.Name)}";
+            using (writer.Case(fieldLit))
+            {
+                writer.Line($"{backing} = null;");
+                writer.Line("break;");
+            }
+            return;
+        }
+
         if (p.Type.IsTableType)
         {
             var idBacking = $"_{ToCamel(p.Name)}Id";
@@ -551,7 +778,9 @@ internal static class RelationVariantEmitter
     ///         first-call wins on duplicate (substrate-native idempotence).</item>
     /// </list>
     /// </summary>
-    private static void EmitSaveAsync(CodeWriter writer, RelationVariantModel variant, RelationKindModel forward)
+    private static void EmitSaveAsync(
+        CodeWriter writer, RelationVariantModel variant, RelationKindModel forward,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
     {
         var edgeName = SurrealNaming.ToEdgeName(forward.Name);
         var hasPayload = variant.PayloadProperties.Count > 0;
@@ -559,15 +788,20 @@ internal static class RelationVariantEmitter
         using (writer.Block($"async global::System.Threading.Tasks.Task {Namespaces.EntityInterface}.SaveAsync(global::Disruptor.Surface.Runtime.ISaveContext ctx, global::System.Threading.CancellationToken ct)"))
         {
             writer.Line("var __id = ((global::Disruptor.Surface.Runtime.IEntity)this).Id;");
-            
+
             // Forward-dep walk: entity-typed endpoints whose ref is set but not yet tracked
             // recurse so the endpoint row exists in the substrate before we INSERT RELATION
             // (the foreign key from the edge to the endpoint is checked at write time).
-            // Typed-id endpoints skip this — caller is expected to have created the foreign
-            // entity in a separate session/aggregate.
+            // Typed-id endpoints and union endpoints skip this — caller is expected to
+            // have created the foreign entity in a separate session/aggregate (the union
+            // case is foreign by construction since the type isn't a specific entity).
             foreach (var endpoint in new[] { variant.In, variant.Out })
             {
                 if (!endpoint.Type.IsTableType)
+                {
+                    continue;
+                }
+                if (ResolveUnionEndpoint(endpoint, unionLookup) is not null)
                 {
                     continue;
                 }
@@ -578,9 +812,9 @@ internal static class RelationVariantEmitter
                     writer.Line($"await ctx.SaveAsync({backing}, ct);");
                 }
             }
-            
-            var inEndpointId = EmitEndpointIdResolution(writer, variant.In);
-            var outEndpointId = EmitEndpointIdResolution(writer, variant.Out);
+
+            var inEndpointId = EmitEndpointIdResolution(writer, variant.In, unionLookup);
+            var outEndpointId = EmitEndpointIdResolution(writer, variant.Out, unionLookup);
 
             // Build the wire content: id + in + out + payload fields.
             writer.Line("var __content = new global::Disruptor.Surreal.Values.SurrealObject");
@@ -588,8 +822,8 @@ internal static class RelationVariantEmitter
             using (writer.Indent())
             {
                 writer.Line("[\"id\"] = new global::Disruptor.Surreal.Values.SurrealRecordIdValue(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk(__id)),");
-                EmitContentEndpoint(writer, variant.In, "in", inEndpointId);
-                EmitContentEndpoint(writer, variant.Out, "out", outEndpointId);
+                EmitContentEndpoint(writer, variant.In, "in", inEndpointId, unionLookup);
+                EmitContentEndpoint(writer, variant.Out, "out", outEndpointId, unionLookup);
             }
             writer.Line("};");
 
@@ -666,8 +900,22 @@ internal static class RelationVariantEmitter
         writer.Line($"void {Namespaces.EntityInterface}.MarkAllSlicesLoaded({Namespaces.HydrationSinkType} sink) {{ }}");
     }
 
-    private static string? EmitEndpointIdResolution(CodeWriter writer, RelationVariantPropertyModel p)
+    private static string? EmitEndpointIdResolution(
+        CodeWriter writer, RelationVariantPropertyModel p,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
     {
+        // Union endpoint: resolve the stored interface (which IS an IRecordId) into a
+        // local so the content-build site can ToSdk it without re-evaluating the
+        // null-guard. Mirrors the entity-typed branch — typed-id endpoints take the
+        // backing field directly via implicit-operator (no local needed).
+        if (ResolveUnionEndpoint(p, unionLookup) is not null)
+        {
+            var unionBacking = $"_{ToCamel(p.Name)}";
+            var unionLocal = $"__{ToCamel(p.Name)}Id";
+            writer.Line($"var {unionLocal} = {unionBacking} ?? throw new global::System.InvalidOperationException(\"Endpoint '{p.Name}' is not set.\");");
+            return unionLocal;
+        }
+
         if (!p.Type.IsTableType)
         {
             return null;
@@ -683,9 +931,19 @@ internal static class RelationVariantEmitter
         return idLocal;
     }
 
-    private static void EmitContentEndpoint(CodeWriter writer, RelationVariantPropertyModel p, string fieldName, string? resolvedEndpointId)
+    private static void EmitContentEndpoint(
+        CodeWriter writer, RelationVariantPropertyModel p, string fieldName, string? resolvedEndpointId,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
     {
         var fieldLit = Quote(fieldName);
+        if (ResolveUnionEndpoint(p, unionLookup) is not null)
+        {
+            // Union endpoint: the local resolved above is the union interface, which
+            // already implements IRecordId — pass straight through to the SDK bridge.
+            writer.Line($"[{fieldLit}] = new global::Disruptor.Surreal.Values.SurrealRecordIdValue(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk({resolvedEndpointId})),");
+            return;
+        }
+
         if (p.Type.IsTableType)
         {
             // Entity-typed endpoints were resolved into explicit locals above so a
@@ -805,18 +1063,27 @@ internal static class RelationVariantEmitter
     private static void EmitHydrationDispatcher(
         SourceProductionContext spc,
         RelationKindModel forward,
-        IReadOnlyList<RelationVariantModel> variants)
+        IReadOnlyList<RelationVariantModel> variants,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup,
+        ModelGraph graph)
     {
-        // Resolve each variant's (in-table, out-table) pair. Entity-typed endpoints use
-        // the entity type's pluralised table name; typed-id endpoints strip the trailing
-        // "Id" off the simple type name and pluralise.
+        // Resolve each variant's set of (in-table, out-table) pairs. Entity-typed and
+        // typed-id endpoints contribute a single table name; union endpoints contribute
+        // every participating member table, expanding into a Cartesian product of
+        // (in × out) when both sides are unions.
+        var tablesByFullName = graph.BuildTableIndex();
         var pairs = new List<(string InTable, string OutTable, RelationVariantModel Variant)>();
         foreach (var variant in variants)
         {
-            pairs.Add((
-                ResolveEndpointTableName(variant.In),
-                ResolveEndpointTableName(variant.Out),
-                variant));
+            var inTables = ResolveEndpointTableNames(variant.In, unionLookup, tablesByFullName);
+            var outTables = ResolveEndpointTableNames(variant.Out, unionLookup, tablesByFullName);
+            foreach (var inTable in inTables)
+            {
+                foreach (var outTable in outTables)
+                {
+                    pairs.Add((inTable, outTable, variant));
+                }
+            }
         }
 
         // Pair-collision detection — two variants with the same (in.tb, out.tb) would
@@ -894,5 +1161,31 @@ internal static class RelationVariantEmitter
             simple = simple[..^"Id".Length];
         }
         return SurrealNaming.ToTableName(simple);
+    }
+
+    /// <summary>
+    /// Resolves the set of SurrealDB table names an endpoint accepts. Entity-typed and
+    /// typed-id endpoints contribute a single table name (delegating to
+    /// <see cref="ResolveEndpointTableName"/>); union endpoints contribute every
+    /// participating member's table name, deduped + sorted for stable emission.
+    /// </summary>
+    private static List<string> ResolveEndpointTableNames(
+        RelationVariantPropertyModel p,
+        IReadOnlyDictionary<string, UnionEndpointModel> unionLookup,
+        IReadOnlyDictionary<string, TableModel> tablesByFullName)
+    {
+        var union = ResolveUnionEndpoint(p, unionLookup);
+        if (union is null)
+        {
+            return [ResolveEndpointTableName(p)];
+        }
+
+        var members = BuildUnionMembers(union, tablesByFullName);
+        var names = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var (tableName, _) in members)
+        {
+            names.Add(tableName);
+        }
+        return names.ToList();
     }
 }

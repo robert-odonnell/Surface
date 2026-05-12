@@ -1514,4 +1514,183 @@ public sealed class EmissionShapeTests
         // Dispatcher is suppressed when the collision fires.
         Assert.Null(GeneratorHarness.FindGeneratedFile(result, "RestrictsHydration.g.cs"));
     }
+
+    // ─────────────────── union endpoints (preview.54 Phase 3-5) ────────────────────
+
+    private const string UnionEndpointModel = """
+        using Disruptor.Surface.Annotations;
+        using Disruptor.Surface.Runtime;
+        namespace M;
+
+        public sealed class TagsAttribute : ForwardRelation;
+        public sealed class TagsTargetAttribute : Out<TagsAttribute>;
+
+        [TagsTarget] public partial interface ITagsTarget : IRecordId;
+
+        [Table] public partial class A { [Id] public partial AId Id { get; set; } }
+        [Table] public partial class B { [Id] public partial BId Id { get; set; } }
+        [Table] public partial class C { [Id] public partial CId Id { get; set; } }
+
+        public partial interface IARecordId : ITagsTarget;
+        public partial interface IBRecordId : ITagsTarget;
+
+        [Tags] public partial class TagsVariant {
+            [In]  public partial AId Source { get; set; }
+            [Out] public partial ITagsTarget Target { get; set; }
+        }
+
+        [CompositionRoot] public partial class Workspace { }
+        """;
+
+    [Fact]
+    public void UnionEndpoint_EmitsInterfaceTypedBackingField()
+    {
+        // The variant's [Out] property is typed to the union interface; the backing
+        // field follows suit (no cached entity ref, no separate id backing).
+        var (result, _, _, _) = GeneratorHarness.Run(UnionEndpointModel);
+        var variant = GeneratorHarness.FindGeneratedFile(result, "TagsVariant.RelationVariant.g.cs");
+        Assert.NotNull(variant);
+        var src = variant.ToString();
+
+        Assert.Contains("private global::M.ITagsTarget _target = default!;", src);
+        Assert.Contains("public partial global::M.ITagsTarget Target", src);
+        Assert.Contains("get => _target;", src);
+        Assert.Contains("set => _target = value;", src);
+    }
+
+    [Fact]
+    public void UnionEndpoint_HydrateSwitchesOnTableName_OverEveryMember()
+    {
+        // Hydrate reads the row's "out" id and switches on the loaded table name to
+        // construct the matching typed id, cast back to the union interface. Default
+        // arm throws so an unexpected table fails fast.
+        var (result, _, _, _) = GeneratorHarness.Run(UnionEndpointModel);
+        var variant = GeneratorHarness.FindGeneratedFile(result, "TagsVariant.RelationVariant.g.cs");
+        Assert.NotNull(variant);
+        var src = variant.ToString();
+
+        Assert.Contains("\"as\" => (global::M.ITagsTarget)new global::M.AId", src);
+        Assert.Contains("\"bs\" => (global::M.ITagsTarget)new global::M.BId", src);
+        Assert.DoesNotContain("\"cs\" =>", src); // C didn't opt in
+        Assert.Contains("Unknown table", src);
+    }
+
+    [Fact]
+    public void UnionEndpoint_EnumerateReferences_UsesRecordIdFromHelper()
+    {
+        // IRecordId has no implicit operator to RecordId, so the union case routes
+        // through RecordId.From(IRecordId). Mandatory unions are guarded with `is { } v`.
+        var (result, _, _, _) = GeneratorHarness.Run(UnionEndpointModel);
+        var variant = GeneratorHarness.FindGeneratedFile(result, "TagsVariant.RelationVariant.g.cs");
+        Assert.NotNull(variant);
+        var src = variant.ToString();
+
+        Assert.Contains("global::Disruptor.Surface.Runtime.RecordId.From(__v_target)", src);
+    }
+
+    [Fact]
+    public void UnionEndpoint_SaveAsync_SkipsForwardDepWalk()
+    {
+        // Union endpoints are id-only (no concrete entity), so the [In]/[Out] forward-dep
+        // walk doesn't recurse through ctx.SaveAsync for them. The endpoint id is
+        // resolved with a null-throw guard.
+        var (result, _, _, _) = GeneratorHarness.Run(UnionEndpointModel);
+        var variant = GeneratorHarness.FindGeneratedFile(result, "TagsVariant.RelationVariant.g.cs");
+        Assert.NotNull(variant);
+        var src = variant.ToString();
+
+        Assert.Contains("var __targetId = _target ?? throw new global::System.InvalidOperationException", src);
+        // No ctx.SaveAsync(_target, ct) — that's only for table-typed within-aggregate endpoints.
+        Assert.DoesNotContain("await ctx.SaveAsync(_target", src);
+    }
+
+    [Fact]
+    public void UnionEndpoint_HydrationDispatcher_CartesianExpandsUnionMembers()
+    {
+        // The kind-level dispatcher's (in.tb, out.tb) switch enumerates every
+        // (source-table, union-member-table) pair so a row pointing at any
+        // participating table dispatches to the same variant.
+        var (result, _, _, _) = GeneratorHarness.Run(UnionEndpointModel);
+        var dispatcher = GeneratorHarness.FindGeneratedFile(result, "TagsHydration.g.cs");
+        Assert.NotNull(dispatcher);
+        var src = dispatcher.ToString();
+
+        Assert.Contains("(\"as\", \"as\") => new global::M.TagsVariant()", src);
+        Assert.Contains("(\"as\", \"bs\") => new global::M.TagsVariant()", src);
+        Assert.DoesNotContain("\"cs\")", src);
+    }
+
+    [Fact]
+    public void UnionEndpoint_Schema_FromToCoversEveryUnionMember()
+    {
+        // The TYPE RELATION FROM/TO clause includes every union member at the schema
+        // level so the substrate accepts any participating table on the union side.
+        var (result, _, _, _) = GeneratorHarness.Run(UnionEndpointModel);
+        var schema = GeneratorHarness.FindGeneratedFile(result, "Workspace.Schema.g.cs");
+        Assert.NotNull(schema);
+        var src = schema.ToString();
+
+        Assert.Contains("DEFINE TABLE IF NOT EXISTS tags SCHEMAFULL", src);
+        Assert.Contains("FROM as", src);
+        Assert.Contains("TO as|bs", src);
+    }
+
+    [Fact]
+    public void UnionEndpoint_KindMismatch_FiresCG031()
+    {
+        // A union pinned to one kind applied as the endpoint of a variant declaring a
+        // different kind is a schema-vs-runtime inconsistency. The kind mismatch is
+        // visible at codegen via the In<TKind> / Out<TKind> generic argument.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+
+            public sealed class RestrictsAttribute : ForwardRelation;
+            public sealed class ValidatesAttribute : ForwardRelation;
+            public sealed class ForRestrictsAttribute : Out<RestrictsAttribute>;
+
+            [ForRestricts] public partial interface IForRestricts : IRecordId;
+
+            [Table] public partial class A { [Id] public partial AId Id { get; set; } }
+
+            public partial interface IARecordId : IForRestricts;
+
+            // The variant is [Validates] but its [Out] uses an [Out<Restricts>] union — mismatch.
+            [Validates] public partial class Misaligned {
+                [In]  public partial AId Source { get; set; }
+                [Out] public partial IForRestricts Target { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.Contains(runDiags, d => d.Id == "CG031");
+    }
+
+    [Fact]
+    public void UnionEndpoint_DeadUnion_FiresCG032AsWarning()
+    {
+        // A union interface attributed for a kind but with no per-table marker
+        // partial opting any table in is unreachable. Warning, not error — the union
+        // still resolves as a type and won't break compilation.
+        var src = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+
+            public sealed class RestrictsAttribute : ForwardRelation;
+            public sealed class OrphanedAttribute : Out<RestrictsAttribute>;
+
+            [Orphaned] public partial interface IOrphaned : IRecordId;
+
+            [Table] public partial class A { [Id] public partial AId Id { get; set; } }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (_, _, runDiags, _) = GeneratorHarness.Run(src);
+        Assert.Contains(runDiags, d => d.Id == "CG032");
+    }
 }

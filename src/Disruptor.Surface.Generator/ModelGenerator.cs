@@ -186,6 +186,26 @@ public sealed class ModelGenerator : IIncrementalGenerator
             UnionInterfaceEmitter.Emit(spc, union);
         }
 
+        // CG032 — union endpoint interface with zero enrolled tables. The user declared
+        // a union (interface attributed with an In<TKind>/Out<TKind>-derived attribute)
+        // but no [Table] opted in via a `partial interface I{Name}RecordId : IFooTarget`
+        // declaration. Warning (not error) because the union still resolves as a type
+        // and won't break compilation — but variants typing an endpoint to it can never
+        // satisfy a substrate FROM/TO clause.
+        foreach (var unionEndpoint in graph.UnionEndpoints)
+        {
+            if (unionEndpoint.MemberTableFullNames.Count > 0)
+            {
+                continue;
+            }
+
+            spc.ReportDiagnostic(Diagnostic.Create(
+                Diagnostics.DeadUnionEndpoint,
+                Location.None,
+                unionEndpoint.InterfaceFullName,
+                unionEndpoint.KindFullName));
+        }
+
         // CG018 — more than one [CompositionRoot] in the compilation. CG019 — the one
         // that's there isn't partial. Either case skips the emitter (avoids dragging
         // half-broken Load{Root}Async methods into the consumer compilation).
