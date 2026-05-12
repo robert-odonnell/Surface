@@ -2,7 +2,6 @@ using System.Collections.Immutable;
 using Disruptor.Surface.Generator.Annotations;
 using Disruptor.Surface.Generator.Model;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Disruptor.Surface.Generator.Pipeline;
 
@@ -22,7 +21,7 @@ internal static class TableExtractor
 
         ct.ThrowIfCancellationRequested();
 
-        var isPartial = IsDeclaredPartial(type, ct);
+        var isPartial = PartialDeclaration.IsDeclared(type, ct);
         var isAggregateRoot = HasAttribute(type, AnnotationsMetadata.AggregateRoot);
 
         var typeParameters = type.TypeParameters.Select(p => p.Name).ToEquatableArray();
@@ -86,7 +85,7 @@ internal static class TableExtractor
             HasGetter: p.GetMethod is not null,
             HasSetter: p.SetMethod is { IsInitOnly: false },
             HasInitOnlySetter: p.SetMethod is { IsInitOnly: true },
-            IsPartial: IsPartialMember(p),
+            IsPartial: PartialDeclaration.IsMember(p),
             IsStatic: p.IsStatic,
             DeclaredAccessibility: p.DeclaredAccessibility.ToString(),
             InlineMembers: ResolveInlineMembers(p.Type),
@@ -284,44 +283,4 @@ internal static class TableExtractor
         return false;
     }
 
-    private static bool IsDeclaredPartial(INamedTypeSymbol type, CancellationToken ct)
-    {
-        foreach (var r in type.DeclaringSyntaxReferences)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (r.GetSyntax(ct) is not TypeDeclarationSyntax tds)
-            {
-                continue;
-            }
-
-            foreach (var modifier in tds.Modifiers)
-            {
-                if (modifier.ValueText == "partial")
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static bool IsPartialMember(ISymbol member)
-    {
-        foreach (var r in member.DeclaringSyntaxReferences)
-        {
-            if (r.GetSyntax() is not PropertyDeclarationSyntax pds)
-            {
-                continue;
-            }
-            var modifiers = pds.Modifiers;
-            foreach (var modifier in modifiers)
-            {
-                if (modifier.ValueText == "partial")
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
 }

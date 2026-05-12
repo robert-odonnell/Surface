@@ -1,6 +1,10 @@
 # API Reference
 
-This is a user-facing API map for the generated surface and the runtime types most consumers touch.
+This is a reference map for everything Disruptor.Surface puts in front of a consumer: the attributes you'd put on your model, the types the source generator emits, and the runtime types those emitted types call into. It's organised as a lookup, not a tutorial — for a guided tour through hello-world to a working aggregate, read [`intro.md`](intro.md) for the elevator pitch and [`quickstart.md`](quickstart.md) for a step-by-step.
+
+**Mental model in two sentences.** You describe your domain with partial classes and attributes; the generator emits typed ids, hydration / save bodies, a query layer, and SurrealDB schema. At runtime, you connect once via the `Disruptor.Surreal` SDK, apply the generated schema, hand the SDK's `Surreal` (read) or `Transaction` (write) handle to a generated load/query method to get a `SurrealSession`, mutate the entities synchronously, and call `session.SaveAsync(entity, tx)` to dispatch a write — the library never owns a transaction.
+
+The doc is organised top-down: packages → modeling attributes → what gets emitted for each table → composition root → query API → relations → runtime types you'd cite in a signature → diagnostics. Skim the headings; the prose is dense enough that searching for a specific shape (`SaveAsync`, `[Inline]`, `LoadShapeViolationException`, `CG021`) is usually faster than reading linearly.
 
 ## Packages And Namespaces
 
@@ -31,6 +35,12 @@ This is a user-facing API map for the generated surface and the runtime types mo
 | `[In]` | partial property on a relation variant class | Marks the source endpoint of the edge. Property type is the entity (within-aggregate) or the typed id (foreign-aggregate); the generator picks the read-side resolution based on which form was declared. |
 | `[Out]` | partial property on a relation variant class | Marks the target endpoint of the edge. Same type rules as `[In]`. |
 
+**Which link attribute do I pick?** Three structural link types, three decision rules:
+
+- `[Parent]` / `[Children]` — when one entity *owns* the other within the same aggregate (a `Design` owns its `Constraints`). The parent is the loadable unit; children load with the aggregate; deleting the parent cascades to children. Use these when the child has no independent life outside the parent.
+- `[Reference]` — a non-owning link to another record in the *same* aggregate, or to a shared record outside every aggregate. Examples: a `Constraint`'s pointer to a shared `Severity` lookup row, or a `Design`'s `[Reference, Inline] Details` sidecar that's owned-but-not-a-child. Cross-aggregate references produce `CG021` at compile time — use a relation kind instead.
+- Forward / inverse relation pair (`ForwardRelation` + `InverseRelation<TForward>`) — links that cross aggregate boundaries (a `Constraint` restricts a `UserStory` in another aggregate), or any time you need a payload-carrying edge. See [Relations](#relations).
+
 ## Generated Entity API
 
 For each `[Table]` class, the generator emits a partial implementation that:
@@ -42,7 +52,7 @@ For each `[Table]` class, the generator emits a partial implementation that:
 - `[Parent]` setters additionally cascade-track the child into the parent's session via `parent.Session.AdoptIfUnbound(this)` so the parent's `[Children]` sees the new child at Save time.
 - Routes child and relation reads into session queries.
 - Implements `IEntity.Hydrate(SurrealValue, IHydrationSink)` (Value-consuming row → entity population, writes directly into backing fields).
-- Implements `IEntity.SaveAsync(ISaveContext, ct)` — per-entity Save dispatch (forward-deps → entity content → new children → new outgoing relations).
+- Implements `IEntity.SaveAsync(ISaveContext, ct)` — per-entity Save dispatch: walk forward dependencies (Reference / Parent) recursively, dispatch the entity itself as `CREATE/UPDATE record:id CONTENT { … }`, then walk newly-tracked children recursively. Edges aren't part of this walk — relation variants are entities too, so you call `session.SaveAsync(variant, tx)` on them directly.
 
 Generated property behavior:
 
@@ -50,14 +60,14 @@ Generated property behavior:
 | --- | --- |
 | `[Id] public partial DesignId Id { get; set; }` | Lazy typed id. Setter is allowed only before the entity is bound to a session. |
 | `[Property] public partial string Title { get; set; }` | Synchronous getter/setter. Setter mutates the in-memory snapshot directly (pure backing-field write — no `CommandLog` entry). |
-| `[Property] public partial IReadOnlyList<T> Items { get; }` | Inline element collection. Generator emits `List<T>` backing + `AddItem` / `RemoveItem` / `ClearItems` helpers; walks `T`'s public scalar properties at codegen for typed Hydrate / Save (no reflection). `IList<T>` / `List<T>` are also accepted shapes. |
+| `[Property] public partial IReadOnlyList<T> Items { get; }` | Inline element collection. See "Inline element collections" below. |
 | `[Reference] public partial T Ref { get; }` | Mandatory reference. Getter throws if the referenced entity is not available in the session. |
 | `[Reference] public partial T? Ref { get; set; }` | Optional reference. Setting `null` clears the field. |
 | `[Reference, Inline] public partial T? Ref { get; set; }` | Optional owned-sidecar reference that hydrates with the owner. |
-| `[Parent] public partial Parent Parent { get; set; }` | Parent link. Setter records a parent field write. |
-| `[Children] public partial IReadOnlyCollection<Child> Children { get; }` | Query over in-session children by parent link. |
-| `[ForwardKind] public partial IReadOnlyCollection<T> Targets { get; }` | Forward edge read. Within-aggregate uses `Session.QueryOutgoing<TKind, T>(this)` and returns entities; cross-aggregate uses `Session.QueryRelatedIds<TKind>(this)` and returns `IReadOnlyCollection<IRecordId>`. |
-| `[InverseKind] public partial IReadOnlyCollection<T> Sources { get; }` | Inverse edge read. Within-aggregate uses `Session.QueryIncoming<TKind, T>(this)`; cross-aggregate uses `Session.QueryInverseRelatedIds<TKind>(this)`. |
+| `[Parent] public partial Parent Parent { get; set; }` | Parent link. Setter also calls `parent.Session.AdoptIfUnbound(this)` so a freshly constructed child joins the parent's session. |
+| `[Children] public partial IReadOnlyCollection<Child> Children { get; }` | Reverse-fk read against the in-session entity index by parent link. |
+| `[ForwardKind] public partial IReadOnlyCollection<T> Targets { get; }` | Forward edge read. Within-aggregate returns hydrated entities (via `Session.QueryOutgoing<TKind, T>`); cross-aggregate returns `IReadOnlyCollection<IRecordId>` (via `Session.QueryRelatedIds<TKind>`). |
+| `[InverseKind] public partial IReadOnlyCollection<T> Sources { get; }` | Inverse edge read. Same within-/cross-aggregate split as forward — uses `Session.QueryIncoming` / `QueryInverseRelatedIds`. |
 
 Each generated entity also has a protected `Session` property. Use it from your own partial members to write small domain verbs:
 
@@ -72,23 +82,33 @@ public Task RestrictsAsync(UserStory story, SurrealTransaction tx, CancellationT
 Optional hooks:
 
 ```csharp
+// Seeds a mandatory get-only [Reference] when the owner is first tracked.
 partial void OnCreateDetails(Details details)
 {
     details.Summary = "Created with owner";
 }
 
+// Synchronous pre-delete callback. Runs before this entity's own DELETE is
+// dispatched, so anything you do here is visible to whatever fires next —
+// typically tweaking nullable references that the substrate will then cascade
+// or unset, or just logging. The hook signature is `partial void OnDeleting()`
+// — it cannot be async.
 partial void OnDeleting()
 {
-    foreach (var child in Constraints)
-    {
-        await Session.DeleteAsync(child, currentTx);
-    }
+    Logger.LogInformation("Deleting design {Id} with {ConstraintCount} constraints",
+        Id, Constraints.Count);
 }
 ```
 
-`OnCreate{Name}` is emitted for mandatory get-only references and runs during `Track`/Save auto-binding. `OnDeleting` runs before the entity's own `DELETE` is dispatched in `DeleteAsync`.
+`OnCreate{Name}` is emitted for mandatory get-only references and runs during `Track` / Save auto-binding (idempotent — re-running skips already-set references). `OnDeleting` runs synchronously just before `session.DeleteAsync` dispatches the wire `DELETE`. Async dependent cleanup belongs in the application code wrapping the `DeleteAsync` call, not in this hook.
 
 ## Generated Id API
+
+There are three id concepts that show up across the surface:
+
+- **`{Name}Id`** (e.g. `DesignId`, `ConstraintId`) — the generator-emitted, table-specific typed wrapper. Use these in your model declarations and at every call site where the table is known statically. Each implements `IRecordId` and converts implicitly to `RecordId`.
+- **`RecordId`** — the canonical untyped form, a `(Table, Value)` pair. Used internally by the session and at the wire boundary; user code occasionally sees it (e.g. cross-aggregate relation reads return `IReadOnlyCollection<IRecordId>` where the canonical id is the only thing meaningful).
+- **`IRecordId`** — the interface both `{Name}Id` structs and `RecordId` implement. Use as a parameter type when you want to accept any id form.
 
 Each table gets a typed id:
 
@@ -121,6 +141,8 @@ var bad     = new DesignId("Some Mixed Case");       // throws FormatException
 There is no assembly-level override — Ulid is the only mint type, and quoted-string ids are explicitly unsupported.
 
 ## Generated Composition Root API
+
+Throughout this doc, examples use `Workspace` as the name of the user's `[CompositionRoot]` class. `Workspace` is not a built-in type — it's whatever your project named the partial class tagged with `[CompositionRoot]`. Every emitted member (`Workspace.Query`, `Workspace.Schema`, `Workspace.LoadDesignAsync`, …) is grafted onto that class.
 
 For a `[CompositionRoot]` named `Workspace`, the generator emits:
 
@@ -157,7 +179,67 @@ public Task<SurrealSession> LoadDesignAsync(
     CancellationToken ct = default);
 ```
 
-There are two `Load{Root}Async` overloads per `[AggregateRoot]` — one taking `Surreal db` (read-only — no transaction; the load just queries), one taking `Transaction tx` (write-mode — load query runs inside the txn so it sees in-txn writes from the same transaction). Both produce a `SurrealSession` rooted at the requested aggregate; both delegate to `{Root}AggregateLoader.PopulateAsync`. The unified query terminal `Workspace.Query.{Root}.WithId(...).LoadAsync(db | tx)` is the filtered-load equivalent — same hydrated session for a no-`Include*` call, narrower hydration when `Include*` is chained.
+There are two `Load{Root}Async` overloads per `[AggregateRoot]` — one taking `Surreal db` (read-only — no transaction; the load just queries), one taking `Transaction tx` (write-mode — load query runs inside the txn so it sees in-txn writes from the same transaction). Both produce a `SurrealSession` rooted at the requested aggregate; both delegate to `{Root}AggregateLoader.PopulateAsync`.
+
+The unified query terminal `Workspace.Query.{Root}.WithId(...).LoadAsync(db | tx)` is the filtered-load equivalent — same hydrated session for a no-`Include*` call, narrower hydration when `Include*` is chained. Use `Workspace.Load{Root}Async` when you want the entire aggregate; use `Workspace.Query.{Root}.WithId(id).Include*(…).LoadAsync` when you want to control which slices hydrate.
+
+### End-to-end shape
+
+A minimum-viable consumer touches all of the above: connect, apply schema, track new entities, save into a transaction, load back, query without an aggregate, top-up a missing slice. This snippet is the anchor for everything that follows — every named call below has its own section later in the doc.
+
+```csharp
+using Disruptor.Surface.Runtime;
+using Disruptor.Surface.Runtime.Query;
+using Disruptor.Surreal;
+using Disruptor.Surreal.Connection;
+
+// 1. Connect once. The library has no transport — Disruptor.Surreal owns the wire.
+await using var db = await SurrealClient.ConnectAsync(SurrealOptions.Parse(
+    "Url=ws://localhost:8000;Namespace=app;Database=main;User=root;Password=root"));
+
+// 2. Apply the generated schema. Idempotent; safe to run on every startup.
+await Workspace.ApplySchemaAsync(db);                                     // see "Generated Composition Root API"
+
+// 3. Create + dispatch. The app owns the transaction; the library only consumes it.
+var workspace = new Workspace();
+var session = new SurrealSession(Workspace.ReferenceRegistry);
+var design = session.Track(new Design { Title = "First design" });        // see "SurrealSession"
+
+await using (var tx = await db.BeginTransactionAsync())
+{
+    await session.SaveAsync(design, tx);                                  // per-entity dispatch
+    await tx.CommitAsync();
+}
+
+// 4. Aggregate load — read mode. Pass `db` (no transaction needed).
+var read = await workspace.LoadDesignAsync(db, design.Id);                // see "Generated Composition Root API"
+var loaded = read.Get<Design>(design.Id)!;
+
+// 5. Query without loading an aggregate — id-only, then projection.
+var ids = await Workspace.Query.Designs                                   // see "Query API"
+    .Where(DesignQ.Title.Contains("First"))
+    .Limit(10)
+    .IdsAsync(db);
+
+// 6. Filtered load + top-up Fetch when a slice wasn't included.
+await using var tx2 = await db.BeginTransactionAsync();
+var filtered = await Workspace.Query.Designs
+    .WithId(design.Id)
+    .IncludeDetails()
+    .LoadAsync(tx2);
+var d = filtered.Get<Design>(design.Id)!;
+
+try { _ = d.Epics; }                                                      // not included — throws
+catch (LoadShapeViolationException)
+{
+    await filtered.FetchAsync(                                            // see "Strict-with-escape"
+        Workspace.Query.Designs.WithId(d.Id).IncludeEpics(),
+        tx2);
+    var epics = d.Epics;                                                  // works now
+}
+```
+
+Conflicts at COMMIT surface as `Disruptor.Surreal.SurrealConflictException`. The retry strategy is application-shaped — usually "reload the aggregate, reapply the intent, commit again."
 
 #### Schema migrations are out of scope
 
@@ -170,7 +252,7 @@ Five terminal verbs share one query AST. Every terminal accepts either `Surreal 
 - `IdsAsync(db | tx, ct)` — id-only selection. Returns `IReadOnlyList<{Table}Id>`; no entity hydration, no session. Generator-emitted per `[Table]`.
 - `Select(projection).ExecuteAsync(db | tx, ct)` — projection mode. Returns immutable `IReadOnlyList<TRow>`; no entity hydration, no session. The projection owns the SELECT list and the per-row materialiser.
 - `ExecuteAsync(db | tx, ct)` — read mode. Returns hydrated entities; the supporting session is internal and never exposed.
-- `LoadAsync(db | tx, ct)` — write-mode session. Returns a `SurrealSession` you mutate and dispatch via `SaveAsync`. Only emitted on `Query<TRoot>` where `TRoot.IsAggregateRoot`.
+- `LoadAsync(db | tx, ct)` — write-mode session. Returns a `SurrealSession` you mutate and dispatch via `SaveAsync`. Only emitted on `SurfaceQuery<TRoot>` where `TRoot.IsAggregateRoot`.
 - `Workspace.Hydrate.{Table}(ids).WithInclude(…).ExecuteAsync(db | tx, ct)` — hydration terminal. Takes a list of ids (typically from `IdsAsync`), materialises each into a tracked `SurrealSession` along with any included slices.
 
 ### `Workspace.Query`
@@ -178,10 +260,10 @@ Five terminal verbs share one query AST. Every terminal accepts either `Surreal 
 The user's `[CompositionRoot]` partial gains a static `Query` accessor returning `GeneratedQueryRoot`, with one property per `[Table]` and an `Edges` sub-root:
 
 ```csharp
-Workspace.Query.Designs       // Query<Design>
-Workspace.Query.Constraints   // Query<Constraint>
-Workspace.Query.UserStories   // Query<UserStory>     (pluralised PascalCase)
-Workspace.Query.Edges.Restricts  // EdgeQuery<ConstraintId, IRestrictedById>
+Workspace.Query.Designs       // SurfaceQuery<Design>
+Workspace.Query.Constraints   // SurfaceQuery<Constraint>
+Workspace.Query.UserStories   // SurfaceQuery<UserStory>     (pluralised PascalCase)
+Workspace.Query.Edges.Restricts  // SurfaceEdgeQuery<ConstraintId, IRestrictedById>
 ```
 
 ### Predicate factories — `{Name}Q`
@@ -207,10 +289,10 @@ public static class ConstraintQ
 
 Compose via `Predicate.And(...)`, `Predicate.Or(...)`, `Predicate.Not(...)`.
 
-### `Query<T>`
+### `SurfaceQuery<T>`
 
 ```csharp
-public sealed class Query<T> where T : class, IEntity, new()
+public sealed class SurfaceQuery<T> where T : class, IEntity, new()
 {
     public string Table { get; }
     public IPredicate? Filter { get; }
@@ -220,26 +302,34 @@ public sealed class Query<T> where T : class, IEntity, new()
     public int? LimitCount { get; }
     public int? StartAt { get; }
 
-    public Query<T> Where(IPredicate predicate);
-    public Query<T> WithId(IRecordId id);
-    public Query<T> WithInclude(IIncludeNode node);
+    public SurfaceQuery<T> Where(IPredicate predicate);
+    public SurfaceQuery<T> WithId(IRecordId id);
+    public SurfaceQuery<T> WithInclude(IIncludeNode node);
 
     // Server-side ordering / paging — render as ORDER BY / LIMIT / START at the
     // tail of the SurrealQL. Pair with the generated {Table}Q factory to type-check
     // the field reference at the call site.
-    public Query<T> OrderBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
-    public Query<T> ThenBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
-    public Query<T> Limit(int count);   // <= 0 clears the cap
-    public Query<T> Start(int count);   // <= 0 clears the offset
+    public SurfaceQuery<T> OrderBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
+    public SurfaceQuery<T> ThenBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
+    public SurfaceQuery<T> Limit(int count);   // <= 0 clears the cap
+    public SurfaceQuery<T> Start(int count);   // <= 0 clears the offset
+
+    public ProjectionQuery<T, TRow> Select<TRow>(ISurfaceProjection<TRow> projection);
 
     public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default);
     public Task<IReadOnlyList<T>> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default);
-    public string Compile();
-    public string CompileIdsOnly();   // SELECT id FROM table …; throws if Includes present
+
+    // Compile to SurrealQL + typed-CBOR bindings without executing. The library uses
+    // these internally; consumers reach for them when they want to inspect or splice
+    // the rendered query before sending.
+    public (string Sql, SurrealObject Bindings) Compile();
+    public (string Sql, SurrealObject Bindings) CompileIdsOnly();   // SELECT id FROM table …; throws if Includes present
 }
 ```
 
-`Where` AND-merges across calls. `WithId` overwrites. `WithInclude` is the primitive the generated `Include*` extensions call into. `Compile()` renders the AST to a SurrealQL string with every binding inlined as a literal via `SurrealFormatter` — no separate parameter dictionary.
+`Where` AND-merges across calls. `WithId` overwrites. `WithInclude` is the primitive the generated `Include*` extensions call into. `Compile()` returns the SurrealQL plus a `SurrealObject` carrying every user-supplied value as a typed CBOR binding — no string-interpolated literals, no JSON.
+
+`SurfaceQuery<T>` is what `Workspace.Query.{Table}` returns; you rarely have to spell the type out. Older versions called this `Query<T>`; the `Surface*` prefix was added so the public types don't collide with the SDK's `Surreal*` types in IntelliSense.
 
 ### Projections — `Select(projection).ExecuteAsync`
 
@@ -309,13 +399,13 @@ public HydrationQuery<CodeSymbol> CodeSymbols(IEnumerable<CodeSymbolId> ids);
 public HydrationQuery<CodeSymbol> CodeSymbols(IEnumerable<IRecordId> ids);
 ```
 
-Empty-id list short-circuits: no wire call, empty session returned. `WithInclude` accepts the same `IIncludeNode` AST that read-mode queries use; the wire SQL is identical to `Query<T>.Where(IdIn).WithInclude(…).ExecuteAsync`.
+Empty-id list short-circuits: no wire call, empty session returned. `WithInclude` accepts the same `IIncludeNode` AST that read-mode queries use; the wire SQL is identical to `SurfaceQuery<T>.Where(IdIn).WithInclude(…).ExecuteAsync`.
 
 `Workspace.Load{Root}Async(db | tx, rootId)` is the aggregate-load convenience — same compile-and-hydrate pipeline, scoped to a single aggregate root and its `[Children]` graph. Use it for full-aggregate mutate-and-commit flows; use the hydration terminal for everything that doesn't fit the "load the whole aggregate" shape.
 
 ### Id-only selection — `IdsAsync`
 
-The id-only terminal is a generator-emitted extension on `Query<{Table}>`:
+The id-only terminal is a generator-emitted extension on `SurfaceQuery<{Table}>`:
 
 ```csharp
 IReadOnlyList<CodeSymbolId> ids = await Workspace.Query.CodeSymbols
@@ -344,7 +434,7 @@ var topMatches = await Workspace.Query.Symbols
 For each `[Table]` with traversable members (`[Children]` or `[Reference, Inline]`), the generator emits two siblings:
 
 - A traversal-builder type (`DesignTraversalBuilder`) with `.Where(IPredicate)` plus one `IncludeX(Action<{Child}TraversalBuilder>?)` per member. This is the type passed as the `configure` argument inside a parent's `Include*` lambda.
-- A static extensions class (`DesignQueryIncludes`) that exposes the same `Include*` shape as extension methods on `Query<Design>` — the root-level entry point.
+- A static extensions class (`DesignQueryIncludes`) that exposes the same `Include*` shape as extension methods on `SurfaceQuery<Design>` — the root-level entry point.
 
 ```csharp
 var rows = await Workspace.Query.Designs
@@ -362,7 +452,7 @@ Forward and inverse relation traversals are exposed via `IncludeRelationNode` �
 
 ### Relation traversal — `IncludeRelationNode`
 
-Per relation property the generator emits one `Include{Name}` method on the entity's traversal builder and a matching extension on `Query<T>`. Three shapes:
+Per relation property the generator emits one `Include{Name}` method on the entity's traversal builder and a matching extension on `SurfaceQuery<T>`. Three shapes:
 
 | Relation kind | Method shape | SurrealQL emitted |
 | --- | --- | --- |
@@ -379,31 +469,31 @@ Multi-target relation includes are leaves by design — the target side is a uni
 
 ### Edge queries — `Workspace.Query.Edges.{Kind}`
 
-Per forward relation kind, `EdgeQuery<TIn, TOut>` returns flat `(Source, Target)` pairs:
+Per forward relation kind, `SurfaceEdgeQuery<TIn, TOut>` returns flat `(Source, Target)` pairs:
 
 ```csharp
-public sealed class EdgeQuery<TIn, TOut>
+public sealed class SurfaceEdgeQuery<TIn, TOut>
     where TIn : IRecordId
     where TOut : IRecordId
 {
     // Canonical filters — name the SurrealDB column directly.
-    public EdgeQuery<TIn, TOut> WhereIn(IEnumerable<TIn> ids);
-    public EdgeQuery<TIn, TOut> WhereOut(IEnumerable<TOut> ids);
+    public SurfaceEdgeQuery<TIn, TOut> WhereIn(IEnumerable<TIn> ids);
+    public SurfaceEdgeQuery<TIn, TOut> WhereOut(IEnumerable<TOut> ids);
 
     // Direction-clarifying aliases — same wire SQL as WhereIn/WhereOut, named after
     // the role rather than the column. Pick whichever reads better at the call site.
-    public EdgeQuery<TIn, TOut> WhereSource(IEnumerable<TIn> ids);     // ≡ WhereIn
-    public EdgeQuery<TIn, TOut> WhereTarget(IEnumerable<TOut> ids);    // ≡ WhereOut
-    public EdgeQuery<TIn, TOut> OutgoingFrom(IEnumerable<TIn> sources); // edges where in ∈ sources
-    public EdgeQuery<TIn, TOut> IncomingTo(IEnumerable<TOut> targets);  // edges where out ∈ targets
+    public SurfaceEdgeQuery<TIn, TOut> WhereSource(IEnumerable<TIn> ids);     // ≡ WhereIn
+    public SurfaceEdgeQuery<TIn, TOut> WhereTarget(IEnumerable<TOut> ids);    // ≡ WhereOut
+    public SurfaceEdgeQuery<TIn, TOut> OutgoingFrom(IEnumerable<TIn> sources); // edges where in ∈ sources
+    public SurfaceEdgeQuery<TIn, TOut> IncomingTo(IEnumerable<TOut> targets);  // edges where out ∈ targets
 
-    public EdgeQuery<TIn, TOut> Where(IPredicate predicate);
+    public SurfaceEdgeQuery<TIn, TOut> Where(IPredicate predicate);
 
-    // Server-side ordering / paging — same shape as Query<T>.
-    public EdgeQuery<TIn, TOut> OrderBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
-    public EdgeQuery<TIn, TOut> ThenBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
-    public EdgeQuery<TIn, TOut> Limit(int count);
-    public EdgeQuery<TIn, TOut> Start(int count);
+    // Server-side ordering / paging — same shape as SurfaceQuery<T>.
+    public SurfaceEdgeQuery<TIn, TOut> OrderBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
+    public SurfaceEdgeQuery<TIn, TOut> ThenBy<TValue>(PropertyExpr<TValue> property, OrderDirection direction = OrderDirection.Ascending);
+    public SurfaceEdgeQuery<TIn, TOut> Limit(int count);
+    public SurfaceEdgeQuery<TIn, TOut> Start(int count);
 
     public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.SurrealClient db, CancellationToken ct = default);
     public Task<IReadOnlyList<EdgeRow>> ExecuteAsync(Disruptor.Surreal.SurrealTransaction tx, CancellationToken ct = default);
@@ -415,6 +505,8 @@ public readonly record struct EdgeRow(RecordId Source, RecordId Target);
 `TIn` and `TOut` are id-side types — the concrete `{Name}Id` for single-member sides, or the generated id-side union marker (`IRestrictedById`, `IReferencedById`, …) when 2+ tables participate.
 
 The aliases exist because `WhereIn` / `WhereOut` are easy to misread as "incoming/outgoing" when they actually name the SurrealDB columns directly (`in` = source, `out` = target). For code-index-style queries that pivot heavily on edge direction, `OutgoingFrom(symbol)` and `IncomingTo(symbol)` make intent unambiguous at the call site.
+
+(`SurfaceEdgeQuery<TIn, TOut>` was called `EdgeQuery<TIn, TOut>` before the preview.43 `Surface*` prefix rename.)
 
 ### Edge payload predicate factory — via the variant `{Variant}Q`
 
@@ -436,12 +528,12 @@ For aggregate-root tables, the generator emits two overloads:
 
 ```csharp
 public static Task<SurrealSession> LoadAsync(
-    this Query<Design> query,
+    this SurfaceQuery<Design> query,
     Disruptor.Surreal.SurrealClient db,
     CancellationToken ct = default);
 
 public static Task<SurrealSession> LoadAsync(
-    this Query<Design> query,
+    this SurfaceQuery<Design> query,
     Disruptor.Surreal.SurrealTransaction tx,
     CancellationToken ct = default);
 ```
@@ -487,13 +579,13 @@ catch (LoadShapeViolationException)
 
 ```csharp
 public Task FetchAsync<T>(
-    Query<T> query,
+    SurfaceQuery<T> query,
     Disruptor.Surreal.SurrealClient db,
     CancellationToken ct = default)
     where T : class, IEntity, new();
 
 public Task FetchAsync<T>(
-    Query<T> query,
+    SurfaceQuery<T> query,
     Disruptor.Surreal.SurrealTransaction tx,
     CancellationToken ct = default)
     where T : class, IEntity, new();
@@ -524,6 +616,8 @@ public readonly record struct RestrictsId(string Value) : IRecordId
     // … same shape as per-table {Name}Id
 }
 ```
+
+`IRelationKind.EdgeName` is `static abstract` — generic session calls (`UnrelateAsync<TKind>`, the variant query family, sync `QueryRelatedIds<TKind>`) pick the edge name up through the type parameter, so no string edge names ever appear in user code. The marker class has no instance API; payload columns live on per-variant classes (next subsection).
 
 ### Relation variants — declare a class per `(in, out)` shape
 
@@ -582,6 +676,8 @@ Every relation table gets `DEFINE INDEX … UNIQUE` on `(in, out)` and is declar
 
 ### Runtime calls
 
+Every relation-related write or read funnels through `SurrealSession`. The cheat-sheet:
+
 ```csharp
 // Mutate — Save the variant. Within-aggregate uses entity endpoints; foreign-aggregate uses typed-id endpoints.
 await session.SaveAsync(new ConstraintRestrictsUserStory { Source = constraint, Target = userStory }, tx);
@@ -623,6 +719,113 @@ Within-aggregate entity-side relation properties hydrate entity instances. Cross
 ### Payload predicate factories
 
 Variant classes are entities, so the generator emits a `{Variant}Q` predicate factory the same way it does for tables — payload `[Property]` members are addressable as `PropertyExpr<T>` and compose with the standard `Workspace.Query.{Variant}.Where(...)` query API. The legacy per-kind `{Kind}EdgeQ` factory (and `EdgePredicateFactoryEmitter`) was removed in preview.51; payload predicates now flow through the variant entity's query surface.
+
+### Union endpoints — one variant for multiple target tables
+
+By default a variant pins each endpoint to one concrete entity or typed id. When the same relation kind should be writable against several target tables (e.g. an `Issue` "pertains to" either a `Constraint` *or* a `UserStory`), you'd otherwise duplicate the variant once per target. Union endpoints (preview.54) replace that fan-out with one variant whose endpoint type is a user-declared interface.
+
+The pattern has three pieces:
+
+```csharp
+// 1. Declare a kind-binding attribute by deriving from In<TKind> / Out<TKind>. The type
+//    parameter pins the union to one relation kind so applying it to the wrong kind is a
+//    compile-time error (CG031).
+public sealed class PertainsTargetAttribute : Out<PertainsAttribute>;
+
+// 2. Declare the union interface and attribute it. It must derive from IRecordId.
+[PertainsTarget]
+public partial interface IPertainsTarget : IRecordId;
+
+// 3. Enrol each participating [Table] by extending its per-table marker interface.
+//    The generator emits I{Name}RecordId : IRecordId alongside every {Name}Id struct;
+//    extending it through this partial threads the union interface onto the typed id.
+public partial interface IConstraintRecordId : IPertainsTarget;
+public partial interface IUserStoryRecordId  : IPertainsTarget;
+```
+
+Now a single variant can name the union as its endpoint type:
+
+```csharp
+[Pertains]
+public partial class IssuePertainsTarget
+{
+    [In]  public partial IssueId Source { get; set; }
+    [Out] public partial IPertainsTarget Target { get; set; }
+}
+
+// Either typed id is accepted at the call site:
+await session.SaveAsync(new IssuePertainsTarget { Source = issueId, Target = constraintId }, tx);
+await session.SaveAsync(new IssuePertainsTarget { Source = issueId, Target = userStoryId },  tx);
+```
+
+What the generator does:
+
+- The variant's `[Out]` backing field is a single `IPertainsTarget` slot — no cached entity, no separate id field, just the union-typed id (this matches the cross-aggregate typed-id shape).
+- The hydration dispatcher's `(in.tb, out.tb)` switch Cartesian-expands across every member table, so a row whose `out` lands on `constraints:…` or `user_stories:…` dispatches to this variant. Unknown tables hit the default arm and throw — schema/row drift fails fast.
+- The schema's `FROM` / `TO` clause expands too: `TYPE RELATION ENFORCED FROM issues TO constraints | user_stories`.
+- `EnumerateReferences` uses `RecordId.From(IRecordId)`. `SaveAsync` skips the forward-dep walk for union endpoints — the caller is responsible for endpoint existence (same rule as cross-aggregate typed-id endpoints).
+
+Use the per-table id-side union marker (`IRestrictedById`, `IReferencedById`, …) — the one the generator emits automatically when a relation kind has 2+ target tables — when you want the union for *read*-side typing. Use this preview.54 pattern when you want the union as a *write*-side endpoint on a single variant.
+
+Diagnostics: **CG031** (kind mismatch — union pinned to one kind applied to a variant of a different kind), **CG032** (dead union — interface attributed but no per-table marker enrols any table; warning).
+
+### Shared-shape relation interfaces — kind-keyed `Create<TKind>` factory
+
+When several relation kinds share the same endpoint+payload shape (think `Calls` / `References` / `Inherits` all of which connect `CodeSymbolId → CodeSymbolId` with a `Confidence` string), every variant ends up looking identical except for the kind attribute. Construction call sites devolve into a `switch` over the kind type.
+
+Preview.55 lets you declare a partial interface deriving from `IRelationVariant` over the shared shape. The generator detects it and grafts a static `Create<TKind>` factory:
+
+```csharp
+// 1. Declare the shape contract. Must be partial so the generator can emit the static factory.
+public partial interface ICodeSymbolEdge : IRelationVariant
+{
+    CodeSymbolId Source { get; set; }
+    CodeSymbolId Target { get; set; }
+    string Confidence { get; set; }
+}
+
+// 2. Each participating variant lists the interface in its base list. The partial
+//    properties the generator emits ([In] / [Out] / [Property]) just satisfy the
+//    interface — no extra ceremony.
+[Calls]
+public partial class CallsRelation : ICodeSymbolEdge
+{
+    [In]       public partial CodeSymbolId Source { get; set; }
+    [Out]      public partial CodeSymbolId Target { get; set; }
+    [Property] public partial string Confidence { get; set; }
+}
+
+[References]
+public partial class ReferencesRelation : ICodeSymbolEdge
+{
+    [In]       public partial CodeSymbolId Source { get; set; }
+    [Out]      public partial CodeSymbolId Target { get; set; }
+    [Property] public partial string Confidence { get; set; }
+}
+
+// 3. Call site — one expression, the kind picks the concrete variant.
+ICodeSymbolEdge edge = ICodeSymbolEdge.Create<Calls>(e =>
+{
+    e.Source = caller;
+    e.Target = callee;
+    e.Confidence = "high";
+});
+
+await session.SaveAsync((IEntity)edge, tx);
+```
+
+What the generator emits onto the interface:
+
+```csharp
+public static partial I Create<TKind>(System.Action<I> init)
+    where TKind : IRelationKind;
+```
+
+The body is an if-chain dispatching on `typeof(TKind)` — `new CallsRelation()` for `Calls`, `new ReferencesRelation()` for `References`, etc. — runs the user's initialiser, then returns the instance. An unknown `TKind` throws `InvalidOperationException`.
+
+**Scope** (deliberately narrow): the shared-shape interface helps with *construction* only. Reads stay per-kind — relation kinds remain distinct edge tables, and querying still requires per-kind dispatch (`session.QueryVariantsOutgoingAsync<TVariant>` per kind, concatenate). The interface gives `IEnumerable<I>` uniform handling once you've collected variants from multiple per-kind queries, but the generator doesn't synthesise "all variants of these kinds" reads.
+
+Diagnostics: **CG033** (interface must be partial — the generator can't graft the static factory otherwise), **CG035** (no implementing variants — warning; the interface still works as a marker type, but the factory has nothing to dispatch to).
 
 ## Runtime Types
 
@@ -690,7 +893,7 @@ Async dispatch methods (talk to SurrealDB through an app-owned `Transaction`):
 | `QueryVariantsOutgoingAsync<TVariant>(srcId, tx \| db, ct)` / `QueryVariantsIncomingAsync<TVariant>(tgtId, tx \| db, ct)` | Async traversal returning hydrated variant entities. Tracked in the session, edges mirrored in `state.Edges`. `IEntity` convenience overloads accept a source/target entity directly. |
 | `QueryOutgoingAsync<TKind, TTarget>(srcId, tx \| db, ct)` / `QueryIncomingAsync<TKind, TTarget>(tgtId, tx \| db, ct)` | Async traversal returning target entities directly (skips variant materialisation); not auto-tracked. Same `IEntity` convenience overloads. |
 | `QueryVariantsAsync<TVariant>(sql, bindings, tx \| db, ct)` | Raw-SQL escape hatch for variant traversal that doesn't fit the canonical shape. |
-| `FetchAsync<T>(Query<T> query, db \| tx, ct)` | Top-up extension query — partial-merge hydrate into the existing session, mark Included slices loaded. Pending writes always win. |
+| `FetchAsync<T>(SurfaceQuery<T> query, db \| tx, ct)` | Top-up extension query — partial-merge hydrate into the existing session, mark Included slices loaded. Pending writes always win. |
 
 Lifecycle:
 
@@ -849,7 +1052,7 @@ These are public for diagnostics and tests but most consumers do not call them d
 
 ## Diagnostics
 
-The generator emits diagnostics for invalid model shapes:
+The generator emits diagnostics for invalid model shapes. Most are errors (compile fails); the two warnings are flagged inline. For the rationale behind aggregate boundaries (`CG011`, `CG020`, `CG021`) and the reference-delete behaviors (`CG012`–`CG017`), see [`architecture.md`](architecture.md#aggregate-boundaries).
 
 | Code | Meaning |
 | --- | --- |
@@ -873,3 +1076,9 @@ The generator emits diagnostics for invalid model shapes:
 | `CG026` | `[Children]` element type must be a `[Table]` (concrete-but-not-Table case; `CG009` covers type-parameter element). |
 | `CG027` | `[Parent]` target must be a `[Table]`. |
 | `CG028` | Annotated property must not be declared `static`. |
+| `CG029` | Relation variant classes (a class annotated with `[Restricts]` etc.) must be declared `partial`. |
+| `CG030` | Two variants of the same relation kind share the same `([In] type, [Out] type)` pair — the hydration dispatcher discriminates by `(in.tb, out.tb)`, so duplicates would be ambiguous. |
+| `CG031` | A variant's `[In]` / `[Out]` endpoint is typed as a union interface pinned (via `In<TKind>` / `Out<TKind>`) to a different relation kind than the variant declares. |
+| `CG032` | Union endpoint interface has no per-table marker enrolling any `[Table]` in the union — the union is unreachable. Warning. |
+| `CG033` | Shared-shape relation interface (a `partial interface I... : IRelationVariant`) must be declared `partial` so the generator can graft the static `Create<TKind>` factory. |
+| `CG035` | Shared-shape relation interface has no implementing variant classes — the generated `Create<TKind>` factory would have nothing to dispatch to. Warning. |

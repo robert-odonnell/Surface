@@ -139,16 +139,14 @@ internal static class RelationVariantExtractor
 
         // Capture user-declared interface implementations so the shared-shape linker can
         // bucket this variant under any user-declared interface deriving from
-        // IRelationVariant. cls.AllInterfaces unrolls the transitive set; we filter out
-        // the runtime-side IRelationVariant + IEntity (every variant has them, never a
-        // shared-shape contract by themselves) and any framework types.
+        // IRelationVariant. Runtime markers are filtered out — every variant carries them.
         var implementedInterfacesBuilder = ImmutableArray.CreateBuilder<string>();
         foreach (var iface in cls.AllInterfaces)
         {
             var ifaceFqn = TableExtractor.NormaliseFullName(iface);
-            if (ifaceFqn is "Disruptor.Surface.Runtime.IRelationVariant"
-                         or "Disruptor.Surface.Runtime.IEntity"
-                         or "Disruptor.Surface.Runtime.IRecordId")
+            if (ifaceFqn == AnnotationsMetadata.RelationVariantInterface
+                || ifaceFqn == AnnotationsMetadata.EntityInterface
+                || ifaceFqn == AnnotationsMetadata.RecordIdInterface)
             {
                 continue;
             }
@@ -164,7 +162,7 @@ internal static class RelationVariantExtractor
             Out: outProp!,
             Id: idProp,
             PayloadProperties: payloadBuilder.ToImmutable(),
-            IsPartial: IsDeclaredPartial(cls, ct),
+            IsPartial: PartialDeclaration.IsDeclared(cls, ct),
             DeclaredAccessibility: cls.DeclaredAccessibility.ToString(),
             ImplementedInterfaceFullNames: new EquatableArray<string>(implementedInterfacesBuilder.ToImmutable()));
     }
@@ -184,7 +182,7 @@ internal static class RelationVariantExtractor
             Type: TypeRefBuilder.Build(p.Type),
             Role: role,
             DeletePolicy: deletePolicy,
-            IsPartial: IsPartialMember(p),
+            IsPartial: PartialDeclaration.IsMember(p),
             HasSetter: p.SetMethod is { IsInitOnly: false },
             HasInitOnlySetter: p.SetMethod is { IsInitOnly: true },
             IsStatic: p.IsStatic,
@@ -258,41 +256,4 @@ internal static class RelationVariantExtractor
         return ReferenceDeletePolicy.Reject;
     }
 
-    private static bool IsDeclaredPartial(INamedTypeSymbol type, CancellationToken ct)
-    {
-        foreach (var r in type.DeclaringSyntaxReferences)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (r.GetSyntax(ct) is TypeDeclarationSyntax tds)
-            {
-                foreach (var modifier in tds.Modifiers)
-                {
-                    if (modifier.ValueText == "partial")
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    private static bool IsPartialMember(ISymbol member)
-    {
-        foreach (var r in member.DeclaringSyntaxReferences)
-        {
-            if (r.GetSyntax() is not PropertyDeclarationSyntax pds)
-            {
-                continue;
-            }
-            foreach (var modifier in pds.Modifiers)
-            {
-                if (modifier.ValueText == "partial")
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
 }

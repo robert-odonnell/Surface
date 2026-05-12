@@ -74,7 +74,7 @@ internal static class SharedShapeExtractor
             {
                 derivesFromRelationVariant = true;
             }
-            else if (baseFqn == "Disruptor.Surface.Runtime.IRecordId")
+            else if (baseFqn == AnnotationsMetadata.RecordIdInterface)
             {
                 derivesFromRecordId = true;
             }
@@ -93,28 +93,7 @@ internal static class SharedShapeExtractor
             InterfaceFullName: fqn,
             Namespace: iface.ContainingNamespace?.ToDisplayString() ?? string.Empty,
             Name: iface.Name,
-            IsPartial: IsDeclaredPartial(iface, ct),
+            IsPartial: PartialDeclaration.IsDeclared(iface, ct),
             DeclaredAccessibility: iface.DeclaredAccessibility.ToString());
-    }
-
-    private static bool IsDeclaredPartial(INamedTypeSymbol type, CancellationToken ct)
-    {
-        foreach (var r in type.DeclaringSyntaxReferences)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (r.GetSyntax(ct) is not TypeDeclarationSyntax tds)
-            {
-                continue;
-            }
-
-            foreach (var modifier in tds.Modifiers)
-            {
-                if (modifier.ValueText == "partial")
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 }

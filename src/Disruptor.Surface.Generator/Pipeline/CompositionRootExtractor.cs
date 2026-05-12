@@ -1,6 +1,5 @@
 using Disruptor.Surface.Generator.Model;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Disruptor.Surface.Generator.Pipeline;
 
@@ -33,25 +32,6 @@ internal static class CompositionRootExtractor
             Namespace: ns,
             Name: type.Name,
             DeclaredAccessibility: type.DeclaredAccessibility.ToString(),
-            IsPartial: IsDeclaredPartial(type, ct));
-    }
-
-    private static bool IsDeclaredPartial(INamedTypeSymbol type, CancellationToken ct)
-    {
-        foreach (var r in type.DeclaringSyntaxReferences)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (r.GetSyntax(ct) is TypeDeclarationSyntax tds)
-            {
-                foreach (var modifier in tds.Modifiers)
-                {
-                    if (modifier.ValueText == "partial")
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
+            IsPartial: PartialDeclaration.IsDeclared(type, ct));
     }
 }

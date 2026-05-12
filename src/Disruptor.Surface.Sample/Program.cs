@@ -4,18 +4,18 @@ using Disruptor.Surface.Sample;
 using Disruptor.Surface.Sample.Models;
 using Disruptor.Surface.Sample.Relations;
 using Disruptor.Surface.Sample.Relations.Variants;
+using Disruptor.Surreal;
 using Disruptor.Surreal.Connection;
-using SdkSurreal = Disruptor.Surreal.SurrealClient;
 
 // Mirror of: surreal start --bind 127.0.0.1:8000 --default-namespace project-brain
 //                          --default-database workspace --username root --password secret
-await using var db = await SdkSurreal.ConnectAsync(SurrealOptions.Parse(
+await using var db = await SurrealClient.ConnectAsync(SurrealOptions.Parse(
     "Url=ws://127.0.0.1:8000;Namespace=project-brain;Database=workspace;User=root;Password=secret"));
 
 var workspace = new Workspace();
 
 Console.WriteLine("=== Disruptor.Surface.Sample harness ===");
-Console.WriteLine($"Connected: ws://127.0.0.1:8000  ns=project-brain  db=workspace\n");
+Console.WriteLine("Connected: ws://127.0.0.1:8000  ns=project-brain  db=workspace\n");
 
 // ── 1. Apply schema. One db call per chunk so a failure pinpoints which one
 //    broke. Iterate `Workspace.Schema` directly when you want to filter / log /
@@ -62,7 +62,7 @@ await DemoAsyncQueryTerminals(seededDesignIds[2], reviewId, db);
 
 return 0;
 
-async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
+async Task<DesignId> SeedAndCommitDesign(string text, SurrealClient client)
 {
     Console.WriteLine($"--- Seeding design '{text}' ---");
 
@@ -162,7 +162,7 @@ async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
     }
 
     Console.WriteLine($"  tracked: {session.Log.Count} Track intents captured in the log");
-    await using var tx = await db.BeginTransactionAsync();
+    await using var tx = await client.BeginTransactionAsync();
     // Per-entity Save: design's emitted SaveAsync auto-recurses through forward refs
     // (Details), then walks Tracked children (Constraints, Epics, …) recursively. App
     // owns Commit. Variants are entities too — saving each dispatches INSERT RELATION
@@ -189,14 +189,14 @@ async Task<DesignId> SeedAndCommitDesign(string text, SdkSurreal db)
     };
 }
 
-async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SdkSurreal db)
+async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SurrealClient client)
 {
     Console.WriteLine($"--- Seeding review of {targetDesignId} ---");
 
     // Pre-load the target design so we can pick a real Constraint id to link `Concerns`
     // against (cross-aggregate edges are id-typed; the link is just an id, not a typed
     // entity). This is the canonical "load other aggregate to discover its ids" pattern.
-    var preload = await workspace.LoadDesignAsync(db, targetDesignId);
+    var preload = await workspace.LoadDesignAsync(client, targetDesignId);
     var design = preload.Get<Design>(targetDesignId)
         ?? throw new InvalidOperationException($"design {targetDesignId} did not hydrate");
     var someConstraintId = design.Constraints.First().Id;
@@ -245,7 +245,7 @@ async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SdkSurreal db)
     });
 
     Console.WriteLine($"  tracked: {session.Log.Count} Track intents captured in the log");
-    await using var tx = await db.BeginTransactionAsync();
+    await using var tx = await client.BeginTransactionAsync();
     // Per-entity Save: review root recurses through children, then each variant
     // instance is saved as INSERT RELATION INTO {edge} … under the same tx —
     // within-aggregate (Finding→Issue, etc.) and cross-aggregate (Review→Design,
@@ -270,10 +270,10 @@ async Task<ReviewId> SeedAndCommitReview(DesignId targetDesignId, SdkSurreal db)
     return review.Id;
 }
 
-async Task ReloadAndPrintDesign(DesignId designId, SdkSurreal db)
+async Task ReloadAndPrintDesign(DesignId designId, SurrealClient client)
 {
     Console.WriteLine($"--- Reloading Design {designId} ---");
-    var session = await workspace.LoadDesignAsync(db, designId);
+    var session = await workspace.LoadDesignAsync(client, designId);
 
     var design = session.Get<Design>(designId)
                  ?? throw new InvalidOperationException($"Loader didn't hydrate {designId}.");
@@ -314,10 +314,10 @@ async Task ReloadAndPrintDesign(DesignId designId, SdkSurreal db)
     Console.WriteLine();
 }
 
-async Task ReloadAndPrintReview(ReviewId reloadId, SdkSurreal db)
+async Task ReloadAndPrintReview(ReviewId reloadId, SurrealClient client)
 {
     Console.WriteLine($"--- Reloading Review {reloadId} ---");
-    var session = await workspace.LoadReviewAsync(db, reloadId);
+    var session = await workspace.LoadReviewAsync(client, reloadId);
 
     var review = session.Get<Review>(reloadId)
                  ?? throw new InvalidOperationException($"Loader didn't hydrate {reloadId}.");
@@ -351,7 +351,7 @@ async Task ReloadAndPrintReview(ReviewId reloadId, SdkSurreal db)
     Console.WriteLine();
 }
 
-async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal db)
+async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SurrealClient client)
 {
     Console.WriteLine("--- Query layer demo ---");
 
@@ -359,7 +359,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal db)
     //     Constraint.Description was seeded with the seed name; pin to one batch.
     var seedTwoConstraints = await Workspace.Query.Constraints
         .Where(ConstraintQ.Description.Contains("seed-2"))
-        .ExecuteAsync(db);
+        .ExecuteAsync(client);
     Console.WriteLine($"  flat predicate: {seedTwoConstraints.Count} constraints with 'seed-2' in description");
     foreach (var c in seedTwoConstraints.Take(2))
     {
@@ -374,7 +374,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal db)
         .WithId(targetId)
         .IncludeDetails()
         .IncludeConstraints(c => c.IncludeDetails())
-        .ExecuteAsync(db);
+        .ExecuteAsync(client);
     var queriedDesign = designsWithConstraints.Single();
     Console.WriteLine($"  traversal read: design '{queriedDesign.Description}' has {queriedDesign.Constraints.Count} constraint(s)");
     foreach (var c in queriedDesign.Constraints.Take(2))
@@ -388,7 +388,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal db)
     var constraintIds = queriedDesign.Constraints.Select(c => c.Id).ToList();
     var restrictPairs = await Workspace.Query.Edges.Restricts
         .WhereIn(constraintIds)
-        .ExecuteAsync(db);
+        .ExecuteAsync(client);
     Console.WriteLine($"  edge query: {restrictPairs.Count} restricts edges from these constraints");
     foreach (var pair in restrictPairs.Take(3))
     {
@@ -402,7 +402,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal db)
         .WithId(targetId)
         .IncludeDetails()
         .IncludeConstraints(c => c.IncludeDetails())
-        .LoadAsync(db);
+        .LoadAsync(client);
     var slicedDesign = slicedSession.Get<Design>(targetId)!;
     Console.WriteLine($"  filtered LoadAsync: {slicedDesign.Constraints.Count} constraints loaded into a write-mode session");
 
@@ -422,7 +422,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal db)
     //     reads of design.Epics succeed against the same session.
     await slicedSession.FetchAsync(
         Workspace.Query.Designs.WithId(targetId).IncludeEpics(e => e.IncludeDetails()),
-        db);
+        client);
     Console.WriteLine($"  FetchAsync top-up: design now sees {slicedDesign.Epics.Count} epic(s)");
     foreach (var e in slicedDesign.Epics.Take(2))
     {
@@ -434,7 +434,7 @@ async Task DemoQueryLayer(IReadOnlyList<DesignId> designIds, SdkSurreal db)
     Console.WriteLine();
 }
 
-static async Task DemoRelationTraversal(SdkSurreal db)
+static async Task DemoRelationTraversal(SurrealClient db)
 {
     Console.WriteLine("--- Relation traversal demo ---");
 
@@ -536,7 +536,7 @@ static async Task DemoRelationTraversal(SdkSurreal db)
     Console.WriteLine();
 }
 
-static async Task DemoAsyncQueryTerminals(DesignId designId, ReviewId reviewId, SdkSurreal db)
+static async Task DemoAsyncQueryTerminals(DesignId designId, ReviewId reviewId, SurrealClient db)
 {
     Console.WriteLine("--- Async variant-query terminals (Phase 4) ---");
 

@@ -148,7 +148,7 @@ internal static class UnionEndpointExtractor
                 }
 
                 var fqn = TableExtractor.NormaliseFullName(baseSymbol);
-                if (fqn == "Disruptor.Surface.Runtime.IRecordId")
+                if (fqn == AnnotationsMetadata.RecordIdInterface)
                 {
                     continue;
                 }

@@ -35,9 +35,10 @@ internal static class AnnotationsMetadata
     public const string InUnionBase          = $"{Namespace}.In`1";
     public const string OutUnionBase         = $"{Namespace}.Out`1";
 
-    // Runtime marker the generator-emitted relation variants implement and that
-    // user-declared "shared-shape" interfaces extend to opt into the typed surface
-    // (static Create<TKind> factory + polymorphic query terminals). Lives in
-    // Disruptor.Surface.Runtime alongside IEntity.
+    // Runtime markers in Disruptor.Surface.Runtime. RelationVariantInterface gates
+    // shared-shape opt-in (preview.55); RecordIdInterface gates union-endpoint opt-in
+    // (preview.54); EntityInterface is the universal base every generated entity carries.
     public const string RelationVariantInterface = "Disruptor.Surface.Runtime.IRelationVariant";
+    public const string RecordIdInterface        = "Disruptor.Surface.Runtime.IRecordId";
+    public const string EntityInterface          = "Disruptor.Surface.Runtime.IEntity";
 }
