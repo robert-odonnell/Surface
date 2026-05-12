@@ -54,18 +54,26 @@ internal static class RelationLinker
         {
             linkedVariants.Add(RewriteVariant(variant, tableFullNames));
         }
-        var linkedVariantsImmutable = linkedVariants.ToImmutable();
+        var rewrittenVariants = linkedVariants.ToImmutable();
+
+        // Variants whose own annotated members are empty get In / Out / Id / Payload
+        // lifted from a matching annotated shared-shape interface (preview.56). Variants
+        // whose In or Out remain null after the lift attempt — either because no matching
+        // shared-shape interface is annotated, or the variant implements multiple
+        // annotated shared-shape interfaces — are dropped silently here, the same fail-
+        // soft contract the extractor used to enforce by returning null pre-lift.
+        var liftedVariants = LiftVariantsFromSharedShape(rewrittenVariants, sharedShapeCandidates, tableFullNames);
 
         var unions = ComputeUnions(linked, forwardKinds, inverseKinds);
         var unionEndpoints = ComputeUnionEndpoints(linked, unionInterfaceCandidates, unionMembershipCandidates);
-        var sharedShapes = ComputeSharedShapes(sharedShapeCandidates, linkedVariantsImmutable, forwardKinds, inverseKinds);
+        var sharedShapes = ComputeSharedShapes(sharedShapeCandidates, liftedVariants, forwardKinds, inverseKinds);
         var (aggregates, conflicts) = ComputeAggregates(linked);
         var cascadeCycles = ComputeCascadeCycles(linked);
 
         return new ModelGraph(
             Tables: linked,
             RelationKinds: combinedKinds.ToImmutable(),
-            RelationVariants: new EquatableArray<RelationVariantModel>(linkedVariantsImmutable),
+            RelationVariants: new EquatableArray<RelationVariantModel>(liftedVariants),
             Unions: new EquatableArray<RelationUnion>(unions),
             UnionEndpoints: new EquatableArray<UnionEndpointModel>(unionEndpoints),
             SharedShapes: new EquatableArray<SharedShapeModel>(sharedShapes),
@@ -73,6 +81,126 @@ internal static class RelationLinker
             AggregateConflicts: new EquatableArray<string>(conflicts),
             CascadeCycles: new EquatableArray<string>(cascadeCycles),
             CompositionRoots: new EquatableArray<CompositionRootModel>(compositionRoots));
+    }
+
+    /// <summary>
+    /// preview.56 — fills in <see cref="RelationVariantModel.In"/> / <see cref="RelationVariantModel.Out"/> /
+    /// <see cref="RelationVariantModel.Id"/> / <see cref="RelationVariantModel.PayloadProperties"/>
+    /// from a matching annotated shared-shape interface candidate when the variant
+    /// declares zero own annotated members. The variant's
+    /// <see cref="RelationVariantModel.ImplementedInterfaceFullNames"/> are matched against
+    /// candidates carrying lifted props (i.e. interfaces whose own members carry
+    /// <c>[In]</c> / <c>[Out]</c> / <c>[Property]</c> / <c>[Id]</c>); a single match wins
+    /// and contributes its lifted shape. Multiple annotated matches make the lift
+    /// ambiguous; the variant is dropped to keep the contract one-source-of-truth.
+    /// <para>
+    /// Variants that don't need a lift (their own annotated members already produced a
+    /// non-null In/Out at extraction time) pass through unchanged. The result is
+    /// emit-ready: every returned variant is guaranteed to have non-null In and Out.
+    /// </para>
+    /// </summary>
+    private static ImmutableArray<RelationVariantModel> LiftVariantsFromSharedShape(
+        ImmutableArray<RelationVariantModel> variants,
+        ImmutableArray<SharedShapeInterfaceCandidate> candidates,
+        HashSet<string> tableFullNames)
+    {
+        if (variants.Length == 0)
+        {
+            return variants;
+        }
+
+        // Index candidates by FQN so the per-variant interface walk is O(1) per base.
+        // Only annotated candidates participate — a candidate whose interface members
+        // carry no model attributes can't supply a lift, and falsely "matching" against
+        // it would make the per-variant ambiguity check fire spuriously.
+        var annotatedByFqn = new Dictionary<string, SharedShapeInterfaceCandidate>(StringComparer.Ordinal);
+        foreach (var c in candidates)
+        {
+            if (c.LiftedIn is not null || c.LiftedOut is not null || c.LiftedId is not null || c.LiftedPayload.Count > 0)
+            {
+                annotatedByFqn[c.InterfaceFullName] = c;
+            }
+        }
+
+        var builder = ImmutableArray.CreateBuilder<RelationVariantModel>(variants.Length);
+        foreach (var variant in variants)
+        {
+            // Already populated — variant declared its own [In]/[Out]/[Property] members
+            // and the extractor produced a fully-shaped model. Pass through; the lift
+            // path is opt-in via "empty body, base list points at an annotated interface".
+            if (variant.In is not null && variant.Out is not null)
+            {
+                builder.Add(variant);
+                continue;
+            }
+
+            // Find every annotated candidate the variant lists in its base chain. Multiple
+            // annotated matches make the lift ambiguous (which interface's payload wins?);
+            // drop the variant rather than picking one arbitrarily. A single match is the
+            // contract: that interface contributes In/Out/Id/Payload.
+            SharedShapeInterfaceCandidate? lift = null;
+            var ambiguous = false;
+            foreach (var ifaceFqn in variant.ImplementedInterfaceFullNames)
+            {
+                if (!annotatedByFqn.TryGetValue(ifaceFqn, out var candidate))
+                {
+                    continue;
+                }
+                if (lift is null)
+                {
+                    lift = candidate;
+                }
+                else
+                {
+                    ambiguous = true;
+                    break;
+                }
+            }
+
+            if (ambiguous || lift is null)
+            {
+                // No clear lift source — silently drop, matching the existing fail-soft
+                // contract the extractor used when In/Out couldn't be resolved.
+                continue;
+            }
+
+            // Lifted props originate on interface members that don't see the same
+            // type-rewrite pass linkedTables got. Re-run RewriteType so any TypeRef
+            // pointing at a [Table] gets IsTableType=true (the rewrite knows the table
+            // catalogue we built earlier in Build).
+            var rewrittenIn = lift.LiftedIn is null
+                ? null
+                : lift.LiftedIn with { Type = RewriteType(lift.LiftedIn.Type, tableFullNames) };
+            var rewrittenOut = lift.LiftedOut is null
+                ? null
+                : lift.LiftedOut with { Type = RewriteType(lift.LiftedOut.Type, tableFullNames) };
+            var rewrittenId = lift.LiftedId is null
+                ? null
+                : lift.LiftedId with { Type = RewriteType(lift.LiftedId.Type, tableFullNames) };
+
+            var rewrittenPayload = ImmutableArray.CreateBuilder<RelationVariantPropertyModel>(lift.LiftedPayload.Count);
+            foreach (var p in lift.LiftedPayload)
+            {
+                rewrittenPayload.Add(p with { Type = RewriteType(p.Type, tableFullNames) });
+            }
+
+            // Lift wins only when both endpoints are present. A half-annotated interface
+            // (e.g. [In] declared but [Out] missing) leaves the variant unsalvageable.
+            if (rewrittenIn is null || rewrittenOut is null)
+            {
+                continue;
+            }
+
+            builder.Add(variant with
+            {
+                In = rewrittenIn,
+                Out = rewrittenOut,
+                Id = rewrittenId ?? variant.Id,
+                PayloadProperties = new EquatableArray<RelationVariantPropertyModel>(rewrittenPayload.ToImmutable()),
+            });
+        }
+
+        return builder.ToImmutable();
     }
 
     /// <summary>
@@ -153,7 +281,14 @@ internal static class RelationLinker
                     EdgeName: edgeName));
 
                 // Track common endpoint types — null sentinel means "no expectation
-                // yet", first variant pins, subsequent variants must agree.
+                // yet", first variant pins, subsequent variants must agree. The
+                // LiftVariantsFromSharedShape pass guarantees a non-null In/Out by the
+                // time we reach this point; the defensive guard skips any variant that
+                // somehow slipped through with null endpoints rather than NRE-ing here.
+                if (variant.In is null || variant.Out is null)
+                {
+                    continue;
+                }
                 var srcFqn = variant.In.Type.FullyQualifiedName;
                 var tgtFqn = variant.Out.Type.FullyQualifiedName;
 
@@ -310,10 +445,14 @@ internal static class RelationLinker
             rewrittenPayload.Add(p with { Type = RewriteType(p.Type, tableFullNames) });
         }
 
+        // In / Out are nullable for variants awaiting an interface lift (preview.56).
+        // Rewrite type-refs only when populated; the lift pass fills the null slots from
+        // a matching annotated shared-shape interface candidate before emit. Once lifted,
+        // the lifted props get their own type-rewrite pass via RewriteLiftedProperty.
         return variant with
         {
-            In = variant.In with { Type = RewriteType(variant.In.Type, tableFullNames) },
-            Out = variant.Out with { Type = RewriteType(variant.Out.Type, tableFullNames) },
+            In = variant.In is null ? null : variant.In with { Type = RewriteType(variant.In.Type, tableFullNames) },
+            Out = variant.Out is null ? null : variant.Out with { Type = RewriteType(variant.Out.Type, tableFullNames) },
             Id = variant.Id is null ? null : variant.Id with { Type = RewriteType(variant.Id.Type, tableFullNames) },
             PayloadProperties = new EquatableArray<RelationVariantPropertyModel>(rewrittenPayload.ToImmutable()),
         };

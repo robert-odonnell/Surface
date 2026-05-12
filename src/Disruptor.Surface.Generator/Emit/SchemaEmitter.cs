@@ -559,6 +559,14 @@ internal static class SchemaEmitter
         {
             var endpoint = takeIn ? variant.In : variant.Out;
 
+            // Variants whose lift attempt failed slip through with null endpoints —
+            // RelationLinker drops them from the final list, but defensive skip here
+            // keeps the schema scan robust against test fixtures bypassing the linker.
+            if (endpoint is null)
+            {
+                continue;
+            }
+
             // Union endpoint: every participating member table contributes to FROM/TO
             // so a single variant covers all union members at the schema level. The
             // edge table's TYPE RELATION clause needs the full set so the substrate

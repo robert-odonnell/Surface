@@ -70,11 +70,13 @@ public sealed class RelationVariantExtractorTests
         Assert.Equal("Id", model.Id!.Name);
         Assert.Equal(RelationVariantPropertyRole.Id, model.Id.Role);
 
-        Assert.Equal("Source", model.In.Name);
+        Assert.NotNull(model.In);
+        Assert.Equal("Source", model.In!.Name);
         Assert.Equal("source", model.In.FieldName);
         Assert.Equal(RelationVariantPropertyRole.In, model.In.Role);
 
-        Assert.Equal("Target", model.Out.Name);
+        Assert.NotNull(model.Out);
+        Assert.Equal("Target", model.Out!.Name);
         Assert.Equal("target", model.Out.FieldName);
         Assert.Equal(RelationVariantPropertyRole.Out, model.Out.Role);
 
@@ -109,8 +111,8 @@ public sealed class RelationVariantExtractorTests
         var model = RelationVariantExtractor.TryExtractFromSymbol(cls!, CancellationToken.None);
         Assert.NotNull(model);
         Assert.Equal("M.RestrictedByAttribute", model!.KindAttributeFqn);
-        Assert.Equal("Source", model.In.Name);
-        Assert.Equal("Target", model.Out.Name);
+        Assert.Equal("Source", model.In!.Name);
+        Assert.Equal("Target", model.Out!.Name);
         Assert.Null(model.Id);
         Assert.Empty(model.PayloadProperties);
     }

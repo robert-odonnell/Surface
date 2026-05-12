@@ -126,10 +126,14 @@ internal static class RelationVariantExtractor
             }
         }
 
-        // Required shape: exactly one [In], exactly one [Out], at most one [Id]. Anything
-        // else is malformed; bail here so the variant doesn't reach the emitters with
-        // a half-formed model. Diagnostics for these cases land in a later phase.
-        if (inCount != 1 || outCount != 1 || idCount > 1)
+        // Required shape when the variant declares its own annotated members: exactly one
+        // [In], exactly one [Out], at most one [Id]. The empty case (zero own annotated
+        // members) is intentionally allowed through — the linker will try to lift In/Out
+        // and payload from a matching annotated shared-shape interface (preview.56). Half-
+        // populated declarations (only [In], or two [Out]s, etc.) still bail; the variant
+        // is dropped silently as before, which keeps the malformed-input contract.
+        var hasOwnAnnotatedMembers = inCount > 0 || outCount > 0 || idCount > 0 || payloadBuilder.Count > 0;
+        if (hasOwnAnnotatedMembers && (inCount != 1 || outCount != 1 || idCount > 1))
         {
             return null;
         }
@@ -167,7 +171,12 @@ internal static class RelationVariantExtractor
             ImplementedInterfaceFullNames: new EquatableArray<string>(implementedInterfacesBuilder.ToImmutable()));
     }
 
-    private static RelationVariantPropertyModel BuildProperty(IPropertySymbol p, RelationVariantPropertyRole role)
+    /// <summary>
+    /// Builds the variant property model from a Roslyn property symbol. Shared with
+    /// <see cref="SharedShapeExtractor"/> so an interface's annotated members can be
+    /// lifted onto a variant body that opts in via partial-class shape only (preview.56).
+    /// </summary>
+    internal static RelationVariantPropertyModel BuildProperty(IPropertySymbol p, RelationVariantPropertyRole role)
     {
         // Only [In] / [Out] participate in delete-policy resolution; for other roles the
         // policy field is ignored downstream. We default to Reject so the field has a
@@ -194,9 +203,11 @@ internal static class RelationVariantExtractor
     /// take precedence over <c>[Property]</c> when both appear (the role attributes pin
     /// the endpoint; a stray <c>[Property]</c> on the same member is harmless and the
     /// emitter doesn't touch it). Returns <see cref="RelationVariantPropertyRole.None"/>
-    /// for any property that carries none of these.
+    /// for any property that carries none of these. Internal so
+    /// <see cref="SharedShapeExtractor"/> can apply the same classification to interface
+    /// members for preview.56's interface-driven lift.
     /// </summary>
-    private static RelationVariantPropertyRole ResolveRole(ImmutableArray<AttributeData> attrs)
+    internal static RelationVariantPropertyRole ResolveRole(ImmutableArray<AttributeData> attrs)
     {
         var sawProperty = false;
         foreach (var attr in attrs)

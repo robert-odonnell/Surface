@@ -1890,6 +1890,239 @@ public sealed class EmissionShapeTests
         Assert.Contains(runDiags, d => d.Id == "CG035");
     }
 
+    // ─── preview.56 — annotated shared-shape interface lifts In/Out/Property onto
+    //     empty-body variants ─────────────────────────────────────────────────────────
+
+    private const string LiftSpike = """
+        using Disruptor.Surface.Annotations;
+        using Disruptor.Surface.Runtime;
+        namespace M;
+
+        public sealed class CallsAttribute : ForwardRelation;
+
+        [Table, AggregateRoot]
+        public partial class CodeSymbol {
+            [Id]       public partial CodeSymbolId Id { get; set; }
+            [Property] public partial string Fqn { get; set; }
+        }
+
+        // Annotated shared-shape interface — [In]/[Out]/[Property] target the interface
+        // members. preview.56 lifts these onto any variant with an empty body.
+        public partial interface ICodeSymbolEdge : IRelationVariant {
+            [In]       CodeSymbolId Source { get; set; }
+            [Out]      CodeSymbolId Target { get; set; }
+            [Property] string Confidence { get; set; }
+        }
+
+        // Empty body — variant inherits its shape from the annotated interface.
+        [Calls]
+        public partial class CallsRelation : ICodeSymbolEdge;
+
+        [CompositionRoot] public partial class Workspace { }
+        """;
+
+    [Fact]
+    public void Lift_EmptyBodyVariant_GetsFullPropertyImplementations()
+    {
+        // The variant body is `;` — the user declared no [In]/[Out]/[Property] of its
+        // own. The linker copies the annotated interface's shape onto the variant and
+        // the emitter generates non-partial property bodies that satisfy the interface
+        // contract via partial-class declaration merging.
+        var asm = GeneratorHarness.CompileAndLoad(LiftSpike);
+
+        var iface  = asm.GetType("M.ICodeSymbolEdge",   throwOnError: true)!;
+        var calls  = asm.GetType("M.CallsRelation",     throwOnError: true)!;
+        var symId  = asm.GetType("M.CodeSymbolId",      throwOnError: true)!;
+        Assert.True(iface.IsAssignableFrom(calls));
+
+        var src = Activator.CreateInstance(symId, "01HZ0000000000000000000001")!;
+        var tgt = Activator.CreateInstance(symId, "01HZ0000000000000000000002")!;
+        var instance = Activator.CreateInstance(calls)!;
+
+        // Interface members route through the emitted full-property declarations.
+        iface.GetProperty("Source")!.SetValue(instance, src);
+        iface.GetProperty("Target")!.SetValue(instance, tgt);
+        iface.GetProperty("Confidence")!.SetValue(instance, "high");
+
+        Assert.Equal(src, iface.GetProperty("Source")!.GetValue(instance));
+        Assert.Equal(tgt, iface.GetProperty("Target")!.GetValue(instance));
+        Assert.Equal("high", iface.GetProperty("Confidence")!.GetValue(instance));
+    }
+
+    [Fact]
+    public void Lift_GeneratedPropertiesAreNotMarkedPartial()
+    {
+        // Source-level shape assertion: the .g.cs for an empty-body variant must declare
+        // properties WITHOUT the `partial` keyword (interface members aren't partial, so
+        // the variant satisfies the contract via partial-class merging instead). A regression
+        // here would surface as a CS0759 / CS0763 in the consumer compile, but catch it at
+        // the source layer for a clearer signal.
+        var (result, _, _, _) = GeneratorHarness.Run(LiftSpike);
+        var variant = GeneratorHarness.FindGeneratedFile(result, "CallsRelation.RelationVariant.g.cs");
+        Assert.NotNull(variant);
+        var src = variant!.ToString();
+
+        // The full property declarations look like `public T Source { get => ...; set => ...; }`
+        // with no `partial` keyword; the lifted-from-interface case never emits `partial T Name`.
+        Assert.Contains("public global::M.CodeSymbolId Source", src);
+        Assert.Contains("public global::M.CodeSymbolId Target", src);
+        Assert.Contains("public string Confidence", src);
+        Assert.DoesNotContain("partial global::M.CodeSymbolId Source", src);
+        Assert.DoesNotContain("partial global::M.CodeSymbolId Target", src);
+        Assert.DoesNotContain("partial string Confidence", src);
+    }
+
+    [Fact]
+    public void Lift_SchemaPicksUpLiftedPayloadAndEndpoints()
+    {
+        // The lifted [Property] on the interface contributes a column on the edge table;
+        // the lifted [In]/[Out] contribute the FROM/TO clauses. End-to-end check that the
+        // lift propagates beyond the variant emitter into schema generation.
+        var (result, _, _, _) = GeneratorHarness.Run(LiftSpike);
+        var schema = GeneratorHarness.FindGeneratedFile(result, "Workspace.Schema.g.cs");
+        Assert.NotNull(schema);
+        var ddl = schema!.ToString();
+
+        Assert.Contains("DEFINE TABLE IF NOT EXISTS calls SCHEMAFULL", ddl);
+        Assert.Contains("FROM code_symbols", ddl);
+        Assert.Contains("TO code_symbols", ddl);
+        Assert.Contains("DEFINE FIELD IF NOT EXISTS confidence ON calls TYPE string", ddl);
+    }
+
+    [Fact]
+    public void Lift_OwnAnnotatedMembersStillWin_NoLiftClobbering()
+    {
+        // Even when the interface is annotated, a variant that declares its own
+        // [In]/[Out]/[Property] members opts OUT of the lift — the linker only fills
+        // in null In/Out endpoints. This preserves the preview.55 self-describing shape
+        // for variants that need per-variant payload customisation.
+        var source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+
+            public sealed class CallsAttribute : ForwardRelation;
+
+            [Table, AggregateRoot]
+            public partial class CodeSymbol {
+                [Id]       public partial CodeSymbolId Id { get; set; }
+                [Property] public partial string Fqn { get; set; }
+            }
+
+            public partial interface ICodeSymbolEdge : IRelationVariant {
+                [In]       CodeSymbolId Source { get; set; }
+                [Out]      CodeSymbolId Target { get; set; }
+                [Property] string Confidence { get; set; }
+            }
+
+            // Variant declares its own attributed partial members — interface annotations
+            // are visible but the lift path is skipped because In/Out aren't null at link
+            // time. The emitted property is `partial`, since the user provided the stub.
+            [Calls]
+            public partial class CallsRelation : ICodeSymbolEdge {
+                [In]       public partial CodeSymbolId Source { get; set; }
+                [Out]      public partial CodeSymbolId Target { get; set; }
+                [Property] public partial string Confidence { get; set; }
+            }
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, _) = GeneratorHarness.Run(source);
+        var variant = GeneratorHarness.FindGeneratedFile(result, "CallsRelation.RelationVariant.g.cs");
+        Assert.NotNull(variant);
+        var src = variant!.ToString();
+
+        // Self-declared variant retains the `partial` keyword on its emitted props.
+        Assert.Contains("partial global::M.CodeSymbolId Source", src);
+        Assert.Contains("partial global::M.CodeSymbolId Target", src);
+        Assert.Contains("partial string Confidence", src);
+    }
+
+    [Fact]
+    public void Lift_UnannotatedInterface_LeavesEmptyVariantInert()
+    {
+        // The preview.55 spike shape — interface members with no model attributes — is
+        // the no-op case for the lift. An empty-body variant under such an interface
+        // produces NO RelationVariant emit (the linker drops it silently because lift
+        // had no source) so the substrate's edge table is correctly never created from
+        // a half-formed variant declaration.
+        var source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+
+            public sealed class CallsAttribute : ForwardRelation;
+
+            [Table, AggregateRoot]
+            public partial class CodeSymbol {
+                [Id]       public partial CodeSymbolId Id { get; set; }
+                [Property] public partial string Fqn { get; set; }
+            }
+
+            // Interface members carry NO [In]/[Out]/[Property] — original preview.55
+            // contract shape. Variants under this MUST self-declare their members.
+            public partial interface ICodeSymbolEdge : IRelationVariant {
+                CodeSymbolId Source { get; set; }
+                CodeSymbolId Target { get; set; }
+                string Confidence { get; set; }
+            }
+
+            // Empty body + unannotated interface → nothing for the lift to copy.
+            [Calls]
+            public partial class CallsRelation : ICodeSymbolEdge;
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, _) = GeneratorHarness.Run(source);
+        var variant = GeneratorHarness.FindGeneratedFile(result, "CallsRelation.RelationVariant.g.cs");
+        Assert.Null(variant);
+    }
+
+    [Fact]
+    public void Lift_AmbiguousAcrossMultipleAnnotatedInterfaces_DropsVariant()
+    {
+        // A variant inheriting from two annotated shared-shape interfaces can't pick
+        // a single source of truth — the linker drops it silently rather than picking
+        // arbitrarily. (Same fail-soft contract as the original missing-In/Out path.)
+        var source = """
+            using Disruptor.Surface.Annotations;
+            using Disruptor.Surface.Runtime;
+            namespace M;
+
+            public sealed class CallsAttribute : ForwardRelation;
+
+            [Table, AggregateRoot]
+            public partial class CodeSymbol {
+                [Id]       public partial CodeSymbolId Id { get; set; }
+                [Property] public partial string Fqn { get; set; }
+            }
+
+            public partial interface ICodeSymbolEdgeA : IRelationVariant {
+                [In]       CodeSymbolId Source { get; set; }
+                [Out]      CodeSymbolId Target { get; set; }
+                [Property] string Confidence { get; set; }
+            }
+
+            public partial interface ICodeSymbolEdgeB : IRelationVariant {
+                [In]       CodeSymbolId Source { get; set; }
+                [Out]      CodeSymbolId Target { get; set; }
+                [Property] string Reason { get; set; }
+            }
+
+            // Two annotated lift sources → ambiguity → variant dropped.
+            [Calls]
+            public partial class CallsRelation : ICodeSymbolEdgeA, ICodeSymbolEdgeB;
+
+            [CompositionRoot] public partial class Workspace { }
+            """;
+
+        var (result, _, _, _) = GeneratorHarness.Run(source);
+        var variant = GeneratorHarness.FindGeneratedFile(result, "CallsRelation.RelationVariant.g.cs");
+        Assert.Null(variant);
+    }
+
     [Fact]
     public void UnionEndpoint_DeadUnion_FiresCG032AsWarning()
     {

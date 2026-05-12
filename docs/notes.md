@@ -117,6 +117,7 @@ When working in `Disruptor.Surface.Sample/Models` (or any consumer):
 - **Relation variants (preview.51).** Edge mutations go through variant classes — annotate a class with the relation kind (e.g. `[Restricts]`), name endpoints with `[In]` / `[Out]` (entity for within-aggregate, typed id for foreign-aggregate), and optional `[Property]` payload members. The variant **is** an `IEntity`. To create an edge: `await session.SaveAsync(new ConstraintRestrictsUserStory { Source = constraint, Target = userStory }, tx)`. Multi-variant kinds get `SCHEMALESS` edge tables (each variant's payload coexists on the same table); single-variant kinds keep `SCHEMAFULL`. `Session.UnrelateAsync<TKind>(src?, tgt?, tx)` survives for edge deletion (bulk and pair-wise).
 - **Union-endpoint variants (preview.54).** A variant's `[In]` / `[Out]` can be a user-declared union interface, accepting any participating table's typed id. Declare the union as a parameterless attribute deriving from `In<TKind>` / `Out<TKind>` (`public sealed class FooTargetAttribute : Out<RestrictsAttribute>`), apply it to a partial interface deriving from `IRecordId` (`[FooTarget] public partial interface IFooTarget : IRecordId`), and enrol each participating `[Table]` via a per-table partial (`partial interface IConstraintRecordId : IFooTarget`). The variant then types the endpoint as the union interface (`[Out] partial IFooTarget Target { get; set; }`). One variant covers every union member — no per-target duplication. The hydration dispatcher's `(in.tb, out.tb)` switch Cartesian-expands over union members; the schema's `FROM` / `TO` clause expands too. Diagnostics: CG031 (kind mismatch — union pinned to one kind applied to a variant of another), CG032 (dead union — interface attributed but no per-table marker enrols any table).
 - **Shared-shape relation interfaces (preview.55).** When several relation kinds share the same `(Source, Target, payload)` shape, declare a `partial interface I... : IRelationVariant` capturing it and add it to each variant's base list. The generator emits a static factory onto the interface: `static I Create<TKind>(Action<I> init) where TKind : IRelationKind`, dispatching on `typeof(TKind)` to instantiate the right concrete variant. Construction goes from a hand-maintained switch to one expression: `var edge = IMyContract.Create<Calls>(e => { e.Source = s; e.Target = t; … })`. Polymorphic queries across the contributing kinds are deliberately NOT generated — per-kind dispatch on the read side remains a user concern (the limit is intentional; kinds remain distinct edge tables). Diagnostics: CG033 (interface must be partial), CG035 (no implementing variants — dead interface).
+- **Annotated shared-shape lift (preview.56).** When the shared-shape interface itself carries `[In]` / `[Out]` / `[Property]` / `[Id]` on its members, variants with an empty body (`[Calls] partial class CallsRelation : IMyContract;`) collapse the per-variant `[In]/[Out]/[Property] partial T Source/Target/Payload { get; set; }` boilerplate. The linker copies the interface's annotated shape into any variant whose own annotated members are empty; the variant emit picks up the lifted props as full (non-partial) auto-property declarations on the variant class, which satisfy the interface contract via partial-class declaration merging. Variants that declare their own attributed partial members keep precedence — the lift only fills null endpoints. Multiple annotated shared-shape interfaces on one variant make the lift ambiguous; the variant is dropped silently (same fail-soft contract as the existing missing-In/Out path). Unannotated shared-shape interfaces (the preview.55 default) leave the lift inert — empty-body variants under them produce no emit.
 - **Union interfaces** — emitted automatically per relation kind whose target/source set has 2+ members. Naming: target side uses the inverse attribute name (`I{InverseName}` → `IRestrictedBy`); source side uses the singularised forward attribute name (`I{Singularize(ForwardName)}` → `IRestrict`). Each entity union has a parallel id-side union (`I{InverseName}Id` → `IRestrictedById`).
 - The `{Name}Id.Value` is a `string`, validated to be either a Ulid stringification (auto-minted by `New()`) or a short lower_snake_case slug (≤32 chars). Use the slug form sparingly — for stable-named records (singletons, config rows). Anything else should be a Ulid.
 
@@ -171,6 +172,43 @@ The Sample project's classes (`Design`, `Constraint`, `Epic`, `Feature`, `UserSt
 ## Engineering log
 
 Newest first. One or two lines per preview. "Substantive" means architecture / behaviour / new public surface; polish (renames, doc edits, formatting) is omitted.
+
+### preview.56 — annotated shared-shape lift onto empty-body variants (DONE 2026-05-12)
+
+The shared-shape interface introduced in preview.55 now doubles as the source of `[In]` / `[Out]` / `[Property]` / `[Id]` model attributes. When the user puts model annotations on the interface members, any variant whose body collapses to `;` inherits the shape from the interface — saving 3–4 lines of per-variant boilerplate. preview.55's behaviour is fully preserved: variants that self-declare attributed `partial` members continue to drive their own emit, and unannotated shared-shape interfaces stay inert.
+
+```csharp
+public partial interface ICodeSymbolInheritsRelation : IRelationVariant {
+    [In]       CodeSymbolId Source { get; set; }
+    [Out]      CodeSymbolId Target { get; set; }
+    [Property] string Confidence { get; set; }
+}
+
+// preview.55 (still works):
+[Inherits] public partial class A : ICodeSymbolInheritsRelation {
+    [In]       public partial CodeSymbolId Source { get; set; }
+    [Out]      public partial CodeSymbolId Target { get; set; }
+    [Property] public partial string Confidence { get; set; }
+}
+
+// preview.56 — collapsed:
+[Inherits] public partial class B : ICodeSymbolInheritsRelation;
+```
+
+Pipeline changes:
+- `SharedShapeInterfaceCandidate` gains `LiftedIn` / `LiftedOut` / `LiftedId` / `LiftedPayload` fields. `SharedShapeExtractor.TryExtract` walks the interface's `IPropertySymbol` members through `RelationVariantExtractor.ResolveRole` / `BuildProperty` (now `internal static` so both extractors share the same classification + shape).
+- `RelationVariantModel.In` / `Out` go nullable. `RelationVariantExtractor` no longer returns null when a variant declares zero own annotated members; it produces a placeholder model with null endpoints awaiting an interface lift. Half-populated variants (some `[In]` but no `[Out]`) still return null — the malformed-input fail-soft is unchanged.
+- `RelationLinker.LiftVariantsFromSharedShape` runs after the per-variant rewrite. For each variant with null endpoints, it finds matching annotated shared-shape candidates from the variant's `ImplementedInterfaceFullNames`; exactly one match wins and contributes In/Out/Id/Payload, multiple matches drop the variant (ambiguity), zero matches drop it (no source). The lifted props go through the same `RewriteType` as table-rewritten props so `IsTableType` is correctly populated.
+- `RelationVariantEmitter` and `SchemaEmitter` defensively skip variants whose endpoints remain null (should never happen post-linker; defensive guards keep tests bypassing the linker safe). All four property-emit paths (entity-typed, typed-id, union-endpoint, payload) emit `partial T Name` only when `IsPartial=true` on the property model. Lifted-from-interface props carry `IsPartial=false` (interface members aren't `partial`), so the generator emits full auto-property declarations on the variant class.
+
+What stayed:
+- preview.55 self-describing shape — variants can still declare their own attributed partial members; the lift only ever fills *null* endpoints.
+- `IRelationVariant` marker, `Create<TKind>` factory emit, CG033 (interface must be partial), CG035 (no implementing variants).
+- Polymorphic query surface across kinds is still NOT generated; per-kind dispatch on the read side remains a user concern.
+
+Sample: `src/Disruptor.Surface.Sample/Spike/InheritsRelation.cs` declares an annotated `ICodeSymbolInheritsRelation` and a single empty-body `[Inherits] partial class CodeSymbolInheritsCodeSymbol : ICodeSymbolInheritsRelation;`. The emitted `.RelationVariant.g.cs` carries full IEntity scaffolding (Hydrate, SaveAsync, EnumerateReferences) and full property declarations — no partial keyword in sight. Schema picks up the lifted payload (`DEFINE FIELD confidence ON inherits TYPE string`) and FROM/TO endpoints (`FROM code_symbols TO code_symbols ENFORCED`).
+
+Tests: **280/280 green** (274 prior + 6 net new). New coverage: empty-body variant compiles + round-trips via reflection; emitted props don't carry the `partial` keyword; schema picks up lifted payload/endpoints; own annotated members win over the interface; unannotated interface leaves empty-body variant inert; multiple annotated interfaces on one variant drop it (ambiguity).
 
 ### preview.55 — shared-shape relation interfaces with kind-keyed Create&lt;TKind&gt; factory (DONE 2026-05-12)
 

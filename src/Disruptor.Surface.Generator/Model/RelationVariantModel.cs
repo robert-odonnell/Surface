@@ -39,8 +39,8 @@ public enum RelationVariantPropertyRole
 /// <param name="Namespace">Namespace, or empty string for global namespace.</param>
 /// <param name="Name">Short type name.</param>
 /// <param name="KindAttributeFqn">FQN of the relation attribute applied (e.g. <c>Disruptor.Surface.Sample.Relations.RestrictsAttribute</c>).</param>
-/// <param name="In">Snapshot of the <c>[In]</c>-annotated property. Exactly one per variant.</param>
-/// <param name="Out">Snapshot of the <c>[Out]</c>-annotated property. Exactly one per variant.</param>
+/// <param name="In">Snapshot of the <c>[In]</c>-annotated property. <c>null</c> at extraction time when the variant carries zero own annotated members and is awaiting an interface lift (preview.56); the linker fills this in from a matching annotated shared-shape interface candidate before emit, and the emitter drops any variant where <see cref="In"/> stays null.</param>
+/// <param name="Out">Snapshot of the <c>[Out]</c>-annotated property. Same lift semantics as <see cref="In"/>.</param>
 /// <param name="Id">Optional <c>[Id]</c>-annotated property. <c>null</c> when absent (generator emits the internal id anchor either way).</param>
 /// <param name="PayloadProperties">Zero or more <c>[Property]</c>-annotated members carrying edge payload.</param>
 /// <param name="IsPartial">Whether the class itself is declared <c>partial</c> (required to receive emitted IEntity members).</param>
@@ -51,8 +51,8 @@ public sealed record RelationVariantModel(
     string Namespace,
     string Name,
     string KindAttributeFqn,
-    RelationVariantPropertyModel In,
-    RelationVariantPropertyModel Out,
+    RelationVariantPropertyModel? In,
+    RelationVariantPropertyModel? Out,
     RelationVariantPropertyModel? Id,
     EquatableArray<RelationVariantPropertyModel> PayloadProperties,
     bool IsPartial,

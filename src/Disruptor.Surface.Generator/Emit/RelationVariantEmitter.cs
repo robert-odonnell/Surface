@@ -84,6 +84,16 @@ internal static class RelationVariantEmitter
                     continue;
                 }
 
+                // RelationLinker guarantees lifted In/Out for every variant in the final
+                // RelationVariants list (preview.56). Anything still null here means the
+                // linker dropped its lift attempt — emit nothing rather than NRE'ing into
+                // EmitVariant. The user gets no diagnostic in this defensive path; the
+                // earlier malformed-variant contract was already silent-fail.
+                if (variant.In is null || variant.Out is null)
+                {
+                    continue;
+                }
+
                 // CG031 — union endpoint's TKind binding must match the variant's kind.
                 // The check is per-endpoint: each [In]/[Out] property typed to a union
                 // interface carries an implicit kind via the In<TKind>/Out<TKind> base
@@ -316,8 +326,9 @@ internal static class RelationVariantEmitter
 
                 // Endpoint + payload properties — backing fields + property bodies. [In] / [Out]
                 // are required endpoints (one each); [Property] members carry the typed payload.
-                EmitEndpointProperty(writer, variant.In, typedIdNamespaces, unionLookup);
-                EmitEndpointProperty(writer, variant.Out, typedIdNamespaces, unionLookup);
+                // The earlier null-guard in Emit guarantees both are populated here.
+                EmitEndpointProperty(writer, variant.In!, typedIdNamespaces, unionLookup);
+                EmitEndpointProperty(writer, variant.Out!, typedIdNamespaces, unionLookup);
 
                 foreach (var p in variant.PayloadProperties)
                 {
@@ -400,6 +411,12 @@ internal static class RelationVariantEmitter
         var nullable = p.Type.IsNullable;
         var backing = $"_{ToCamel(p.Name)}";
         var union = ResolveUnionEndpoint(p, unionLookup);
+        // preview.56 — properties lifted from a shared-shape interface aren't declared
+        // on the variant by the user (the variant body collapsed to `;`), so they can't
+        // be `partial`. Drop the `partial` keyword in that case; the emitted property
+        // satisfies the interface contract via partial-class declaration merging. Self-
+        // declared variant props keep `partial` as before.
+        var partialKw = p.IsPartial ? "partial " : "";
 
         if (union is not null)
         {
@@ -417,11 +434,11 @@ internal static class RelationVariantEmitter
 
             if (!p.HasSetter && !p.HasInitOnlySetter)
             {
-                writer.Line($"{access} partial {declared} {p.Name} => {backing};");
+                writer.Line($"{access} {partialKw}{declared} {p.Name} => {backing};");
                 return;
             }
 
-            writer.Line($"{access} partial {declared} {p.Name}");
+            writer.Line($"{access} {partialKw}{declared} {p.Name}");
             using (writer.BracedBlock())
             {
                 writer.Line($"get => {backing};");
@@ -441,7 +458,7 @@ internal static class RelationVariantEmitter
 
             writer.Line($"private {typeArg}? {backing};");
             writer.Line($"private global::Disruptor.Surface.Runtime.RecordId? {idBacking};");
-            writer.Line($"{access} partial {declared} {p.Name}");
+            writer.Line($"{access} {partialKw}{declared} {p.Name}");
             using (writer.BracedBlock())
             {
 
@@ -481,11 +498,11 @@ internal static class RelationVariantEmitter
 
             if (!p.HasSetter && !p.HasInitOnlySetter)
             {
-                writer.Line($"{access} partial {declared} {p.Name} => {backing};");
+                writer.Line($"{access} {partialKw}{declared} {p.Name} => {backing};");
                 return;
             }
 
-            writer.Line($"{access} partial {declared} {p.Name}");
+            writer.Line($"{access} {partialKw}{declared} {p.Name}");
             using (writer.BracedBlock())
             {
                 writer.Line($"get => {backing};");
@@ -525,8 +542,8 @@ internal static class RelationVariantEmitter
             // Session.Get on read); typed-id endpoints wrap into the typed id struct;
             // union endpoints switch on the loaded row's table.
             var tablesByFullName = graph.BuildTableIndex();
-            EmitHydrateEndpoint(writer, variant.In, fieldName: "in", typedIdNamespaces, unionLookup, tablesByFullName);
-            EmitHydrateEndpoint(writer, variant.Out, fieldName: "out", typedIdNamespaces, unionLookup, tablesByFullName);
+            EmitHydrateEndpoint(writer, variant.In!, fieldName: "in", typedIdNamespaces, unionLookup, tablesByFullName);
+            EmitHydrateEndpoint(writer, variant.Out!, fieldName: "out", typedIdNamespaces, unionLookup, tablesByFullName);
 
             // [Property] payload members: same scalar-read shape as PartialEmitter.
             foreach (var p in variant.PayloadProperties)
@@ -648,8 +665,8 @@ internal static class RelationVariantEmitter
     {
         using (writer.Block($"global::System.Collections.Generic.IEnumerable<(string FieldName, global::Disruptor.Surface.Runtime.RecordId? Target)> {Namespaces.EntityInterface}.EnumerateReferences()"))
         {
-            EmitEnumerateReferenceEntry(writer, variant.In, fieldName: "in", unionLookup);
-            EmitEnumerateReferenceEntry(writer, variant.Out, fieldName: "out", unionLookup);
+            EmitEnumerateReferenceEntry(writer, variant.In!, fieldName: "in", unionLookup);
+            EmitEnumerateReferenceEntry(writer, variant.Out!, fieldName: "out", unionLookup);
         }
     }
 
@@ -700,7 +717,7 @@ internal static class RelationVariantEmitter
         CodeWriter writer, RelationVariantModel variant,
         IReadOnlyDictionary<string, UnionEndpointModel> unionLookup)
     {
-        var hasNullableEndpoint = variant.In.Type.IsNullable || variant.Out.Type.IsNullable;
+        var hasNullableEndpoint = variant.In!.Type.IsNullable || variant.Out!.Type.IsNullable;
 
         using (writer.Block($"void {Namespaces.EntityInterface}.SetReferenceTo(string fieldName, global::Disruptor.Surface.Runtime.RecordId? value)"))
         {
@@ -711,8 +728,8 @@ internal static class RelationVariantEmitter
 
             using (writer.Switch("fieldName"))
             {
-                EmitSetReferenceCase(writer, variant.In, fieldName: "in", unionLookup);
-                EmitSetReferenceCase(writer, variant.Out, fieldName: "out", unionLookup);
+                EmitSetReferenceCase(writer, variant.In!, fieldName: "in", unionLookup);
+                EmitSetReferenceCase(writer, variant.Out!, fieldName: "out", unionLookup);
             }
         }
     }
@@ -795,7 +812,7 @@ internal static class RelationVariantEmitter
             // Typed-id endpoints and union endpoints skip this — caller is expected to
             // have created the foreign entity in a separate session/aggregate (the union
             // case is foreign by construction since the type isn't a specific entity).
-            foreach (var endpoint in new[] { variant.In, variant.Out })
+            foreach (var endpoint in new[] { variant.In!, variant.Out! })
             {
                 if (!endpoint.Type.IsTableType)
                 {
@@ -813,8 +830,8 @@ internal static class RelationVariantEmitter
                 }
             }
 
-            var inEndpointId = EmitEndpointIdResolution(writer, variant.In, unionLookup);
-            var outEndpointId = EmitEndpointIdResolution(writer, variant.Out, unionLookup);
+            var inEndpointId = EmitEndpointIdResolution(writer, variant.In!, unionLookup);
+            var outEndpointId = EmitEndpointIdResolution(writer, variant.Out!, unionLookup);
 
             // Build the wire content: id + in + out + payload fields.
             writer.Line("var __content = new global::Disruptor.Surreal.Values.SurrealObject");
@@ -822,8 +839,8 @@ internal static class RelationVariantEmitter
             using (writer.Indent())
             {
                 writer.Line("[\"id\"] = new global::Disruptor.Surreal.Values.SurrealRecordIdValue(global::Disruptor.Surface.Runtime.RecordIdSdkBridge.ToSdk(__id)),");
-                EmitContentEndpoint(writer, variant.In, "in", inEndpointId, unionLookup);
-                EmitContentEndpoint(writer, variant.Out, "out", outEndpointId, unionLookup);
+                EmitContentEndpoint(writer, variant.In!, "in", inEndpointId, unionLookup);
+                EmitContentEndpoint(writer, variant.Out!, "out", outEndpointId, unionLookup);
             }
             writer.Line("};");
 
@@ -968,6 +985,10 @@ internal static class RelationVariantEmitter
         var type = p.Type.FullyQualifiedName;
         var access = FormatAccessibility(p.DeclaredAccessibility);
         var backing = $"_{ToCamel(p.Name)}";
+        // Same partial-keyword rule as endpoints: lifted-from-interface payload props
+        // emit as full property declarations (interface members aren't `partial`), self-
+        // declared variant props emit as partial completions of the user's stub.
+        var partialKw = p.IsPartial ? "partial " : "";
 
         writer.Line("#pragma warning disable CS0649");
         writer.Line($"private {type} {backing} = default!;");
@@ -975,11 +996,11 @@ internal static class RelationVariantEmitter
 
         if (!p.HasSetter && !p.HasInitOnlySetter)
         {
-            writer.Line($"{access} partial {type} {p.Name} => {backing};");
+            writer.Line($"{access} {partialKw}{type} {p.Name} => {backing};");
             return;
         }
 
-        writer.Line($"{access} partial {type} {p.Name}");
+        writer.Line($"{access} {partialKw}{type} {p.Name}");
         using (writer.BracedBlock())
         {
             writer.Line($"get => {backing};");
@@ -1075,6 +1096,13 @@ internal static class RelationVariantEmitter
         var pairs = new List<(string InTable, string OutTable, RelationVariantModel Variant)>();
         foreach (var variant in variants)
         {
+            // The dispatcher only runs on variants that have made it through the linker's
+            // lift pass — both endpoints are guaranteed populated. Defensive skip if a
+            // half-populated variant slips through (e.g. tests bypassing the linker).
+            if (variant.In is null || variant.Out is null)
+            {
+                continue;
+            }
             var inTables = ResolveEndpointTableNames(variant.In, unionLookup, tablesByFullName);
             var outTables = ResolveEndpointTableNames(variant.Out, unionLookup, tablesByFullName);
             foreach (var inTable in inTables)
