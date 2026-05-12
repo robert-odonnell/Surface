@@ -19,15 +19,29 @@ internal static class IdEmitter
     public static void Emit(SourceProductionContext spc, TableModel table, ModelGraph graph)
     {
         var idTypeName = $"{table.Name}Id";
+        var perTableMarkerName = $"I{table.Name}RecordId";
+        var perTableMarkerFqn = string.IsNullOrEmpty(table.Namespace)
+            ? $"global::{perTableMarkerName}"
+            : $"global::{table.Namespace}.{perTableMarkerName}";
 
         // Id-side union interfaces (one per multi-member union this table is in).
         // Mirrors PartialEmitter's entity-side base list — IRestrictedById alongside IRestrictedBy.
+        // The per-table marker (I{Name}RecordId) is appended unconditionally — it's the
+        // opt-in surface for record-type-union endpoints: a user wanting `[Foo] partial
+        // interface IFooTarget : IRecordId` extends `partial interface I{Name}RecordId :
+        // IFooTarget` to enrol this table in the union.
         var idUnions = graph.UnionsForTable(table.FullName)
-            .Select(u => $"global::{u.IdInterfaceFullName}");
+            .Select(u => $"global::{u.IdInterfaceFullName}")
+            .Append(perTableMarkerFqn);
 
         var writer = new CodeWriter().Header();
         using (writer.Namespace(table.Namespace))
         {
+            // Per-table id-side marker interface — emitted unconditionally as the union
+            // opt-in surface. Generator-emitted "primary" partial keeps the type
+            // bindable from user partials that add union-interface bases.
+            writer.Line($"public partial interface {perTableMarkerName} : {Namespaces.IRecordIdType} {{ }}");
+            writer.Line("");
             WriteIdType(writer, idTypeName, SurrealNaming.ToTableName(table.Name), idUnions);
         }
 

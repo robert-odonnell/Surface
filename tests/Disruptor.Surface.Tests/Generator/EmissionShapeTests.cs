@@ -49,6 +49,25 @@ public sealed class EmissionShapeTests
     }
 
     [Fact]
+    public void Emits_PerTableIdSideMarker_AlongsideTypedIdStruct()
+    {
+        // Per-table I{Name}RecordId interface is emitted alongside each {Name}Id struct
+        // as the opt-in surface for record-type-union endpoints. The user extends it via
+        // `partial interface I{Name}RecordId : IFooTarget { }` to enrol the table in a
+        // union declared elsewhere. The struct includes the marker in its base list so
+        // every typed id transitively satisfies any union it's enrolled in.
+        var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);
+        var allSrc = GeneratorHarness.AllGeneratedSource(result);
+
+        Assert.Contains("public partial interface IDesignRecordId : global::Disruptor.Surface.Runtime.IRecordId { }", allSrc);
+        Assert.Contains("public partial interface IConstraintRecordId : global::Disruptor.Surface.Runtime.IRecordId { }", allSrc);
+        // Struct base list includes the per-table marker (FQN'd since IdEmitter mixes
+        // it with the per-kind id-side markers which always come fully qualified).
+        Assert.Contains("global::M.IDesignRecordId", allSrc);
+        Assert.Contains("global::M.IConstraintRecordId", allSrc);
+    }
+
+    [Fact]
     public void Emits_RelationKindMarker_PerForwardKind_WithEdgeName()
     {
         var (result, _, _, _) = GeneratorHarness.Run(MinimalModel);

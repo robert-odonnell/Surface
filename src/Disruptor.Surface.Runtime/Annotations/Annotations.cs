@@ -72,9 +72,12 @@ public abstract class InverseRelation<TForward> : RelationAttribute where TForwa
 
 /// <summary>
 /// On a relation class's property: marks the source ("in") endpoint of the edge.
-/// Property type is the source entity (<c>Constraint</c>) for within-aggregate or the
-/// typed id (<c>ConstraintId</c>) when the source lives in a foreign aggregate; the
-/// generator picks the read-side resolution based on which form was declared.
+/// Property type is the source entity (<c>Constraint</c>) for within-aggregate, the
+/// typed id (<c>ConstraintId</c>) when the source lives in a foreign aggregate, or
+/// a union interface (<c>IFooSource</c> deriving from <c>IRecordId</c> and attributed
+/// with an <see cref="In{TKind}"/>-derived attribute) when the endpoint can point at
+/// any of several tables; the generator picks the read-side resolution based on
+/// which form was declared.
 /// </summary>
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class InAttribute : Attribute;
@@ -82,7 +85,29 @@ public sealed class InAttribute : Attribute;
 /// <summary>
 /// On a relation class's property: marks the target ("out") endpoint of the edge.
 /// Property type rules mirror <see cref="InAttribute"/> — entity for in-aggregate,
-/// typed id for foreign-aggregate.
+/// typed id for foreign-aggregate, union interface for record-type unions.
 /// </summary>
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class OutAttribute : Attribute;
+
+/// <summary>
+/// Abstract base for user-declared attributes that mark a record-type-union interface
+/// usable as the source ("in") side of a relation variant. Derive directly:
+/// <c>public sealed class FooSourceAttribute : In&lt;RestrictsAttribute&gt;;</c>. Apply
+/// the resulting attribute to a partial interface that derives from <c>IRecordId</c>:
+/// <c>[FooSource] public partial interface IFooSource : IRecordId { }</c>. Each
+/// <c>[Table]</c> participating in the union opts in by extending its per-table
+/// id-side marker: <c>partial interface IConstraintRecordId : IFooSource { }</c>.
+/// Variants then type the endpoint property as the union interface
+/// (<c>[In] partial IFooSource Source { get; set; }</c>), accepting any participating
+/// table's typed id. The type parameter pins the union to a specific relation kind so
+/// applying it to the wrong kind is a compile-time error.
+/// </summary>
+public abstract class In<TKind> : Attribute where TKind : ForwardRelation;
+
+/// <summary>
+/// Abstract base for user-declared attributes that mark a record-type-union interface
+/// usable as the target ("out") side of a relation variant. Mirrors <see cref="In{TKind}"/>
+/// for the outgoing side; see that type for the full declaration pattern.
+/// </summary>
+public abstract class Out<TKind> : Attribute where TKind : ForwardRelation;
