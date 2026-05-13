@@ -58,7 +58,7 @@ Runtime types referenced throughout this doc (`IEntity`, `IRecordId`, `IRelation
 | Relation variants | `CreateSyntaxProvider` over class-with-attribute-list | `RelationVariantModel` (one per `[Restricts]`/`[Calls]`/… on a class) | `RelationVariantExtractor` |
 | Union-interface candidates | `CreateSyntaxProvider` over interface-with-attribute-list | `UnionInterfaceCandidate` — interfaces attributed with anything deriving from `In<TKind>` / `Out<TKind>` | `UnionEndpointExtractor` |
 | Union-membership candidates | `CreateSyntaxProvider` over per-table marker interfaces with non-empty base lists | `UnionMembershipCandidate` — the user's `partial interface I{Name}RecordId : IFooTarget` opt-ins | `UnionEndpointExtractor` |
-| Shared-shape candidates | `CreateSyntaxProvider` over interface-with-base-list | `SharedShapeInterfaceCandidate` — partial interfaces deriving from `IRelationVariant` | `SharedShapeExtractor` |
+| Shared-shape candidates | `CreateSyntaxProvider` over interface-with-base-list | `SharedShapeInterfaceCandidate` — partial interfaces deriving from `IRelationVariant`, plus `Lifted{In,Out,Id,Payload}` lifted from `[In]/[Out]/[Property]/[Id]` on the interface members and (preview.57) every reachable base interface | `SharedShapeExtractor` |
 
 The streams' predicates are syntax-only so the incremental cache keys hash cheaply; the transforms then use the semantic model. Each transform is `static` (no captures) and returns either a value record or `null` (filtered out by `.Where`).
 
@@ -67,16 +67,17 @@ The streams' predicates are syntax-only so the incremental cache keys hash cheap
 1. **Rewrites `TypeRef`s** so `TypeRef.IsTableType` is true for every type that turned out to be a `[Table]` after the full table set is known. Per-symbol extractors can't see this; they seed `IsTableType` from immediately-visible attributes and the linker patches up forward references.
 2. **Computes per-kind union sets** (`Unions`) — the source-side and target-side `[Table]` members for each forward kind. 2+ members → a marker interface emitted by `UnionInterfaceEmitter` (with both an entity-side and an id-side variant).
 3. **Computes union endpoints** (`UnionEndpoints`) — stitches the union-interface candidates and per-table membership opt-ins into `UnionEndpointModel`s keyed by interface FQN.
-4. **Computes shared-shape models** (`SharedShapes`) — for each candidate interface, lists every variant whose `ImplementedInterfaceFullNames` includes it.
-5. **Computes aggregates and aggregate conflicts** (CG011) by walking `[Children]` from each `[AggregateRoot]`.
-6. **Detects cascade-only reference cycles** (CG014) on the `[Reference, Cascade]` subgraph.
+4. **Lifts variant shapes from annotated shared-shape interfaces** (`LiftVariantsFromSharedShape`, preview.56/.57) — each variant's `In/Out/Id/Payload` is merged with every annotated shared-shape candidate it implements (transitive base closure, sorted by FQN). Local self-declared members win for overlapping roles; non-overlapping interface contributions accumulate; hard conflicts (incompatible `Role + Name + Type + IsNullable` for the same property) drop the variant silently.
+5. **Computes shared-shape models** (`SharedShapes`) — for each candidate interface, lists every variant whose `ImplementedInterfaceFullNames` includes it.
+6. **Computes aggregates and aggregate conflicts** (CG011) by walking `[Children]` from each `[AggregateRoot]`.
+7. **Detects cascade-only reference cycles** (CG014) on the `[Reference, Cascade]` subgraph.
 
 The output is a `ModelGraph` record (see [Model graph shape](#model-graph-shape) below).
 
 **Diagnostics fire from three layers.** The split matters when you're adding a new one:
 
 - **Inside an extractor.** Cheap structural checks that don't need cross-table information (e.g. "is this property partial?"). Rare; most extractors stay pure and let the linker decide.
-- **Inside `RelationLinker`.** Cross-table checks that need the full model — currently used for CG014 (cascade-only cycles) and the aggregate-conflict computation feeding CG011.
+- **Inside `RelationLinker`.** Cross-table checks that need the full model — currently used for CG014 (cascade-only cycles) and the aggregate-conflict computation feeding CG011. The shared-shape lift conflict path (preview.57) also lives here but currently fail-soft drops without a CGxxx; a `CG036` ("shared-shape lift conflict") is the planned follow-up — if you're adding it, thread conflict descriptors out of `TryMergeLift` / `TryMergeSingular` into a new `ModelGraph` array (mirroring `AggregateConflicts` / `CascadeCycles`) and have `ModelGenerator.Emit` walk it.
 - **Inside `ModelGenerator.Emit`.** Everything else. The bulk of the per-table validation (CG001, CG008, CG022, CG024–CG028) lives here in long sequential loops; cross-aggregate reference checks (CG021), composition-root presence (CG018/CG019), and per-aggregate parent-reachability (CG020) also fire here. Shared-shape diagnostics (CG033, CG035) fire late, after `SharedShapeEmitter` has run.
 
 Most contributors adding a diagnostic want the `ModelGenerator.Emit` layer — the model is fully linked, the source-production-context is in hand, and the convention is established. Add a descriptor in `Pipeline/Diagnostics.cs` and a `spc.ReportDiagnostic(...)` call at the appropriate loop body.
@@ -88,7 +89,7 @@ Main emitter responsibilities:
 | `IdEmitter` | `{Table}Id` typed record structs implementing `IRecordId`, plus the per-table `I{Name}RecordId` marker interface alongside (the surface user partials extend to enrol a table in a union endpoint). |
 | `PartialEmitter` | Entity partial implementations: pure-backing-field property setters, session binding, hydration (`Hydrate(SurrealValue, IHydrationSink)` writes directly into backing fields), `SaveAsync(ISaveContext, ct)` dispatch, `GetParentId()`, delete hooks, and slice-guard read paths. |
 | `RelationKindEmitter` | `IRelationKind` marker class per forward relation attribute, plus the per-kind `{KindName}Id` typed-id struct (e.g. `RestrictsId`) shared across every variant of the kind. For multi-variant kinds, also emits the per-kind variant marker interface `I{KindName}Variant`. |
-| `RelationVariantEmitter` | `IEntity` partial implementation per relation variant class (`[Restricts] partial class ConstraintRestrictsUserStory`): `IRelationVariant` marker, `[In]`/`[Out]` setter dispatch, `IEntity.SaveAsync` body that issues `INSERT RELATION INTO {edge} $_content [ON DUPLICATE KEY UPDATE …]`, and per-kind `{KindName}Hydration.HydrateVariant(SurrealValue, IHydrationSink)` dispatcher (single-variant gets one too for call-site uniformity; multi-variant branches on `(in.tb, out.tb)`; union endpoints Cartesian-expand across member tables). |
+| `RelationVariantEmitter` | `IEntity` partial implementation per relation variant class (`[Restricts] partial class ConstraintRestrictsUserStory`): `IRelationVariant` marker, `[In]`/`[Out]` setter dispatch, `IEntity.SaveAsync` body that issues `INSERT RELATION INTO {edge} $_content [ON DUPLICATE KEY UPDATE …]`, and per-kind `{KindName}Hydration.HydrateVariant(SurrealValue, IHydrationSink)` dispatcher (single-variant gets one too for call-site uniformity; multi-variant branches on `(in.tb, out.tb)`; union endpoints Cartesian-expand across member tables). Property emission gates on `RelationVariantPropertyModel.IsPartial`: self-declared variant props emit `partial T Name`, lifted-from-interface props emit full auto-property declarations satisfying the interface contract via partial-class declaration merging (preview.56+). |
 | `UnionInterfaceEmitter` | Auto-emitted shared interfaces for relation target/source unions when one relation kind can point at multiple table types (2+ members). Emits BOTH the entity-side marker (`IRestrictedBy`) AND the id-side marker (`IRestrictedById`). Distinct from *user-declared* union-endpoint interfaces (those interfaces are user-owned; the generator stitches per-table opt-ins onto them via `UnionEndpoints` in `ModelGraph`). |
 | `SharedShapeEmitter` | Partial fragment per user-declared `partial interface I... : IRelationVariant` carrying a `static {I} Create<TKind>(Action<{I}> init) where TKind : IRelationKind` factory. Body is an if-chain dispatching on `typeof(TKind)` to instantiate the matching variant. |
 | `AggregateLoaderEmitter` | Internal loader per aggregate root, with two `PopulateAsync` overloads (Surreal db / Transaction tx). |
@@ -126,7 +127,7 @@ The fully-linked output of `RelationLinker.Build` is a `ModelGraph` record with 
 | `RelationVariants` | One per `[Restricts]`-on-class (etc.) — the variants that drive edge emission. |
 | `Unions` | Auto-computed source/target unions per forward kind with 2+ members. Feeds `UnionInterfaceEmitter`. |
 | `UnionEndpoints` | User-declared union-endpoint interfaces, each with its member table list. |
-| `SharedShapes` | User-declared shared-shape interfaces, each with its implementing variants. |
+| `SharedShapes` | User-declared shared-shape interfaces, each with its implementing variants. (preview.56+: candidates also carry `Lifted{In,Out,Id,Payload}` extracted from interface members across the transitive base closure; `RelationLinker.LiftVariantsFromSharedShape` consumes these to fill in / merge variant shapes before `SharedShapes` is computed.) |
 | `Aggregates` | Per-`[AggregateRoot]` membership, computed by `[Children]` BFS from each root. |
 | `AggregateConflicts` | `"Member\|Root1,Root2,…"` strings for CG011 (member reachable from 2+ roots). |
 | `CascadeCycles` | Cycle path strings for CG014. |
@@ -479,7 +480,7 @@ The relation surface is the most complex. A new feature usually means touching:
 7. **Diagnostics** — usually two or three CGxxx codes catching common misuses.
 8. **A sample model + a runtime end-to-end test.**
 
-Preview.54 (union endpoints) and preview.55 (shared-shape interfaces) are the two recent end-to-end examples — read the corresponding entries in [`notes.md`](notes.md#engineering-log) for the full change set list.
+Preview.54 (union endpoints), preview.55 (shared-shape interfaces), and preview.56/.57 (annotated shared-shape lift + per-property merge) are recent end-to-end examples — read the corresponding entries in [`notes.md`](notes.md#engineering-log) for the full change set list. preview.56/.57 in particular shows the cross-extractor join pattern: per-symbol extractors stay self-contained, the linker performs the join (`LiftVariantsFromSharedShape`) so the incremental cache stays correct when either side's syntax changes.
 
 ## Extension Points for Consumers
 

@@ -769,41 +769,48 @@ Use the per-table id-side union marker (`IRestrictedById`, `IReferencedById`, �
 
 Diagnostics: **CG031** (kind mismatch — union pinned to one kind applied to a variant of a different kind), **CG032** (dead union — interface attributed but no per-table marker enrols any table; warning).
 
-### Shared-shape relation interfaces — kind-keyed `Create<TKind>` factory
+### Shared-shape relation interfaces — kind-keyed `Create<TKind>` factory + per-property merge
 
 When several relation kinds share the same endpoint+payload shape (think `Calls` / `References` / `Inherits` all of which connect `CodeSymbolId → CodeSymbolId` with a `Confidence` string), every variant ends up looking identical except for the kind attribute. Construction call sites devolve into a `switch` over the kind type.
 
-Preview.55 lets you declare a partial interface deriving from `IRelationVariant` over the shared shape. The generator detects it and grafts a static `Create<TKind>` factory:
+Preview.55 lets you declare a partial interface deriving from `IRelationVariant` over the shared shape. The generator grafts a static `Create<TKind>` factory onto it. Preview.56/.57 then extended the same interface to also carry model attributes — variants that opt in via base list inherit shape too, with the linker merging contributions across the variant's annotated-interface closure.
+
+#### The contract interface
 
 ```csharp
-// 1. Declare the shape contract. Must be partial so the generator can emit the static factory.
+// Must be partial so the generator can graft the static Create<TKind> factory.
+// Members are the canonical shape every implementing variant must satisfy.
 public partial interface ICodeSymbolEdge : IRelationVariant
 {
-    CodeSymbolId Source { get; set; }
-    CodeSymbolId Target { get; set; }
-    string Confidence { get; set; }
+    [In]       CodeSymbolId Source { get; set; }
+    [Out]      CodeSymbolId Target { get; set; }
+    [Property] string Confidence { get; set; }
 }
+```
 
-// 2. Each participating variant lists the interface in its base list. The partial
-//    properties the generator emits ([In] / [Out] / [Property]) just satisfy the
-//    interface — no extra ceremony.
+The interface members can carry `[In]` / `[Out]` / `[Property]` / `[Id]` (preview.56+). Variants with an empty body (`: ICodeSymbolEdge;`) inherit the lifted shape; variants that self-declare attributed `partial` members win for any role they declare. Both shapes coexist:
+
+```csharp
+// Self-describing variant (preview.55 shape — still valid). Useful when one
+// variant needs a per-variant payload twist on top of the shared contract.
 [Calls]
 public partial class CallsRelation : ICodeSymbolEdge
 {
     [In]       public partial CodeSymbolId Source { get; set; }
     [Out]      public partial CodeSymbolId Target { get; set; }
     [Property] public partial string Confidence { get; set; }
+    [Property] public partial string Notes { get; set; }      // ← per-variant addition
 }
 
+// Empty-body variant (preview.56+) — inherits the full shape from the interface.
 [References]
-public partial class ReferencesRelation : ICodeSymbolEdge
-{
-    [In]       public partial CodeSymbolId Source { get; set; }
-    [Out]      public partial CodeSymbolId Target { get; set; }
-    [Property] public partial string Confidence { get; set; }
-}
+public partial class ReferencesRelation : ICodeSymbolEdge;
+```
 
-// 3. Call site — one expression, the kind picks the concrete variant.
+#### Call site — `Create<TKind>` factory
+
+```csharp
+// One expression — the kind picks the concrete variant.
 ICodeSymbolEdge edge = ICodeSymbolEdge.Create<Calls>(e =>
 {
     e.Source = caller;
@@ -823,7 +830,39 @@ public static partial I Create<TKind>(System.Action<I> init)
 
 The body is an if-chain dispatching on `typeof(TKind)` — `new CallsRelation()` for `Calls`, `new ReferencesRelation()` for `References`, etc. — runs the user's initialiser, then returns the instance. An unknown `TKind` throws `InvalidOperationException`.
 
-**Scope** (deliberately narrow): the shared-shape interface helps with *construction* only. Reads stay per-kind — relation kinds remain distinct edge tables, and querying still requires per-kind dispatch (`session.QueryVariantsOutgoingAsync<TVariant>` per kind, concatenate). The interface gives `IEnumerable<I>` uniform handling once you've collected variants from multiple per-kind queries, but the generator doesn't synthesise "all variants of these kinds" reads.
+#### Composition — split contracts across the interface chain
+
+Preview.57 walks the interface's transitive base closure when lifting attributes, so endpoint and payload shapes can live on separate interfaces and compose:
+
+```csharp
+// Payload contract (doesn't have to derive from IRelationVariant — the closure
+// walk picks up [Property] declarations from any reachable interface).
+public interface IEdgePayload
+{
+    [Property] string Confidence { get; set; }
+}
+
+// Endpoint contract derives from both the runtime marker and the payload base.
+public partial interface ICodeSymbolEdge : IEdgePayload, IRelationVariant
+{
+    [In]  CodeSymbolId Source { get; set; }
+    [Out] CodeSymbolId Target { get; set; }
+}
+
+// Variant body collapses to ';' — the merge composes Source + Target + Confidence.
+[Calls] public partial class CallsRelation : ICodeSymbolEdge;
+```
+
+#### Merge rules (preview.57)
+
+- Local self-declared `partial` members on the variant always win for the role they declare. The linker only fills overlapping roles when the variant's slot is null.
+- Non-overlapping interface contributions (e.g. one interface declares `[In]/[Out]`, a different one declares `[Property]`) accumulate.
+- Overlapping contributions must agree on `Role + Name + Type FQN + IsNullable`. Mismatches drop the variant silently — same fail-soft contract as malformed input. (A `CG036` diagnostic naming the conflicting interfaces is the natural follow-up; not yet shipped.)
+- Half-populated variants (variant declares `[In]` but no `[Out]`) pass through with one endpoint null for the linker to fill from an interface.
+
+#### Scope
+
+The shared-shape interface helps with *construction* and *shape declaration* only. Reads stay per-kind — relation kinds remain distinct edge tables, and querying still requires per-kind dispatch (`session.QueryVariantsOutgoingAsync<TVariant>` per kind, concatenate). The interface gives `IEnumerable<I>` uniform handling once you've collected variants from multiple per-kind queries, but the generator doesn't synthesise "all variants of these kinds" reads.
 
 Diagnostics: **CG033** (interface must be partial — the generator can't graft the static factory otherwise), **CG035** (no implementing variants — warning; the interface still works as a marker type, but the factory has nothing to dispatch to).
 

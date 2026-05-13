@@ -425,7 +425,7 @@ public partial class CodeSymbolCallsCodeSymbol
 
 - **Multiple variants per kind** — different `(source, target)` types under the same forward attribute. Schema flips to `SCHEMALESS`, hydration discriminates by `(in.tb, out.tb)`.
 - **Union endpoints** — one variant whose endpoint accepts any of N participating tables. See [api.md "Union endpoints"](api.md#union-endpoints--one-variant-for-multiple-target-tables).
-- **Shared-shape relation interfaces** — a `Create<TKind>` factory across kinds with the same payload shape. See [api.md "Shared-shape relation interfaces"](api.md#shared-shape-relation-interfaces--kind-keyed-createtkind-factory).
+- **Shared-shape relation interfaces** — a `Create<TKind>` factory across kinds with the same payload shape, plus per-property merge so empty-body variants (`[Calls] partial class CallsRelation : ICodeSymbolEdge;`) inherit shape from the interface contract. See [api.md "Shared-shape relation interfaces"](api.md#shared-shape-relation-interfaces--kind-keyed-createtkind-factory--per-property-merge).
 - **Async variant query terminals** — substrate-fresh reads via `session.QueryVariantsOutgoingAsync<TVariant>(...)` and friends, with the endpoint-resolution caveat. See [api.md "Runtime calls"](api.md#runtime-calls).
 
 ## 11. Run The Repository Sample
